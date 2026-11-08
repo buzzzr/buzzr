@@ -311,13 +311,18 @@ fn session(relay: &Relay) -> Session {
 fn the_sidebar_lists_the_channels_the_relay_serves_and_opens_the_first_one() {
     let Some(relay) = relay_or_skip("the_sidebar_lists_...") else { return };
     let s = session(&relay);
-    let names = sidebar(&s.screen());
+    // The relay serves the DMs as hidden rooms named "DM"; buzzr renames each after the other
+    // member, but only once the room's member list and those members' profiles have arrived — which
+    // is after the first screen. Wait for that, or the assertion below races the relabelling.
+    let screen = s.until("the three DMs to be named after the other member", |sc| {
+        sidebar(sc).iter().filter(|n| n.starts_with("✉ ")).count() == 3
+    });
+    let names = sidebar(&screen);
     for want in ["design", "dev", "general", "ops", "random"] {
         assert!(names.iter().any(|n| n == want), "the sidebar is missing {want:?}. It lists {names:?}");
     }
     assert_eq!(names.len(), 8, "five channels and three DMs. The sidebar lists {names:?}");
-    // The relay serves the DMs as hidden rooms named "DM"; buzzr names them after the other member.
-    assert!(names.iter().filter(|n| n.starts_with("✉ ")).count() == 3, "three DM rows: {names:?}");
+    assert!(!names.iter().any(|n| n == "DM"), "every DM row is named after a member: {names:?}");
     let h = header(&s.screen());
     assert!(h.contains("#design"), "the first channel opens by itself; the header is {h:?}");
     assert_eq!(bar_on(&s.screen()).as_deref(), Some("design"), "the cursor bar is on the open channel");
