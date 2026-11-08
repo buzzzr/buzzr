@@ -183,6 +183,9 @@ fn draw_messages(f: &mut Frame, app: &App, area: Rect) {
     }
     let selected = list::selected_index(layout, &app.state);
     let focused = app.focus == Focus::Messages;
+    // One column is reserved for the scrollbar, so the text pane is a column narrower than the area.
+    let text_area = Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height);
+    let pane_w = text_area.width as usize;
     let mut rows: Vec<Line> = Vec::with_capacity(view_h);
     for y in 0..view_h {
         match layout.at_line(app.state.scroll + y) {
@@ -196,13 +199,18 @@ fn draw_messages(f: &mut Frame, app: &App, area: Rect) {
                 }
                 let mut line = Line::from(spans);
                 if is_sel {
+                    // A ratatui `Line` only paints the cells its spans cover, so pad the row out first: the background then
+                    // runs from the left edge (over the gutter marker) to the right edge of the message pane.
+                    let used = line.width();
+                    if used < pane_w {
+                        line.spans.push(Span::raw(" ".repeat(pane_w - used)));
+                    }
                     line = line.style(Style::default().bg(crate::theme::get().sel_bg));
                 }
                 rows.push(line);
             }
         }
     }
-    let text_area = Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height);
     f.render_widget(Paragraph::new(rows), text_area);
     if layout.total > view_h {
         let mut sb = ScrollbarState::new(layout.max_scroll(view_h)).position(app.state.scroll);
@@ -620,6 +628,29 @@ mod tests {
         assert!(s.contains("(3)") && s.contains("3 unread"), "the unread count is written out, not only coloured\n{s}");
         assert!(s.contains("✕ offline, retrying (boom)"), "the connection state is a word, not only a colour\n{s}");
         assert!(s.contains("▌ #general"), "the selection is the bar glyph, not only a background\n{s}");
+    }
+
+    #[test]
+    fn the_selected_message_is_one_band_across_the_whole_pane() {
+        let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        let mut app = app();
+        app.focus = Focus::Messages;
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let sel = crate::theme::get().sel_bg;
+        // the message pane starts after the channel list; the last column is the scrollbar, not part of the band
+        let (x0, x1) = (app.areas.msgs.x, app.areas.msgs.x + app.areas.msgs.width - 1);
+        let buf = term.backend().buffer();
+        let mut bands = 0;
+        for y in 0..buf.area.height {
+            if !(x0..x1).any(|x| buf[(x, y)].bg == sel) {
+                continue;
+            }
+            bands += 1;
+            for x in x0..x1 {
+                assert_eq!(buf[(x, y)].bg, sel, "selected row {y} is not a full band: gap at x={x}");
+            }
+        }
+        assert!(bands > 0, "no row was drawn as selected");
     }
 
     #[test]
