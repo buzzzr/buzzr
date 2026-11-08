@@ -543,6 +543,20 @@ mod tests {
     }
 
     #[test]
+    fn state_is_never_colour_alone() {
+        // The colourless scheme leans on these: every state also has a glyph, a word or a number.
+        let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        let mut app = app();
+        app.handle(AppEvent::Unread { channel: "c2".into(), count: 3 });
+        app.conn = Conn::Down("boom".into());
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(s.contains("(3)") && s.contains("3 unread"), "the unread count is written out, not only coloured\n{s}");
+        assert!(s.contains("✕ offline, retrying (boom)"), "the connection state is a word, not only a colour\n{s}");
+        assert!(s.contains("▌ general"), "the selection is the bar glyph, not only a background\n{s}");
+    }
+
+    #[test]
     fn the_default_scheme_paints_its_background_everywhere_including_popups() {
         let th = crate::theme::get();
         let (bg, popup) = (th.bg.expect("default scheme paints a background"), th.popup_bg.expect("and a popup background"));

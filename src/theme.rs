@@ -1,9 +1,14 @@
 //! Colours. The default scheme, `buzz-dark`, uses the dark palette of the Buzz desktop app (`src/shared/design-system/styles/tokens.css`
 //! in the desktop app's repo: neutral ramp, citrus accent) and paints its own background.
 //!
-//! `BUZZR_THEME` picks another one: `buzz-light` is the desktop app's light palette, `dark` keeps the terminal's own background (and ANSI accents) and `light` is for a light
-//! background. Pure ANSI "dark grey" (bright black) is close to invisible on many dark themes, so secondary text uses an explicit
-//! mid-grey that stays readable on black and on dark grey.
+//! `BUZZR_THEME` picks another one: `buzz-light` is the desktop app's light palette, `high-contrast` is black-on-white picked for
+//! at least WCAG AAA (7:1) against its own backgrounds, `dark` keeps the terminal's own background (and ANSI accents) and `light`
+//! is for a light background. Pure ANSI "dark grey" (bright black) is close to invisible on many dark themes, so secondary text
+//! uses an explicit mid-grey that stays readable on black and on dark grey.
+//!
+//! Colour is never the only signal: the selection has its bar glyph, unread has its count, the connection state has its word. So
+//! when `NO_COLOR` is set (any non-empty value, per <https://no-color.org>) or `TERM=dumb`, every colour becomes the terminal
+//! default and the screen still reads.
 
 use ratatui::style::Color;
 use std::sync::OnceLock;
@@ -42,6 +47,8 @@ pub struct Theme {
 pub fn by_name(name: &str) -> Theme {
     if name.eq_ignore_ascii_case("buzz-light") {
         buzz_light()
+    } else if name.eq_ignore_ascii_case("high-contrast") {
+        high_contrast()
     } else if name.eq_ignore_ascii_case("light") {
         light()
     } else if name.eq_ignore_ascii_case("dark") {
@@ -51,9 +58,83 @@ pub fn by_name(name: &str) -> Theme {
     }
 }
 
+/// The scheme to draw with: `BUZZR_THEME` picks it, but `NO_COLOR` (any non-empty value, per no-color.org) or `TERM=dumb` beats
+/// it and gives the colourless scheme.
+pub fn select(theme: Option<&str>, no_color: Option<&str>, term: Option<&str>) -> Theme {
+    let colourless = no_color.is_some_and(|v| !v.is_empty()) || term.is_some_and(|t| t.eq_ignore_ascii_case("dumb"));
+    if colourless {
+        plain()
+    } else {
+        by_name(theme.unwrap_or_default())
+    }
+}
+
 pub fn get() -> &'static Theme {
     static THEME: OnceLock<Theme> = OnceLock::new();
-    THEME.get_or_init(|| by_name(&crate::config::env("THEME").unwrap_or_default()))
+    THEME.get_or_init(resolve)
+}
+
+/// What this process draws with. The unit tests pin the scheme from `BUZZR_THEME` alone, so a runner that sets `NO_COLOR` or
+/// `TERM=dumb` cannot change what they render; `select` covers the colourless rules directly.
+fn resolve() -> Theme {
+    let theme = crate::config::env("THEME");
+    #[cfg(test)]
+    {
+        by_name(theme.as_deref().unwrap_or_default())
+    }
+    #[cfg(not(test))]
+    {
+        let no_color = std::env::var("NO_COLOR").ok();
+        let term = std::env::var("TERM").ok();
+        select(theme.as_deref(), no_color.as_deref(), term.as_deref())
+    }
+}
+
+/// No colour at all: for `NO_COLOR` and for a dumb terminal. Everything falls back to the terminal's own colours, and the screen
+/// still reads on structure alone: the selection bar and the gutter glyph, `bold` on the open channel, the unread count in the
+/// badge, `● live` in the header, the borders of a popup.
+fn plain() -> Theme {
+    Theme {
+        bg: None,
+        fg: None,
+        popup_bg: None,
+        dim: Color::Reset,
+        faint: Color::Reset,
+        sel_bg: Color::Reset,
+        bar_on: Color::Reset,
+        bar_off: Color::Reset,
+        code_fg: Color::Reset,
+        code_bg: Color::Reset,
+        time: Color::Reset,
+        accent: Color::Reset,
+        link: Color::Reset,
+        warn: Color::Reset,
+        ok: Color::Reset,
+        err: Color::Reset,
+    }
+}
+
+/// High contrast: black background, white text, and every other colour picked to reach at least 7:1 against the backgrounds it is
+/// drawn on (WCAG AAA for body text), for low vision and for washed-out or glare-lit screens. The selection still has the bar.
+fn high_contrast() -> Theme {
+    Theme {
+        bg: Some(Color::Rgb(0, 0, 0)),
+        fg: Some(Color::Rgb(0xff, 0xff, 0xff)),
+        popup_bg: Some(Color::Rgb(0, 0, 0)),
+        dim: Color::Rgb(0xd0, 0xd0, 0xd0),
+        faint: Color::Rgb(0x9e, 0x9e, 0x9e),
+        sel_bg: Color::Rgb(0x26, 0x26, 0x26),
+        bar_on: Color::Rgb(0xff, 0xff, 0x00),
+        bar_off: Color::Rgb(0x9e, 0x9e, 0x9e),
+        code_fg: Color::Rgb(0xff, 0xff, 0x00),
+        code_bg: Color::Rgb(0x1a, 0x1a, 0x1a),
+        time: Color::Rgb(0xd0, 0xd0, 0xd0),
+        accent: Color::Rgb(0x6f, 0xd8, 0xff),
+        link: Color::Rgb(0x6f, 0xd8, 0xff),
+        warn: Color::Rgb(0xff, 0xd6, 0x0a),
+        ok: Color::Rgb(0x3d, 0xd6, 0x8c),
+        err: Color::Rgb(0xff, 0x95, 0x92),
+    }
 }
 
 /// The dark palette of the Buzz desktop app. Hex values are from its tokens: panel = neutral-3, sidebar/base = neutral-1,
@@ -198,6 +279,54 @@ mod tests {
         assert_eq!(t.sel_bg, Color::Rgb(0x33, 0x33, 0x33));
         assert_eq!(t.accent, Color::Rgb(0xbe, 0xda, 0x36));
         assert!(by_name("dark").bg.is_none() && by_name("light").bg.is_none(), "the other schemes keep the terminal background");
+    }
+
+    #[test]
+    fn no_color_or_a_dumb_terminal_turns_colour_off_whatever_the_scheme_says() {
+        let t = select(Some("buzz-dark"), Some("1"), Some("xterm-256color"));
+        assert!(t.bg.is_none() && t.accent == Color::Reset, "NO_COLOR wins over BUZZR_THEME");
+        assert_eq!(select(Some("buzz-dark"), Some(""), None).bg, Some(Color::Rgb(0x1a, 0x1a, 0x1a)), "an empty NO_COLOR is not a request");
+        assert_eq!(select(Some("buzz-dark"), None, Some("DUMB")).accent, Color::Reset, "TERM=dumb, case-insensitively");
+        assert_eq!(select(Some("high-contrast"), None, Some("xterm-256color")).bg, Some(Color::Rgb(0, 0, 0)), "and the scheme is back when neither is set");
+        assert_eq!(select(None, None, None).bg, Some(Color::Rgb(0x1a, 0x1a, 0x1a)), "no scheme and no colourless request: the default");
+    }
+
+    #[test]
+    fn the_plain_scheme_uses_no_colour_at_all() {
+        let t = plain();
+        assert!(t.bg.is_none() && t.fg.is_none() && t.popup_bg.is_none(), "no background is painted");
+        for (name, c) in [
+            ("dim", t.dim),
+            ("faint", t.faint),
+            ("sel_bg", t.sel_bg),
+            ("bar_on", t.bar_on),
+            ("bar_off", t.bar_off),
+            ("code_fg", t.code_fg),
+            ("code_bg", t.code_bg),
+            ("time", t.time),
+            ("accent", t.accent),
+            ("link", t.link),
+            ("warn", t.warn),
+            ("ok", t.ok),
+            ("err", t.err),
+        ] {
+            assert_eq!(c, Color::Reset, "{name}");
+        }
+    }
+
+    #[test]
+    fn the_high_contrast_scheme_reaches_wcag_aaa() {
+        let t = high_contrast();
+        assert_eq!(by_name("High-Contrast").bg, t.bg);
+        let (panel, popup) = (rgb(t.bg), rgb(t.popup_bg));
+        for bg in [panel, popup, t.sel_bg, t.code_bg] {
+            for (name, fg) in [("text", rgb(t.fg)), ("dim", t.dim), ("time", t.time), ("accent", t.accent), ("link", t.link), ("warn", t.warn), ("ok", t.ok), ("err", t.err), ("code", t.code_fg)] {
+                assert!(contrast(fg, bg) >= 7.0, "{name} on {bg:?} has contrast {:.1}, below AAA", contrast(fg, bg));
+            }
+        }
+        for bg in [panel, popup] {
+            assert!(contrast(t.faint, bg) >= 4.5, "faint lines on {bg:?}");
+        }
     }
 
     #[test]
