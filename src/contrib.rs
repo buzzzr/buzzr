@@ -4,7 +4,7 @@
 //! with `unicode_width`, clips to the space that is actually left and maps a small set of tone names through `theme.rs`. A
 //! plugin therefore cannot emit an escape sequence, and the message-text rules in `AGENTS.md` apply to it unchanged.
 
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use unicode_width::UnicodeWidthChar;
@@ -37,10 +37,10 @@ impl Tone {
         match self {
             Tone::Default => Style::default(),
             Tone::Dim => Style::default().fg(th.dim),
-            Tone::Accent => Style::default().fg(Color::Cyan),
-            Tone::Warn => Style::default().fg(Color::Yellow),
-            Tone::Error => Style::default().fg(Color::Red),
-            Tone::Ok => Style::default().fg(Color::Green),
+            Tone::Accent => Style::default().fg(crate::theme::get().accent),
+            Tone::Warn => Style::default().fg(crate::theme::get().warn),
+            Tone::Error => Style::default().fg(crate::theme::get().err),
+            Tone::Ok => Style::default().fg(crate::theme::get().ok),
             Tone::Bold => Style::default().add_modifier(Modifier::BOLD),
         }
     }

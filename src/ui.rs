@@ -4,7 +4,7 @@
 use crate::app::{App, Conn, Focus, Overlay, Row, View};
 use crate::list;
 use ratatui::layout::{Alignment, Constraint, Layout, Position, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
 use ratatui::Frame;
@@ -24,8 +24,28 @@ fn key_hint(key: &str, what: &str) -> Vec<Span<'static>> {
     vec![Span::styled(format!(" {key} "), Style::default().add_modifier(Modifier::REVERSED)), Span::styled(format!(" {what}  "), dim())]
 }
 
+/// The scheme's own background and text colour; a scheme that leaves both to the terminal gives the default style.
+fn base_style(popup: bool) -> Style {
+    let th = crate::theme::get();
+    let mut style = Style::default();
+    if let Some(bg) = if popup { th.popup_bg.or(th.bg) } else { th.bg } {
+        style = style.bg(bg);
+    }
+    if let Some(fg) = th.fg {
+        style = style.fg(fg);
+    }
+    style
+}
+
+/// Blank the space under a popup, then give it the popup background (a plain `Clear` would let the terminal's colours through).
+fn clear_popup(f: &mut Frame, area: Rect) {
+    f.render_widget(Clear, area);
+    f.buffer_mut().set_style(area, base_style(true));
+}
+
 pub fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
+    f.buffer_mut().set_style(area, base_style(false));
     let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(3), Constraint::Length(1)]).split(area);
     let (header, body, footer) = (rows[0], rows[1], rows[2]);
     let cols = Layout::horizontal([Constraint::Length(CHANNELS_W.min(body.width / 3)), Constraint::Min(10)]).split(body);
@@ -73,9 +93,9 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     };
     let left = Line::from(vec![Span::styled(" buzzr ", Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED)), Span::raw(format!(" {title}"))]);
     let (dot, text, color) = match &app.conn {
-        Conn::Live => ("●", "live".to_owned(), Color::Green),
-        Conn::Connecting => ("◌", "connecting…".to_owned(), Color::Yellow),
-        Conn::Down(why) => ("✕", format!("offline, retrying ({})", why.chars().take(40).collect::<String>()), Color::Red),
+        Conn::Live => ("●", "live".to_owned(), crate::theme::get().ok),
+        Conn::Connecting => ("◌", "connecting…".to_owned(), crate::theme::get().warn),
+        Conn::Down(why) => ("✕", format!("offline, retrying ({})", why.chars().take(40).collect::<String>()), crate::theme::get().err),
     };
     let mut right = vec![];
     let badges = app.plugins.header();
@@ -85,7 +105,7 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     }
     let unread = app.total_unread();
     if unread > 0 {
-        right.push(Span::styled(format!("• {unread} unread   "), Style::default().fg(Color::Yellow)));
+        right.push(Span::styled(format!("• {unread} unread   "), Style::default().fg(crate::theme::get().warn)));
     }
     right.push(Span::styled(format!("{dot} {text} "), Style::default().fg(color)));
     let right_w: u16 = right.iter().map(|s| s.content.width() as u16).sum();
@@ -109,7 +129,7 @@ fn draw_channels(f: &mut Frame, app: &App, area: Rect) {
             style = style.add_modifier(Modifier::BOLD);
         }
         if unread > 0 {
-            style = style.fg(Color::Yellow).add_modifier(Modifier::BOLD);
+            style = style.fg(crate::theme::get().warn).add_modifier(Modifier::BOLD);
         }
         let marker = if bar { "▌" } else { " " };
         let badge = if unread > 0 { format!(" ({unread})") } else { String::new() };
@@ -182,7 +202,7 @@ fn draw_typing(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     if app.confirm_delete.is_some() {
-        let prompt = Span::styled("Delete this message? press y to delete, anything else cancels", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+        let prompt = Span::styled("Delete this message? press y to delete, anything else cancels", Style::default().fg(crate::theme::get().warn).add_modifier(Modifier::BOLD));
         f.render_widget(Paragraph::new(prompt).alignment(Alignment::Right), area);
         return;
     }
@@ -218,9 +238,9 @@ fn draw_panel(f: &mut Frame, app: &App, area: Rect) {
     let w = 100.min(area.width.saturating_sub(4)).max(24);
     let h = (panel.rows.len() as u16 + 4).min(area.height.saturating_sub(2)).max(6);
     let r = Rect::new(area.x + (area.width.saturating_sub(w)) / 2, area.y + (area.height.saturating_sub(h)) / 2, w, h);
-    f.render_widget(Clear, r);
+    clear_popup(f, r);
     let title = format!(" {} · Up/Down · Enter runs · Esc closes ", panel.title);
-    let block = Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Cyan)).title(title);
+    let block = Block::default().borders(Borders::ALL).border_style(Style::default().fg(crate::theme::get().accent)).title(title);
     let inner = block.inner(r);
     f.render_widget(block, r);
     if inner.height == 0 {
@@ -258,7 +278,7 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect, inner_w: usize) {
     } else {
         " message "
     };
-    let block = Block::default().borders(Borders::ALL).border_style(if focused { Style::default().fg(Color::Cyan) } else { faint() }).title(title);
+    let block = Block::default().borders(Borders::ALL).border_style(if focused { Style::default().fg(crate::theme::get().accent) } else { faint() }).title(title);
     let inner = block.inner(area);
     f.render_widget(block, area);
     if app.editor.is_empty() {
@@ -350,18 +370,18 @@ pub const KEYS: &[(&str, &str)] = &[
 fn draw_keys(f: &mut Frame, body: Rect) {
     let w = 92.min(body.width);
     let area = Rect::new(body.x + body.width - w, body.y, w, body.height);
-    f.render_widget(Clear, area);
+    clear_popup(f, area);
     let mut lines = vec![Line::from(Span::styled("Keys  (Esc closes)", Style::default().add_modifier(Modifier::BOLD))), Line::default()];
     for (k, d) in KEYS {
         if k.is_empty() && d.is_empty() {
             lines.push(Line::default());
         } else if d.is_empty() {
-            lines.push(Line::from(Span::styled(*k, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))));
+            lines.push(Line::from(Span::styled(*k, Style::default().fg(crate::theme::get().accent).add_modifier(Modifier::BOLD))));
         } else {
-            lines.push(Line::from(vec![Span::styled(format!("{k:<32}"), Style::default().fg(Color::Yellow)), Span::styled((*d).to_owned(), dim())]));
+            lines.push(Line::from(vec![Span::styled(format!("{k:<32}"), Style::default().fg(crate::theme::get().warn)), Span::styled((*d).to_owned(), dim())]));
         }
     }
-    f.render_widget(Paragraph::new(lines).block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Cyan))), area);
+    f.render_widget(Paragraph::new(lines).block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(crate::theme::get().accent))), area);
 }
 
 pub const HELP: &[&str] = &[
@@ -397,8 +417,8 @@ fn draw_search(f: &mut Frame, app: &App, area: Rect) {
     let w = 110.min(area.width.saturating_sub(4)).max(20);
     let h = 26.min(area.height.saturating_sub(2)).max(6);
     let r = Rect::new(area.x + (area.width.saturating_sub(w)) / 2, area.y + (area.height.saturating_sub(h)) / 2, w, h);
-    f.render_widget(Clear, r);
-    let block = Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Cyan)).title(" Search · Enter opens · Esc closes ");
+    clear_popup(f, r);
+    let block = Block::default().borders(Borders::ALL).border_style(Style::default().fg(crate::theme::get().accent)).title(" Search · Enter opens · Esc closes ");
     let inner = block.inner(r);
     f.render_widget(block, r);
     if inner.height < 3 || inner.width < 10 {
@@ -428,7 +448,7 @@ fn draw_search(f: &mut Frame, app: &App, area: Rect) {
         match row {
             Row::Channel(c) => {
                 let ch = &app.channels[*c];
-                spans.push(Span::styled(if ch.is_dm { ch.label.clone() } else { format!("# {}", ch.label) }, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)));
+                spans.push(Span::styled(if ch.is_dm { ch.label.clone() } else { format!("# {}", ch.label) }, Style::default().fg(crate::theme::get().accent).add_modifier(Modifier::BOLD)));
                 spans.push(Span::styled("  channel", dim()));
             }
             Row::Message(e) => {
@@ -460,10 +480,10 @@ fn draw_help(f: &mut Frame, area: Rect) {
     let w = 100.min(area.width.saturating_sub(4));
     let h = (HELP.len() as u16 + 4).min(area.height);
     let r = Rect::new(area.x + (area.width - w) / 2, area.y + (area.height - h) / 2, w, h);
-    f.render_widget(Clear, r);
+    clear_popup(f, r);
     let mut lines = vec![Line::from(Span::styled("Help", Style::default().add_modifier(Modifier::BOLD))), Line::default()];
     lines.extend(HELP.iter().map(|l| Line::raw(*l)));
-    f.render_widget(Paragraph::new(lines).block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Cyan))), r);
+    f.render_widget(Paragraph::new(lines).block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(crate::theme::get().accent))), r);
 }
 
 #[cfg(test)]
@@ -510,6 +530,24 @@ mod tests {
         assert!(s.contains("● live"), "connection state\n{s}");
         assert!(s.contains("Open thread") && s.contains("Switch pane"), "footer hints\n{s}");
         assert!(!s.contains("**"), "markdown is rendered, not shown");
+    }
+
+    #[test]
+    fn the_default_scheme_paints_its_background_everywhere_including_popups() {
+        let th = crate::theme::get();
+        let (bg, popup) = (th.bg.expect("default scheme paints a background"), th.popup_bg.expect("and a popup background"));
+        let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        let mut app = app();
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let buf = term.backend().buffer();
+        // the cell after a double-width character (the 💬) belongs to that character and is never drawn on its own
+        let on_bg = |x: u16, y: u16| (x > 0 && unicode_width::UnicodeWidthStr::width(buf[(x - 1, y)].symbol()) == 2) || buf[(x, y)].bg == bg || buf[(x, y)].bg == th.sel_bg || buf[(x, y)].bg == th.code_bg;
+        let bad: Vec<_> = (0..24u16).flat_map(|y| (0..100u16).map(move |x| (x, y))).filter(|&(x, y)| !on_bg(x, y)).map(|(x, y)| (x, y, buf[(x, y)].symbol().to_owned(), buf[(x, y)].bg)).take(8).collect();
+        assert!(bad.is_empty(), "cells left to the terminal background: {bad:?}");
+        app.overlay = Overlay::Help;
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let buf = term.backend().buffer();
+        assert_eq!(buf[(50, 12)].bg, popup, "the help popup is not transparent");
     }
 
     #[test]

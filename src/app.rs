@@ -15,7 +15,7 @@ use base64::Engine;
 use chrono::TimeZone;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::Span;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -210,7 +210,7 @@ fn new_messages_divider(width: usize) -> Line {
     let dashes = width.saturating_sub(label.chars().count()).max(4);
     let left = dashes / 2;
     let text = format!("{}{}{}", "─".repeat(left), label, "─".repeat(dashes - left));
-    Line { spans: vec![Span::styled(text, Style::default().fg(Color::Yellow))], links: Vec::new() }
+    Line { spans: vec![Span::styled(text, Style::default().fg(crate::theme::get().warn))], links: Vec::new() }
 }
 
 impl App {
@@ -436,7 +436,7 @@ impl App {
         let mut head: Vec<Span<'static>> = vec![
             Span::styled(format!("#{number} "), dim),
             Span::styled(format!("{} ", self.fmt_time(m.created_at)), time),
-            Span::styled(self.name_of(&m.pubkey), Style::default().fg(if mine { Color::Green } else { Color::Cyan }).add_modifier(Modifier::BOLD)),
+            Span::styled(self.name_of(&m.pubkey), Style::default().fg(if mine { crate::theme::get().ok } else { crate::theme::get().accent }).add_modifier(Modifier::BOLD)),
         ];
         if edited {
             head.push(Span::styled(" (edited)", dim));
@@ -450,7 +450,7 @@ impl App {
             }
             let (count, last) = store.replies_of(m);
             if count > 0 {
-                head.push(Span::styled(format!("  💬 {} {}", count, if count == 1 { "reply" } else { "replies" }), Style::default().fg(Color::Yellow)));
+                head.push(Span::styled(format!("  💬 {} {}", count, if count == 1 { "reply" } else { "replies" }), Style::default().fg(crate::theme::get().warn)));
                 if let Some(at) = last {
                     head.push(Span::styled(format!(" · last {}", self.fmt_time(at)), dim));
                 }
@@ -465,7 +465,7 @@ impl App {
         let reactions = store.reaction_summary(&m.id);
         if !reactions.is_empty() {
             let text = reactions.iter().map(|(e, n)| if *n > 1 { format!("{e} {n}") } else { e.clone() }).collect::<Vec<_>>().join("  ");
-            lines.push(Line { spans: vec![Span::styled(text, Style::default().fg(Color::Yellow))], links: Vec::new() });
+            lines.push(Line { spans: vec![Span::styled(text, Style::default().fg(crate::theme::get().warn))], links: Vec::new() });
         }
         Rendered { id: m.id.clone(), lines }
     }

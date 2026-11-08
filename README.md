@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/channel.png" alt="buzzr showing a channel with threads and reactions" width="900">
+  <img src="docs/screenshots/channel.png" alt="buzzr in the buzz-dark colour scheme, showing a channel with threads and reactions" width="900">
 </p>
 
 > The screenshots in this README show a scripted demo community, not real conversations.
@@ -42,11 +42,11 @@
 - **Search everything.** Ctrl+F searches channel names instantly and every message you can read, with full text from the relay.
 - **Create channels** from the input with `/new`.
 - **Plugins.** Add your own `/commands`, status items, badges and panels from any language. See [PLUGIN.md](PLUGIN.md).
-- **Light and dark.** `BUZZR_THEME=light` for a light terminal background.
+- **Themes.** The default `buzz-dark` uses the dark palette of the Buzz desktop app. `BUZZR_THEME=dark` keeps your terminal's own background, `BUZZR_THEME=buzz-light` is the desktop app's light palette, and `BUZZR_THEME=light` is for a light terminal.
 - **Read-only mode** (`--read-only`) for identities you should not speak for.
 
 <p align="center">
-  <img src="docs/screenshots/thread.png" alt="A thread open next to the channel list" width="900">
+  <img src="docs/screenshots/thread.png" alt="A thread open next to the channel list, in buzz-dark" width="900">
 </p>
 
 ## Install
@@ -79,8 +79,10 @@ buzzr
 The first time, buzzr asks for your relay address and private key, and how to keep the key. After that it opens straight into your channels.
 Press **F1** for the keys and **F2** for the commands. Press **Tab** to move between the channel list, the messages and the input.
 
+The default colour scheme is `buzz-dark`; set `BUZZR_THEME=buzz-light` for the light one:
+
 <p align="center">
-  <img src="docs/screenshots/light-theme.png" alt="The same channel in the light theme" width="900">
+  <img src="docs/screenshots/buzz-light.png" alt="The same channel in the buzz-light colour scheme" width="900">
 </p>
 
 ## First run
@@ -169,7 +171,7 @@ browser as well.
 `--relay URL` (default `$BUZZ_RELAY_URL`, else the saved relay), `--setup`, `--forget-key`, `--read-only` (never send), `--no-typing`
 (do not announce typing), `--no-mouse` (leave the mouse to the terminal), `--no-plugins` (start without plugins), `--plugins-dir DIR`
 (where plugins live), `--selftest` (below). Environment: `BUZZR_TZ` for the display
-time zone (default: the computer's), `BUZZR_THEME=light` for a light background, `BUZZR_CONFIG_DIR`, `BUZZR_PLUGINS_DIR`,
+time zone (default: the computer's), `BUZZR_THEME` (`buzz-dark`, `buzz-light`, `dark`, `light`), `BUZZR_CONFIG_DIR`, `BUZZR_PLUGINS_DIR`,
 `BUZZR_SAFE_MODE=1` (same as `--no-plugins`), `BUZZR_NO_UPDATE_CHECK=1` (skip the once-a-day release check), `BUZZR_SCRYPT_LOG_N` (cost of a new
 key file, 10-20, default 19).
 
