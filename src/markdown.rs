@@ -5,7 +5,7 @@
 //! pulldown-cmark and only ever turned into text and styles, never into terminal escapes.
 
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::Span;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -167,7 +167,7 @@ impl Builder {
             s = s.add_modifier(Modifier::CROSSED_OUT);
         }
         if self.links.iter().any(Option::is_some) {
-            s = s.fg(Color::Cyan).add_modifier(Modifier::UNDERLINED);
+            s = s.fg(crate::theme::get().link).add_modifier(Modifier::UNDERLINED);
         }
         s
     }
