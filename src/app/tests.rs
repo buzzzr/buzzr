@@ -7,7 +7,7 @@ const ME: &str = "me";
 const BOB: &str = "bob";
 
 fn chan(id: &str, name: &str) -> Channel {
-    Channel { id: id.into(), name: name.into(), about: String::new(), created_at: 1, section: if name == "DM" { Section::Dms } else { Section::Channels }, label: name.into() }
+    Channel { id: id.into(), name: name.into(), about: String::new(), created_at: 1, section: if name == "DM" { Section::Dms } else { Section::Channels }, label: name.into(), is_private: false }
 }
 
 fn msg(id: &str, at: u64, who: &str, content: &str, tags: &[&[&str]]) -> Ev {
