@@ -330,8 +330,8 @@ fn run(cmd: Cmd, relay: &Arc<Relay>, tx: &UnboundedSender<AppEvent>, subscriptio
         Cmd::LoadUnread { channel, since } => {
             // A count that fails (offline, a relay that will not answer) is silent: the badge simply stays empty.
             tokio::spawn(async move {
-                if let Ok(count) = relay.unread(&channel, since).await {
-                    let _ = tx.send(AppEvent::Unread { channel, count });
+                if let Ok(u) = relay.unread(&channel, since).await {
+                    let _ = tx.send(AppEvent::Unread { channel, count: u.messages, mentions: u.mentions });
                 }
             });
         }

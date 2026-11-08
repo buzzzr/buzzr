@@ -33,6 +33,8 @@
   person; start one with `/dm name`, or from search.
 - **Unread that survives a restart.** The last-read position is saved per channel, so the badges are right again next time and a
   `new messages` line shows where you left off.
+- **Mentions.** A message that names you (`p` tag) is marked with a leading `@`, its channel shows how many unread mentions it has
+  (`@3`), and `/mentions` lists them newest first; Enter opens one in its channel or thread.
 - **Threads.** A channel shows top-level messages only, as the Buzz app does, each with its reply count and the time of the last reply.
   Enter opens a thread, Esc returns to the same place.
 - **Live.** New messages, edits, deletions, reactions, reply counts and `Bob is typing…` arrive as they happen. If the connection
@@ -125,6 +127,9 @@ The full behaviour, for when the feature list above is not enough.
 - **Unread that survives a restart:** the last-read position per channel lives in `~/.config/buzzr/read-state.json`, so the
   counts are there again next time (each one asked of the relay on startup) and a `new messages` line marks where the unseen
   ones begin. Opening a channel marks it read; `/read` does it again and `/read all` clears every channel.
+- **Mentions:** a message that carries a `p` tag naming you is marked with a leading `@`, its channel shows how many unread
+  mentions it holds (`@3`, and the header shows the total), and the count clears when you open the channel. `/mentions` lists the
+  recent ones (newest first); Enter opens the chosen message in its channel, inside its thread when it is a reply.
 - **A channel shows only its top-level messages**, as the Buzz app does, each with `💬 3 replies · last Thu 13:33` when it has a
   thread. The relay supplies the counts and says whether older messages exist.
 - **Threads:** Enter or a click opens one, Esc returns to the same place. `r` replies in the thread of the selected message.
@@ -175,7 +180,7 @@ The full behaviour, for when the feature list above is not enough.
 | Ctrl+R, Ctrl+O | reload, load older |
 | Ctrl+Q, Ctrl+C | quit |
 
-Commands in the input (N is the number shown as `#N`): `/r N text`, `/t N`, `/c`, `/copy N`, `/edit N`, `/delete N`, `/search text`, `/whois NAME`, `/dm NAME`, `/new [private] name [about]`, `/plugins`, `/update`, `/read [all]`, `/more`, `/refresh`, `/help`, `/q`.
+Commands in the input (N is the number shown as `#N`): `/r N text`, `/t N`, `/c`, `/copy N`, `/edit N`, `/delete N`, `/search text`, `/whois NAME`, `/dm NAME`, `/new [private] name [about]`, `/plugins`, `/update`, `/read [all]`, `/mentions`, `/more`, `/refresh`, `/help`, `/q`.
 
 ## Clipboard
 

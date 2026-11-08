@@ -74,7 +74,7 @@ per request, `payload` = SHA-256 of the body). An agent identity also sends its 
 | members | `{"kinds":[39002],"#d":[channel],"limit":1}` (`p` tags, role in the 4th element) |
 | names | `{"kinds":[0],"authors":[...]}` (`display_name`, else `name`) |
 | timeline page | `{"kinds":[9,40002,40008,45001,45003],"#h":[channel],"limit":50,"top_level":true,"include_summaries":true,"include_aux":true}` plus `until`+`before_id` for older pages. Answer: rows, relay-signed `39005` thread summaries (`reply_count`, `last_reply_at`), reactions/edits/deletions of those rows, and one `39006` bounds event (`has_more`, `next_cursor`) whose `d` tag must end with the cursor we sent (NIP-CW) |
-| unread count | `{"kinds":[9,40002,40008,45001,45003],"#h":[channel],"since":<last read + 1>,"limit":200}`, counted on startup for each channel that has a stored read position; only non-own messages count, and 200 is the ceiling (`relay::UNREAD_LIMIT`) |
+| unread count | `{"kinds":[9,40002,40008,45001,45003],"#h":[channel],"since":<last read + 1>,"limit":200}`, counted on startup for each channel that has a stored read position; only non-own messages count, and 200 is the ceiling (`relay::UNREAD_LIMIT`). The same answer also counts how many of them name you in a `p` tag (`relay::Unread`), for the channel's `@N` mention badge |
 | thread | `[{"kinds":[9,40002,40003,40008,45003],"#h":[c],"#e":[root]}, {"ids":[root]}]`, then `{"kinds":[7,5,9005],"#e":[ids]}` for reactions and deletions |
 | search | `{"kinds":[9,40002,45001,45003],"search":text,"limit":25}` (NIP-50 full text, most relevant first) |
 | edit / delete / new channel | `POST /events` with `kind:40003` (`h`, `e`), `kind:9005` (`h`, `e`), `kind:9007` (`h`, `name`, `visibility`, `channel_type`, `about`), built with the same `buzz-sdk` builders the CLI uses |
@@ -97,9 +97,9 @@ back to what is loaded.
 
 `App` holds one `Store` per channel (loaded messages and everything attached to them), the current `View` (`Channel` or
 `Thread(root)`), a `ListState` (`selected` message id, `scroll` in lines) per view (saved in `saved` so Esc returns to the same
-place), the input `Editor`, an optional `reply_target` (thread root), connection state, per-channel unread counts and the
-last-read position each one was computed from, typing indicators (`(channel, pubkey) -> Instant`, shown for 7 s) and a
-short-lived flash message.
+place), the input `Editor`, an optional `reply_target` (thread root), connection state, per-channel unread counts (and how many
+of those unread messages mention you, for the `@N` badge and `/mentions`), the last-read position each one was computed from,
+typing indicators (`(channel, pubkey) -> Instant`, shown for 7 s) and a short-lived flash message.
 
 ## Layout and scrolling
 

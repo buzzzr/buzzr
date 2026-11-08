@@ -76,6 +76,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Overlay::Help => draw_help(f, area),
         Overlay::Search => draw_search(f, app, area),
         Overlay::Whois => draw_whois(f, app, area),
+        Overlay::Mentions => draw_mentions(f, app, area),
         Overlay::Panel => draw_panel(f, app, area),
         Overlay::None => {}
     }
@@ -108,6 +109,10 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     if unread > 0 {
         right.push(Span::styled(format!("• {unread} unread   "), Style::default().fg(crate::theme::get().warn)));
     }
+    let mentions = app.total_mentions();
+    if mentions > 0 {
+        right.push(Span::styled(format!("@{mentions} mentioned   "), Style::default().fg(crate::theme::get().accent)));
+    }
     right.push(Span::styled(format!("{dot} {text} "), Style::default().fg(color)));
     let right_w: u16 = right.iter().map(|s| s.content.width() as u16).sum();
     let parts = Layout::horizontal([Constraint::Min(1), Constraint::Length(right_w.min(area.width))]).split(area);
@@ -135,6 +140,7 @@ fn draw_channels(f: &mut Frame, app: &App, area: Rect) {
         let open = app.cur == Some(i);
         let bar = app.channel_bar() == Some(i);
         let unread = app.unread.get(&c.id).copied().unwrap_or(0);
+        let mentions = app.mentions.get(&c.id).copied().unwrap_or(0);
         let mut style = Style::default();
         if open {
             style = style.add_modifier(Modifier::BOLD);
@@ -144,14 +150,21 @@ fn draw_channels(f: &mut Frame, app: &App, area: Rect) {
         }
         let marker = if bar { "▌" } else { " " };
         let badge = if unread > 0 { format!(" ({unread})") } else { String::new() };
+        let mention_badge = if mentions > 0 { format!(" @{mentions}") } else { String::new() };
         let mark = app.plugins.channel_mark(&c.id);
         let mark_text = mark.map(|m| format!(" {}", m.text)).unwrap_or_default();
-        let room = (inner.width as usize).saturating_sub(2 + badge.width() + mark_text.width());
+        let room = (inner.width as usize).saturating_sub(2 + badge.width() + mention_badge.width() + mark_text.width());
         let mut label: String = c.label.clone();
         while label.width() > room {
             label.pop();
         }
-        let mut spans = vec![Span::styled(marker, Style::default().fg(crate::theme::get().bar_on)), Span::styled(format!(" {label}{badge}"), style)];
+        let mut spans = vec![Span::styled(marker, Style::default().fg(crate::theme::get().bar_on)), Span::styled(format!(" {label}"), style)];
+        if mentions > 0 {
+            spans.push(Span::styled(mention_badge, Style::default().fg(crate::theme::get().accent).add_modifier(Modifier::BOLD)));
+        }
+        if unread > 0 {
+            spans.push(Span::styled(badge, style));
+        }
         if let Some(m) = mark {
             spans.push(Span::styled(mark_text, m.tone.style()));
         }
@@ -374,6 +387,12 @@ pub const KEYS: &[(&str, &str)] = &[
     ("Profile card (from /whois)", ""),
     ("Esc", "close"),
     ("", ""),
+    ("Mentions (/mentions)", ""),
+    ("Mentions (/mentions)", ""),
+    ("Up / Down, PgUp / PgDn, Home / End", "move"),
+    ("Enter", "open the message in its channel (and thread)"),
+    ("Esc", "close"),
+    ("", ""),
     ("Writing", ""),
     ("Enter", "send"),
     ("Shift+Enter, Alt+Enter, Ctrl+J", "new line"),
@@ -414,8 +433,10 @@ pub const HELP: &[&str] = &[
     "  /update     how to upgrade this copy (brew, cargo or the release page)",
     "A newer release shows up in the status line (BUZZR_NO_UPDATE_CHECK=1 turns the once-a-day check off).",
     "  /read       mark this channel read     /read all   mark every channel read",
+    "  /mentions   recent messages that mention you (newest first)",
     "Unread survives a restart: it comes from the last-read position in ~/.config/buzzr/read-state.json, and a",
-    "\"new messages\" line marks where new messages start.",
+    "\"new messages\" line marks where new messages start. A message that names you in a p tag is highlighted with a",
+    "leading @, its channel shows how many unread mentions it has (@N), and /mentions lists them.",
     "Search (Ctrl+F): channel names, people and full-text message search; Enter opens the result — a person starts a DM.",
     "A person is found by the name in their profile, or by their npub (hex or npub1…): /dm and /whois take either.",
     "Others see \"typing…\" while you write (start with --no-typing to turn that off).",
@@ -521,6 +542,47 @@ fn draw_whois(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(lines).block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(crate::theme::get().accent)).title(title)), r);
 }
 
+/// `/mentions`: recent messages that mention you, newest first, across the loaded channels.
+fn draw_mentions(f: &mut Frame, app: &App, area: Rect) {
+    let w = 110.min(area.width.saturating_sub(4)).max(20);
+    let h = 26.min(area.height.saturating_sub(2)).max(6);
+    let r = Rect::new(area.x + (area.width.saturating_sub(w)) / 2, area.y + (area.height.saturating_sub(h)) / 2, w, h);
+    clear_popup(f, r);
+    let block = Block::default().borders(Borders::ALL).border_style(Style::default().fg(crate::theme::get().accent)).title(" Mentions · Enter opens · Esc closes ");
+    let inner = block.inner(r);
+    f.render_widget(block, r);
+    if inner.height < 2 || inner.width < 10 {
+        return;
+    }
+    let rows = app.mention_rows();
+    f.render_widget(Paragraph::new(Span::styled(format!(" {} found", rows.len()), dim())), Rect::new(inner.x, inner.y, inner.width, 1));
+    let list_area = Rect::new(inner.x, inner.y + 2, inner.width, inner.height.saturating_sub(2));
+    let vis = list_area.height as usize;
+    let start = app.mention_cursor.saturating_sub(vis.saturating_sub(1) / 2).min(rows.len().saturating_sub(vis));
+    let mut lines = Vec::new();
+    for (i, (ch, e)) in rows.iter().enumerate().skip(start).take(vis) {
+        let chan = app.channels.iter().find(|c| c.id == *ch).map(|c| c.label.clone()).unwrap_or_else(|| ch.clone());
+        let head = format!(" {} · {} · ", chan, app.name_of(&e.pubkey));
+        let snippet: String = crate::markdown::strip_controls(&e.content).split_whitespace().collect::<Vec<_>>().join(" ");
+        let mut spans = vec![Span::raw(if i == app.mention_cursor { "▌" } else { " " }), Span::styled(head.clone(), dim())];
+        let room = (list_area.width as usize).saturating_sub(head.width() + 2);
+        let mut text = snippet;
+        while text.width() > room {
+            text.pop();
+        }
+        spans.push(Span::raw(text));
+        let mut line = Line::from(spans);
+        if i == app.mention_cursor {
+            line = line.style(Style::default().bg(crate::theme::get().sel_bg));
+        }
+        lines.push(line);
+    }
+    if rows.is_empty() {
+        lines.push(Line::from(Span::styled(" no mentions yet", dim())));
+    }
+    f.render_widget(Paragraph::new(lines), list_area);
+}
+
 fn draw_help(f: &mut Frame, area: Rect) {
     let w = 100.min(area.width.saturating_sub(4));
     let h = (HELP.len() as u16 + 4).min(area.height);
@@ -604,7 +666,7 @@ mod tests {
         // The colourless scheme leans on these: every state also has a glyph, a word or a number.
         let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
         let mut app = app();
-        app.handle(AppEvent::Unread { channel: "c2".into(), count: 3 });
+        app.handle(AppEvent::Unread { channel: "c2".into(), count: 3, mentions: 0 });
         app.conn = Conn::Down("boom".into());
         term.draw(|f| draw(f, &mut app)).unwrap();
         let s = screen(&term).join("\n");
@@ -764,6 +826,25 @@ mod tests {
         assert!(s.contains("# random") && s.contains("channel"), "channel match\n{s}");
         assert!(s.contains("general · Bob") && s.contains("a random thought about boats"), "message match\n{s}");
         assert!(s.contains("1 messages found") || s.contains("found"), "{s}");
+    }
+
+    #[test]
+    fn mentions_are_badged_and_listed_in_their_own_view() {
+        let mut term = Terminal::new(TestBackend::new(110, 30)).unwrap();
+        let mut app = app();
+        app.mentions.insert("c2".into(), 3);
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(s.contains("random @3"), "the channel shows its unread mentions\n{s}");
+        assert!(s.contains("@3 mentioned"), "and so does the header\n{s}");
+        let mut hit = ev("p1", 1200, "hello @me", &[&["h", "c1"], &["p", "me"]]);
+        hit.pubkey = "bob".into();
+        app.handle(AppEvent::Live(Live::Event(hit)));
+        app.open_mentions();
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(s.contains("Mentions · Enter opens"), "{s}");
+        assert!(s.contains("general · Bob") && s.contains("hello @me"), "the mention is listed\n{s}");
     }
 
     #[test]

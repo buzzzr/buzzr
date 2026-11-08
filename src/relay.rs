@@ -95,6 +95,14 @@ pub fn npub_of(pubkey: &str) -> Option<String> {
     nostr::PublicKey::from_hex(pubkey).ok().and_then(|p| p.to_bech32().ok())
 }
 
+/// What a channel accumulated after a read position, for the badges at startup: messages from other people, and how many of
+/// those name you in a `p` tag.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Unread {
+    pub messages: u32,
+    pub mentions: u32,
+}
+
 impl Relay {
     pub fn new(relay_url: &str, keys: Keys, auth_tag_json: Option<String>) -> Result<Relay> {
         let auth_tag = match &auth_tag_json {
@@ -258,12 +266,19 @@ impl Relay {
         self.query(&[json!({"kinds": [9, 40002, 45001, 45003], "search": query, "limit": limit})]).await
     }
 
-    /// How many messages in `channel` arrived after `since` that someone else wrote: the unread badge at startup. Counts at
+    /// What a channel accumulated after `since`: messages someone else wrote, and how many of those mention you. Counts at
     /// most `UNREAD_LIMIT`, so a very busy channel reads as that many rather than making one huge query.
-    pub async fn unread(&self, channel: &str, since: u64) -> Result<u32> {
+    pub async fn unread(&self, channel: &str, since: u64) -> Result<Unread> {
         let me = self.me();
         let evs = self.query(&[json!({"kinds": MESSAGE_KINDS, "#h": [channel], "since": since, "limit": UNREAD_LIMIT})]).await?;
-        Ok(evs.iter().filter(|e| MESSAGE_KINDS.contains(&e.kind) && e.pubkey != me).count() as u32)
+        let mut out = Unread::default();
+        for e in evs.iter().filter(|e| MESSAGE_KINDS.contains(&e.kind) && e.pubkey != me) {
+            out.messages += 1;
+            if e.mentions(&me) {
+                out.mentions += 1;
+            }
+        }
+        Ok(out)
     }
 
     /// A page of the channel timeline, the way the Buzz app asks for it: top-level messages only, with thread summaries and the

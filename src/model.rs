@@ -89,6 +89,10 @@ impl Ev {
         }
     }
 
+    /// Whether this message notifies `me`: it carries a `p` tag naming them (the same tag buzzr adds when it sends an `@name`).
+    pub fn mentions(&self, me: &str) -> bool {
+        self.tags.iter().any(|t| t.first().map(String::as_str) == Some("p") && t.get(1).map(String::as_str) == Some(me))
+    }
 }
 
 /// What the relay says about one thread: `kind:39005`.
@@ -403,6 +407,14 @@ pub mod tests {
         assert!(s.apply(&del));
         assert!(s.timeline().is_empty());
         assert!(!s.apply(&ev("a", 1, "typo", &[])), "a deleted message does not come back");
+    }
+
+    #[test]
+    fn a_mention_is_a_p_tag_naming_you() {
+        let hey = ev("a", 1, "hi @you", &[&["h", "chan"], &["p", "you"]]);
+        assert!(hey.mentions("you"));
+        assert!(!hey.mentions("someone-else"), "only the named pubkey is mentioned");
+        assert!(!ev("b", 2, "hi @you", &[&["h", "chan"]]).mentions("you"), "text alone is not a mention: the p tag is");
     }
 
     #[test]

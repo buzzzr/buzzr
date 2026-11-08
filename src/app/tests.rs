@@ -371,11 +371,11 @@ fn a_startup_count_never_lowers_a_live_badge_and_skips_the_open_channel() {
     let mut app = app_with(2);
     app.handle(AppEvent::Live(Live::Event(msg("x1", 9000, "alice", "hey", &[&["h", "c2"]]))));
     app.handle(AppEvent::Live(Live::Event(msg("x2", 9001, "alice", "hey", &[&["h", "c2"]]))));
-    app.handle(AppEvent::Unread { channel: "c2".into(), count: 1 });
+    app.handle(AppEvent::Unread { channel: "c2".into(), count: 1, mentions: 0 });
     assert_eq!(app.unread.get("c2"), Some(&2), "the live count stays the higher one");
-    app.handle(AppEvent::Unread { channel: "c2".into(), count: 7 });
+    app.handle(AppEvent::Unread { channel: "c2".into(), count: 7, mentions: 0 });
     assert_eq!(app.unread.get("c2"), Some(&7), "a bigger startup count is taken");
-    app.handle(AppEvent::Unread { channel: "c1".into(), count: 4 });
+    app.handle(AppEvent::Unread { channel: "c1".into(), count: 4, mentions: 0 });
     assert_eq!(app.unread.get("c1"), None, "the channel on screen is read as it is drawn");
 }
 
@@ -383,7 +383,7 @@ fn a_startup_count_never_lowers_a_live_badge_and_skips_the_open_channel() {
 fn reopening_a_channel_draws_the_new_messages_line_where_the_last_visit_stopped() {
     let mut app = app_with_stored_read();
     channels_are(&mut app);
-    app.handle(AppEvent::Unread { channel: "c2".into(), count: 2 });
+    app.handle(AppEvent::Unread { channel: "c2".into(), count: 2, mentions: 0 });
     assert_eq!(app.unread.get("c2"), Some(&2));
     let cmds = open_random_with(&mut app, 3);
     assert!(cmds.contains(&Cmd::LoadWindow { channel: "c2".into(), cursor: None }), "the first visit loads the page");
@@ -427,6 +427,61 @@ fn read_all_clears_every_badge_and_writes_every_position() {
     for id in ["c1", "c2", "dm1"] {
         assert!(saved.get(id).map(|at| *at > 9000).unwrap_or(false), "{id} is marked read: {saved:?}");
     }
+}
+
+#[test]
+fn a_mention_of_you_is_counted_per_channel_and_clears_when_opened() {
+    let mut app = app_with(2);
+    app.handle(AppEvent::Live(Live::Event(msg("p1", 9000, "alice", "hi @me", &[&["h", "c2"], &["p", ME]]))));
+    app.handle(AppEvent::Live(Live::Event(msg("p2", 9001, "alice", "hi again", &[&["h", "c2"]]))));
+    assert_eq!(app.unread.get("c2"), Some(&2));
+    assert_eq!(app.mentions.get("c2"), Some(&1), "only the message naming you counts");
+    assert_eq!(app.total_mentions(), 1);
+    let i = app.channels.iter().position(|c| c.id == "c2").unwrap();
+    app.chan_cursor = i;
+    app.focus = Focus::Channels;
+    press(&mut app, KeyCode::Enter);
+    assert!(app.mentions.is_empty(), "opening the channel clears its mention badge");
+}
+
+#[test]
+fn a_startup_count_also_carries_the_mentions() {
+    let mut app = app_with(2);
+    app.handle(AppEvent::Unread { channel: "c2".into(), count: 5, mentions: 2 });
+    assert_eq!(app.unread.get("c2"), Some(&5));
+    assert_eq!(app.mentions.get("c2"), Some(&2));
+    app.handle(AppEvent::Unread { channel: "c2".into(), count: 5, mentions: 1 });
+    assert_eq!(app.mentions.get("c2"), Some(&2), "a smaller startup count never lowers the badge");
+}
+
+#[test]
+fn a_message_that_mentions_you_is_marked_in_the_list() {
+    let mut app = app_with(2);
+    app.handle(AppEvent::Live(Live::Event(msg("p1", 9000, "alice", "hi @me", &[&["h", "c1"], &["p", ME]]))));
+    let head = app.layout(78).items.last().unwrap().lines[0].text();
+    assert!(head.starts_with("@ "), "the mentioning message carries a marker: {head:?}");
+    let plain = app.layout(78).items[0].lines[0].text();
+    assert!(!plain.starts_with("@ "), "an ordinary message does not: {plain:?}");
+}
+
+#[test]
+fn the_mentions_view_lists_them_newest_first_and_opens_the_one_you_pick() {
+    let mut app = app_with(2);
+    app.handle(AppEvent::Live(Live::Event(msg("p1", 9000, "alice", "older @me", &[&["h", "c2"], &["p", ME]]))));
+    app.handle(AppEvent::Live(Live::Event(msg("p2", 9001, "bob", "newer @me", &[&["h", "c1"], &["p", ME]]))));
+    let ids: Vec<String> = app.mention_rows().iter().map(|(_, e)| e.id.clone()).collect();
+    assert_eq!(ids, ["p2", "p1"], "newest first");
+    app.focus = Focus::Input;
+    type_text(&mut app, "/mentions");
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(app.overlay, Overlay::Mentions);
+    // Down to the older mention, in the channel we are not looking at, and open it
+    press(&mut app, KeyCode::Down);
+    let cmds = press(&mut app, KeyCode::Enter);
+    assert_eq!(app.overlay, Overlay::None);
+    assert_eq!(app.channel().map(|c| c.id.as_str()), Some("c2"), "the mention's channel is opened");
+    assert_eq!(selected(&app), "p1", "and the mentioned message is selected");
+    assert!(cmds.contains(&Cmd::LoadWindow { channel: "c2".into(), cursor: None }), "its page is loaded: {cmds:?}");
 }
 
 #[test]

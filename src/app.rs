@@ -56,6 +56,8 @@ pub enum Overlay {
     Search,
     /// Somebody's profile card (`/whois`).
     Whois,
+    /// Messages that mention you, across the loaded channels.
+    Mentions,
     /// A plugin panel (or the built-in plugin list), drawn from `App::panel`.
     Panel,
 }
@@ -165,8 +167,8 @@ pub enum AppEvent {
     /// The answer to `Cmd::LoadProfile`.
     Profile { pubkey: String, result: Result<Profile, String> },
     Search { seq: u64, result: Result<Vec<Ev>, String> },
-    /// How many unread messages a channel had when we started (see `Cmd::LoadUnread`).
-    Unread { channel: String, count: u32 },
+    /// How many unread messages a channel had when we started (see `Cmd::LoadUnread`), and how many of them mention you.
+    Unread { channel: String, count: u32, mentions: u32 },
     /// From the plugin runtime: ready/status/panel/flash/draft/send/gone, and the plugin list.
     Plugin(PluginEvent),
     /// The release feed found a later version than the one running.
@@ -200,6 +202,10 @@ pub struct App {
     pub reply_target: Option<String>,
     pub conn: Conn,
     pub unread: HashMap<String, u32>,
+    /// Unread messages that mention you, per channel, for the `@N` badge in the channel list and `/mentions`.
+    pub mentions: HashMap<String, u32>,
+    /// Cursor in the `/mentions` overlay.
+    pub mention_cursor: usize,
     /// The last-read position per channel: the `created_at` we have read through, loaded from disk at startup.
     pub read: HashMap<String, u64>,
     /// Where each channel's last visit stopped, for the "new messages" line: taken from `read` as a channel is opened and kept
@@ -281,6 +287,8 @@ impl App {
             reply_target: None,
             conn: Conn::Connecting,
             unread: HashMap::new(),
+            mentions: HashMap::new(),
+            mention_cursor: 0,
             read: HashMap::new(),
             new_since: HashMap::new(),
             typing: HashMap::new(),
@@ -406,6 +414,10 @@ impl App {
         self.unread.values().sum()
     }
 
+    pub fn total_mentions(&self) -> u32 {
+        self.mentions.values().sum()
+    }
+
     // ---- read state ------------------------------------------------------------------------------------------------------
 
     /// Take the last-read position loaded from disk; the loop fills this in before the first event, tests set it directly.
@@ -417,6 +429,7 @@ impl App {
     /// position to disk when it moved. The unread badge clears either way: whatever we counted, we are looking at the channel.
     fn read_through(&mut self, channel: &str) -> Option<Cmd> {
         self.unread.remove(channel);
+        self.mentions.remove(channel);
         let newest = self.stores.get(channel).map(|s| s.latest).unwrap_or(0);
         if newest <= self.read.get(channel).copied().unwrap_or(0) {
             return None;
@@ -445,6 +458,7 @@ impl App {
                 self.read.insert(id, at);
             }
             self.unread.clear();
+            self.mentions.clear();
             self.new_since.clear();
             self.content_changed();
             self.flash("all channels marked read");
@@ -455,6 +469,7 @@ impl App {
             self.flash("no channel is open");
             return cmds;
         };
+        self.mentions.remove(&id);
         match self.read_through(&id) {
             Some(cmd) => {
                 self.new_since.remove(&id);
@@ -512,6 +527,9 @@ impl App {
         ];
         if edited {
             head.push(Span::styled(" (edited)", dim));
+        }
+        if !mine && m.mentions(&self.me) {
+            head.insert(0, Span::styled("@ ", Style::default().fg(crate::theme::get().warn).add_modifier(Modifier::BOLD)));
         }
         if let Some(mark) = self.plugins.message_mark(&m.id) {
             head.insert(0, Span::styled(format!("{} ", mark.text), mark.tone.style()));
@@ -844,7 +862,7 @@ impl App {
                 Vec::new()
             }
             AppEvent::Search { seq, result } => self.search_results(seq, result),
-            AppEvent::Unread { channel, count } => self.unread_loaded(channel, count),
+            AppEvent::Unread { channel, count, mentions } => self.unread_loaded(channel, count, mentions),
             AppEvent::Plugin(e) => self.plugin_event(e),
             AppEvent::Update(v) => {
                 self.latest = Some(v);
@@ -907,11 +925,18 @@ impl App {
 
     /// A startup unread count for a channel. The open channel is read as we look at it, so its count is dropped; elsewhere the
     /// count stands unless live messages have already raised the badge higher.
-    fn unread_loaded(&mut self, channel: String, count: u32) -> Vec<Cmd> {
+    fn unread_loaded(&mut self, channel: String, count: u32, mentions: u32) -> Vec<Cmd> {
         let current = self.channel().map(|c| c.id == channel).unwrap_or(false);
-        if !current && count > 0 {
-            let entry = self.unread.entry(channel).or_insert(0);
+        if current {
+            return Vec::new(); // the channel on screen is read as it is drawn
+        }
+        if count > 0 {
+            let entry = self.unread.entry(channel.clone()).or_insert(0);
             *entry = (*entry).max(count);
+        }
+        if mentions > 0 {
+            let entry = self.mentions.entry(channel).or_insert(0);
+            *entry = (*entry).max(mentions);
         }
         Vec::new()
     }
@@ -1092,6 +1117,9 @@ impl App {
             let current = self.channel().map(|c| c.id == channel).unwrap_or(false);
             if !current && e.pubkey != self.me {
                 *self.unread.entry(channel.clone()).or_default() += 1;
+                if e.mentions(&self.me) {
+                    *self.mentions.entry(channel.clone()).or_default() += 1;
+                }
             }
         }
         let current = self.channel().map(|c| c.id == channel).unwrap_or(false);
@@ -1137,6 +1165,9 @@ impl App {
         }
         if self.overlay == Overlay::Search {
             return self.key_search(k);
+        }
+        if self.overlay == Overlay::Mentions {
+            return self.key_mentions(k);
         }
         if self.overlay == Overlay::Panel {
             return self.key_panel(k);
@@ -1428,6 +1459,10 @@ impl App {
             "refresh" => self.refresh(),
             "more" => self.load_older(),
             "read" => self.mark_read_command(arg),
+            "mentions" => {
+                self.open_mentions();
+                Vec::new()
+            }
             "search" => {
                 self.open_search(arg.to_owned());
                 if arg.chars().count() >= 2 {
@@ -1970,6 +2005,64 @@ impl App {
                 cmds
             }
         }
+    }
+
+    // ---- mentions --------------------------------------------------------------------------------------------------------
+
+    /// Open the mentions overlay: recent messages that mention you, newest first.
+    pub fn open_mentions(&mut self) {
+        self.mention_cursor = 0;
+        self.overlay = Overlay::Mentions;
+    }
+
+    /// The messages that mention you across the loaded channels, newest first, as `(channel id, message)`.
+    pub fn mention_rows(&self) -> Vec<(String, Ev)> {
+        let mut rows: Vec<(String, Ev)> = Vec::new();
+        for (ch, store) in &self.stores {
+            for m in store.msgs.values() {
+                if m.pubkey != self.me && MESSAGE_KINDS.contains(&m.kind) && !store.deleted.contains(&m.id) && m.mentions(&self.me) {
+                    rows.push((ch.clone(), m.clone()));
+                }
+            }
+        }
+        rows.sort_by(|a, b| (b.1.created_at, &b.1.id).cmp(&(a.1.created_at, &a.1.id)));
+        rows.truncate(200);
+        rows
+    }
+
+    fn key_mentions(&mut self, k: KeyEvent) -> Vec<Cmd> {
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        let n = self.mention_rows().len();
+        match k.code {
+            KeyCode::Esc => self.overlay = Overlay::None,
+            KeyCode::Char('m') if !ctrl => self.overlay = Overlay::None,
+            KeyCode::Up => self.mention_cursor = self.mention_cursor.saturating_sub(1),
+            KeyCode::Down => self.mention_cursor = (self.mention_cursor + 1).min(n.saturating_sub(1)),
+            KeyCode::PageUp => self.mention_cursor = self.mention_cursor.saturating_sub(8),
+            KeyCode::PageDown => self.mention_cursor = (self.mention_cursor + 8).min(n.saturating_sub(1)),
+            KeyCode::Home => self.mention_cursor = 0,
+            KeyCode::End => self.mention_cursor = n.saturating_sub(1),
+            KeyCode::Enter => return self.activate_mention(),
+            _ => {}
+        }
+        Vec::new()
+    }
+
+    /// Open the selected mention: its channel, inside its thread if it is a reply, with the message selected.
+    fn activate_mention(&mut self) -> Vec<Cmd> {
+        let Some((ch, ev)) = self.mention_rows().into_iter().nth(self.mention_cursor) else { return Vec::new() };
+        self.overlay = Overlay::None;
+        let Some(i) = self.channels.iter().position(|c| c.id == ch) else { return Vec::new() };
+        // make sure the message is in the store (a mention can arrive before its channel's page is loaded)
+        self.stores.entry(ch.clone()).or_default().apply(&ev);
+        let root = self.stores.get(&ch).map(|s| s.thread_root(&ev).to_owned()).unwrap_or_else(|| ev.id.clone());
+        let mut cmds = self.open_channel(i);
+        if root != ev.id {
+            cmds.extend(self.open_thread(root));
+        }
+        self.pending_select = Some(ev.id.clone());
+        self.set_focus(Focus::Messages);
+        cmds
     }
 }
 
