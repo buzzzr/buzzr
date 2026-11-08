@@ -70,7 +70,7 @@ per request, `payload` = SHA-256 of the body). An agent identity also sends its 
 
 | Need | Filter |
 |---|---|
-| channels | `{"kinds":[39000],"limit":500}` (`d` = id, `name`, `about`) |
+| channels | `{"kinds":[39000],"limit":500}` (`d` = id, `name`, `about`; the name `DM` and the `t` label `buzz.solo` pick the list section: Solo, Channels, DMs) |
 | members | `{"kinds":[39002],"#d":[channel],"limit":1}` (`p` tags, role in the 4th element) |
 | names | `{"kinds":[0],"authors":[...]}` (`display_name`, else `name`) |
 | timeline page | `{"kinds":[9,40002,40008,45001,45003],"#h":[channel],"limit":50,"top_level":true,"include_summaries":true,"include_aux":true}` plus `until`+`before_id` for older pages. Answer: rows, relay-signed `39005` thread summaries (`reply_count`, `last_reply_at`), reactions/edits/deletions of those rows, and one `39006` bounds event (`has_more`, `next_cursor`) whose `d` tag must end with the cursor we sent (NIP-CW) |

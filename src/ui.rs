@@ -1,7 +1,7 @@
 //! Drawing the screen. Everything here reads `App`; the only thing it changes is the geometry it reports back (so that clicks
 //! can be mapped to what is on screen).
 
-use crate::app::{App, Conn, Focus, Overlay, Row, View};
+use crate::app::{App, Conn, Focus, Overlay, Row, SideRow, View};
 use crate::list;
 use ratatui::layout::{Alignment, Constraint, Layout, Position, Rect};
 use ratatui::style::{Modifier, Style};
@@ -88,8 +88,8 @@ fn spans(segments: &[crate::contrib::Segment], width: usize) -> Vec<Span<'static
 fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     let title = match (app.channel(), &app.view) {
         (None, _) => "no channel".to_owned(),
-        (Some(c), View::Channel) => if c.is_dm { c.label.clone() } else { format!("#{}", c.label) },
-        (Some(c), View::Thread(_)) => format!("{} › thread", if c.is_dm { c.label.clone() } else { format!("#{}", c.label) }),
+        (Some(c), View::Channel) => if c.is_dm() { c.label.clone() } else { format!("#{}", c.label) },
+        (Some(c), View::Thread(_)) => format!("{} › thread", if c.is_dm() { c.label.clone() } else { format!("#{}", c.label) }),
     };
     let left = Line::from(vec![Span::styled(" buzzr ", Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED)), Span::raw(format!(" {title}"))]);
     let (dot, text, color) = match &app.conn {
@@ -120,7 +120,17 @@ fn draw_channels(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(block, area);
     let focused = app.focus == Focus::Channels;
     let mut lines = Vec::new();
-    for (i, c) in app.channels.iter().enumerate().take(inner.height as usize) {
+    let rows = app.sidebar_rows();
+    let top = app.sidebar_scroll(&rows, inner.height as usize);
+    for row in rows.into_iter().skip(top).take(inner.height as usize) {
+        let i = match row {
+            SideRow::Title(section) => {
+                lines.push(Line::from(Span::styled(format!(" {}", section.title()), dim().add_modifier(Modifier::BOLD))));
+                continue;
+            }
+            SideRow::Channel(i) => i,
+        };
+        let c = &app.channels[i];
         let open = app.cur == Some(i);
         let bar = app.channel_bar() == Some(i);
         let unread = app.unread.get(&c.id).copied().unwrap_or(0);
@@ -448,7 +458,7 @@ fn draw_search(f: &mut Frame, app: &App, area: Rect) {
         match row {
             Row::Channel(c) => {
                 let ch = &app.channels[*c];
-                spans.push(Span::styled(if ch.is_dm { ch.label.clone() } else { format!("# {}", ch.label) }, Style::default().fg(crate::theme::get().accent).add_modifier(Modifier::BOLD)));
+                spans.push(Span::styled(if ch.is_dm() { ch.label.clone() } else { format!("# {}", ch.label) }, Style::default().fg(crate::theme::get().accent).add_modifier(Modifier::BOLD)));
                 spans.push(Span::styled("  channel", dim()));
             }
             Row::Message(e) => {
@@ -503,7 +513,7 @@ mod tests {
 
     fn app() -> App {
         let mut app = App::new("me".into(), false, chrono_tz::UTC);
-        let chan = |id: &str, name: &str| Channel { id: id.into(), name: name.into(), about: String::new(), created_at: 1, is_dm: false, label: name.into() };
+        let chan = |id: &str, name: &str| Channel { id: id.into(), name: name.into(), about: String::new(), created_at: 1, section: crate::model::Section::Channels, label: name.into() };
         let _: Vec<Cmd> = app.handle(AppEvent::Channels(Ok(vec![chan("c1", "general"), chan("c2", "random")])));
         let mut m1 = ev("a", 1000, "**Hello** there, see [docs](https://example.com)", &[]);
         m1.pubkey = "bob".into();
@@ -637,19 +647,34 @@ mod tests {
         // the channel list has no focus: the bar marks the channel on screen
         term.draw(|f| draw(f, &mut app)).unwrap();
         let s = screen(&term);
-        assert!(s[1].starts_with("▌ general"), "the bar is on the open channel\n{}", s.join("\n"));
-        assert!(s[2].starts_with("  random"), "the other channel has none\n{}", s.join("\n"));
+        assert!(s[2].starts_with("▌ general"), "the bar is on the open channel\n{}", s.join("\n"));
+        assert!(s[3].starts_with("  random"), "the other channel has none\n{}", s.join("\n"));
         // (Messages -> Channels) then Down: the bar moves with the cursor
         app.handle(key(KeyCode::BackTab));
         app.handle(key(KeyCode::Down));
         term.draw(|f| draw(f, &mut app)).unwrap();
         let s = screen(&term);
-        assert!(s[1].starts_with("  general") && s[2].starts_with("▌ random"), "the bar moved to the cursor\n{}", s.join("\n"));
+        assert!(s[2].starts_with("  general") && s[3].starts_with("▌ random"), "the bar moved to the cursor\n{}", s.join("\n"));
         // Tab away without opening one: the bar is back on the channel on screen
         app.handle(key(KeyCode::Tab));
         term.draw(|f| draw(f, &mut app)).unwrap();
         let s = screen(&term);
-        assert!(s[1].starts_with("▌ general") && s[2].starts_with("  random"), "the bar came back\n{}", s.join("\n"));
+        assert!(s[2].starts_with("▌ general") && s[3].starts_with("  random"), "the bar came back\n{}", s.join("\n"));
+    }
+
+    #[test]
+    fn the_channel_list_shows_a_title_per_section() {
+        let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        let mut app = App::new("me".into(), false, chrono_tz::UTC);
+        let chan = |id: &str, name: &str, section| Channel { id: id.into(), name: name.into(), about: String::new(), created_at: 1, section, label: name.into() };
+        use crate::model::Section::*;
+        app.handle(AppEvent::Channels(Ok(vec![chan("d", "DM", Dms), chan("c", "general", Channels), chan("s", "chat", Solo)])));
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term);
+        let col: Vec<String> = s[1..7].iter().map(|l| l.chars().take(26).collect::<String>().trim().to_owned()).collect();
+        assert_eq!(col[0], "Solo", "{}", s.join("\n"));
+        assert!(col[1].ends_with("chat") && col[2] == "Channels" && col[3].ends_with("general"), "{col:?}");
+        assert!(col[4] == "DMs" && col[5].ends_with("DM"), "{col:?}");
     }
 
     #[test]

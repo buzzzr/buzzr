@@ -29,7 +29,7 @@
 
 ## Features
 
-- **Channels and DMs** with unread counts. DMs are labelled with the other person.
+- **Channels and DMs** with unread counts, in sections: Solo chats, Channels (private and open) and DMs. DMs are labelled with the other person.
 - **Unread that survives a restart.** The last-read position is saved per channel, so the badges are right again next time and a
   `new messages` line shows where you left off.
 - **Threads.** A channel shows top-level messages only, as the Buzz app does, each with its reply count and the time of the last reply.
