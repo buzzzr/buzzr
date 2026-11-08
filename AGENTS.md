@@ -7,7 +7,7 @@ buzzr is a terminal client for Buzz (a Nostr-based chat for people and agents) t
 
 See the module table in `ARCHITECTURE.md`. Tests sit next to the code (`#[cfg(test)]`), plus `src/app/tests.rs`.
 `tests/e2e.rs` is the end-to-end suite: it starts the real binary in a pty against
-[`buzz-fake-relay`](https://github.com/vthub/buzz-fake-relay) and checks the screen it draws — run it with
+[`buzz-fake-relay`](https://github.com/buzzzr/buzz-fake-relay) and checks the screen it draws — run it with
 `tests/e2e/run.sh` or `./build.sh e2e` (see `tests/e2e/README.md`). A change to navigation, to what a pane
 or overlay shows, or to a key binding adds a case there.
 `tests/fixtures/key-v2.json` is a key file written by an earlier build (see principle 4). `PLUGIN.md` is the contract for writing a

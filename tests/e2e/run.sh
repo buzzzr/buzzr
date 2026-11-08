@@ -6,7 +6,7 @@
 #
 # Environment:
 #   BUZZ_FAKE_RELAY_BIN   a relay binary to use; skips fetching and building (set it to reuse a build)
-#   BUZZ_FAKE_RELAY_REPO  instead of the default https://github.com/vthub/buzz-fake-relay
+#   BUZZ_FAKE_RELAY_REPO  instead of the default https://github.com/buzzzr/buzz-fake-relay
 #   BUZZ_FAKE_RELAY_REF   a branch/tag/commit to check out (default: main)
 #   BUZZ_FAKE_RELAY_DIR   where to clone it (default: target/e2e/buzz-fake-relay)
 #
@@ -18,7 +18,7 @@ here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
 
 if [ -z "${BUZZ_FAKE_RELAY_BIN:-}" ]; then
-    repo=${BUZZ_FAKE_RELAY_REPO:-https://github.com/vthub/buzz-fake-relay}
+    repo=${BUZZ_FAKE_RELAY_REPO:-https://github.com/buzzzr/buzz-fake-relay}
     ref=${BUZZ_FAKE_RELAY_REF:-main}
     dir=${BUZZ_FAKE_RELAY_DIR:-$root/target/e2e/buzz-fake-relay}
     if [ ! -d "$dir/.git" ]; then

@@ -3,7 +3,7 @@
 These tests start the real `buzzr` binary in a pseudo-terminal and read the screen it draws, so they
 check the things the unit tests cannot see: which channel opens, what the sidebar lists, what the
 arrow keys and Enter do, how the panes cycle, what the overlays say, and that the program quits
-cleanly. Everything on screen comes from [`buzz-fake-relay`](https://github.com/vthub/buzz-fake-relay),
+cleanly. Everything on screen comes from [`buzz-fake-relay`](https://github.com/buzzzr/buzz-fake-relay),
 so nothing is published anywhere and no identity is needed.
 
 ## Run them

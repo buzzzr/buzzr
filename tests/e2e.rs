@@ -1,5 +1,5 @@
 //! End-to-end UI tests: the real `buzzr` binary, in a pseudo-terminal, talking to the fake relay
-//! (`https://github.com/vthub/buzz-fake-relay`). They check what is actually on the screen — which
+//! (`https://github.com/buzzzr/buzz-fake-relay`). They check what is actually on the screen — which
 //! channel opens, what the sidebar lists, what each key does, what the overlays say — none of which
 //! the unit tests, that never start a process, can see.
 //!
