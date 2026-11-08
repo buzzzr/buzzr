@@ -9,7 +9,7 @@ use crate::list::{self, Layout, ListState, Rendered};
 use crate::live::Live;
 use crate::markdown::{self, Line};
 use crate::model::{Channel, Ev, Section, Store, MESSAGE_KINDS};
-use crate::relay::Window;
+use crate::relay::{self, Profile, Window};
 use crate::update::InstallSource;
 use base64::Engine;
 use chrono::TimeZone;
@@ -54,8 +54,30 @@ pub enum Overlay {
     Keys,
     Help,
     Search,
+    /// Somebody's profile card (`/whois`).
+    Whois,
     /// A plugin panel (or the built-in plugin list), drawn from `App::panel`.
     Panel,
+}
+
+/// Somebody's profile card: what `/whois NAME` shows. The name and the about line come back from the relay a moment later, so
+/// the card opens at once with what is already known and fills in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Whois {
+    pub pubkey: String,
+    pub name: String,
+    pub npub: String,
+    pub about: Option<String>,
+    pub loading: bool,
+}
+
+/// `npub1abcd…wxyz` for a pubkey, or its first characters when it is not a hex key we can encode.
+fn short_key(pubkey: &str) -> String {
+    match relay::npub_of(pubkey) {
+        Some(n) if n.len() > 16 => format!("{}…{}", &n[..12], &n[n.len() - 4..]),
+        Some(n) => n,
+        None => pubkey.chars().take(8).collect(),
+    }
 }
 
 /// An open panel: rows and a cursor owned by the host, `Enter` sends the row's action to its plugin.
@@ -83,6 +105,8 @@ pub struct Search {
 /// One row of the search results.
 pub enum Row {
     Channel(usize),
+    /// Somebody we know a name for; Enter opens (or starts) the DM with them.
+    Person(String),
     Message(Ev),
 }
 
@@ -111,6 +135,10 @@ pub enum Cmd {
     Edit { channel: String, id: String, text: String },
     Delete { channel: String, id: String },
     CreateChannel { name: String, private: bool, about: Option<String> },
+    /// Ask the relay for the direct message with this person (`kind:41010`); it creates it when it does not exist yet.
+    OpenDm { peer: String },
+    /// One person's profile card (`kind:0`).
+    LoadProfile(String),
     Search { query: String, seq: u64 },
     /// Write the last-read position per channel to disk (the loop owns the file).
     SaveRead(HashMap<String, u64>),
@@ -132,6 +160,10 @@ pub enum AppEvent {
     Sent(Result<String, String>),
     /// The id of the channel we asked to create.
     Created(Result<String, String>),
+    /// The relay took (or found) the direct message we asked for; the channel list is reloaded to find its id.
+    DmOpened(Result<(), String>),
+    /// The answer to `Cmd::LoadProfile`.
+    Profile { pubkey: String, result: Result<Profile, String> },
     Search { seq: u64, result: Result<Vec<Ev>, String> },
     /// How many unread messages a channel had when we started (see `Cmd::LoadUnread`).
     Unread { channel: String, count: u32 },
@@ -197,6 +229,10 @@ pub struct App {
     pub editing: Option<String>,
     pub confirm_delete: Option<String>,
     pub search: Search,
+    /// Somebody's profile card, while `Overlay::Whois` is up.
+    pub whois: Option<Whois>,
+    /// The person a fresh DM was asked for: the channel is opened as soon as the reloaded list has it.
+    pending_dm: Option<String>,
     /// What loaded plugins put on the screen: status items, badges, marks and `/commands`.
     pub plugins: Registry,
     /// How this copy of buzzr was installed, for `/update`; the loop fills it in, tests set it directly.
@@ -268,6 +304,8 @@ impl App {
             editing: None,
             confirm_delete: None,
             search: Search { query: Editor::default(), messages: Vec::new(), cursor: 0, seq: 0, asked: String::new(), edited_at: Instant::now(), loading: false },
+            whois: None,
+            pending_dm: None,
             plugins: Registry::default(),
             update_source: InstallSource::Other,
             latest: None,
@@ -741,7 +779,9 @@ impl App {
                 if let Ok(m) = result {
                     let unknown: Vec<String> = m.iter().map(|(p, _)| p.clone()).collect();
                     self.members.insert(channel, m);
-                    return self.want_names(unknown);
+                    let mut cmds = self.want_names(unknown);
+                    cmds.extend(self.open_pending_dm());
+                    return cmds;
                 }
                 Vec::new()
             }
@@ -774,6 +814,35 @@ impl App {
                     Vec::new()
                 }
             },
+            AppEvent::DmOpened(Ok(())) => vec![Cmd::LoadChannels],
+            AppEvent::DmOpened(Err(e)) => {
+                self.pending_dm = None;
+                self.flash(format!("could not open the DM: {e}"));
+                Vec::new()
+            }
+            AppEvent::Profile { pubkey, result } => {
+                // An answer for a card that has since been replaced by another person is dropped.
+                if self.whois.as_ref().map(|w| w.pubkey == pubkey).unwrap_or(false) {
+                    match result {
+                        Ok(p) => {
+                            if let Some(w) = self.whois.as_mut() {
+                                if !p.name.is_empty() {
+                                    w.name = p.name;
+                                }
+                                w.about = Some(p.about);
+                                w.loading = false;
+                            }
+                        }
+                        Err(e) => {
+                            if let Some(w) = self.whois.as_mut() {
+                                w.loading = false;
+                            }
+                            self.flash(format!("could not load the profile: {e}"));
+                        }
+                    }
+                }
+                Vec::new()
+            }
             AppEvent::Search { seq, result } => self.search_results(seq, result),
             AppEvent::Unread { channel, count } => self.unread_loaded(channel, count),
             AppEvent::Plugin(e) => self.plugin_event(e),
@@ -903,6 +972,7 @@ impl App {
                 }
             }
         }
+        cmds.extend(self.open_pending_dm());
         cmds
     }
 
@@ -1366,6 +1436,20 @@ impl App {
                 Vec::new()
             }
             "new" => self.create_channel(arg),
+            "dm" => {
+                if arg.trim().is_empty() {
+                    self.flash("usage: /dm NAME (a name from a channel, or an npub)");
+                    return Vec::new();
+                }
+                match self.resolve_person(arg) {
+                    Ok(pk) => self.open_dm(&pk),
+                    Err(e) => {
+                        self.flash(e);
+                        Vec::new()
+                    }
+                }
+            }
+            "whois" => self.show_whois(arg),
             "edit" | "delete" => match arg.parse::<usize>().ok().and_then(|n| self.message_number(n)) {
                 Some(m) if cmd == "edit" => {
                     self.start_edit(&m);
@@ -1656,6 +1740,115 @@ impl App {
         vec![Cmd::CreateChannel { name: name.to_owned(), private, about: (!about.is_empty()).then(|| about.to_owned()) }]
     }
 
+    // ---- people and DMs
+
+    /// Everyone whose display name contains `q`, exact matches first. Names come from the relay's `kind:0` profiles, so this
+    /// finds the people seen in the channels we have loaded (members and authors), not the whole community.
+    fn people_matching(&self, q: &str) -> Vec<String> {
+        let needle = q.trim().to_lowercase();
+        if needle.is_empty() {
+            return Vec::new();
+        }
+        let (mut exact, mut partial) = (Vec::new(), Vec::new());
+        for (pk, name) in &self.names {
+            if *pk == self.me {
+                continue;
+            }
+            let n = name.to_lowercase();
+            if n == needle {
+                exact.push(pk.clone());
+            } else if n.contains(&needle) {
+                partial.push(pk.clone());
+            }
+        }
+        exact.sort();
+        partial.sort();
+        exact.extend(partial);
+        exact
+    }
+
+    /// A name, or an npub/hex key, to the one person it names: the reason when it is none or more than one.
+    fn resolve_person(&self, who: &str) -> Result<String, String> {
+        if let Some(pk) = relay::as_pubkey(who) {
+            return Ok(pk);
+        }
+        let found = self.people_matching(who);
+        match found.len() {
+            0 => Err(format!("nobody here is called {who} — use a name from a channel, or an npub")),
+            1 => Ok(found[0].clone()),
+            n => {
+                let names: Vec<String> = found.iter().take(4).map(|pk| format!("{} ({})", self.name_of(pk), short_key(pk))).collect();
+                Err(format!("{who} could be any of {n}: {} — use more of the name, or an npub", names.join(", ")))
+            }
+        }
+    }
+
+    /// The DM channel whose only other member is `peer`, once we have loaded its members.
+    fn dm_with(&self, peer: &str) -> Option<usize> {
+        let me = self.me.as_str();
+        self.channels.iter().position(|c| {
+            if !c.is_dm() {
+                return false;
+            }
+            let Some(members) = self.members.get(&c.id) else { return false };
+            let others: Vec<&str> = members.iter().map(|(p, _)| p.as_str()).filter(|p| *p != me).collect();
+            others == [peer]
+        })
+    }
+
+    /// `/dm NAME`, and Enter on a person in the search: open the DM that is already there, else ask the relay for one.
+    fn open_dm(&mut self, peer: &str) -> Vec<Cmd> {
+        if let Some(i) = self.dm_with(peer) {
+            let cmds = self.open_channel(i);
+            self.set_focus(Focus::Input);
+            return cmds;
+        }
+        if self.read_only {
+            self.flash("read-only mode: nothing is sent");
+            return Vec::new();
+        }
+        // No DM with them in the list: the relay has one or will make one, and either way the channel shows up in the reload.
+        self.flash(format!("opening a DM with {}…", self.name_of(peer)));
+        self.pending_dm = Some(peer.to_owned());
+        vec![Cmd::OpenDm { peer: peer.to_owned() }]
+    }
+
+    /// A DM was opened on the relay, or a DM's members arrived: open the channel as soon as the list has it. Until then the
+    /// request stays pending, so a channel list that lags behind (the relay's caches, or a slow member list) still ends up on
+    /// screen rather than being silently forgotten.
+    fn open_pending_dm(&mut self) -> Vec<Cmd> {
+        let Some(peer) = self.pending_dm.clone() else { return Vec::new() };
+        let Some(i) = self.dm_with(&peer) else { return Vec::new() };
+        self.pending_dm = None;
+        let cmds = self.open_channel(i);
+        self.set_focus(Focus::Input);
+        cmds
+    }
+
+    /// `/whois NAME`: the profile card, filled with the name we already have and the about line from the relay.
+    fn show_whois(&mut self, who: &str) -> Vec<Cmd> {
+        if who.trim().is_empty() {
+            self.flash("usage: /whois NAME (a name from a channel, or an npub)");
+            return Vec::new();
+        }
+        let pk = match self.resolve_person(who) {
+            Ok(pk) => pk,
+            Err(e) => {
+                self.flash(e);
+                return Vec::new();
+            }
+        };
+        self.whois = Some(Whois {
+            name: self.names.get(&pk).cloned().unwrap_or_default(),
+            npub: relay::npub_of(&pk).unwrap_or_else(|| pk.clone()),
+            pubkey: pk.clone(),
+            about: None,
+            loading: true,
+        });
+        self.overlay = Overlay::Whois;
+        vec![Cmd::LoadProfile(pk)]
+    }
+
     // ---- search
 
     pub fn open_search(&mut self, query: String) {
@@ -1697,7 +1890,7 @@ impl App {
         }
     }
 
-    /// Channel-name matches (local) followed by message matches (from the relay).
+    /// Channel-name matches (local), then people (local), then message matches (from the relay).
     pub fn search_rows(&self) -> Vec<Row> {
         let q = self.search.query.text().trim().to_lowercase();
         let mut rows = Vec::new();
@@ -1707,6 +1900,7 @@ impl App {
                     rows.push(Row::Channel(i));
                 }
             }
+            rows.extend(self.people_matching(&q).into_iter().map(Row::Person));
         }
         rows.extend(self.search.messages.iter().cloned().map(Row::Message));
         rows
@@ -1761,6 +1955,7 @@ impl App {
                 self.set_focus(Focus::Messages);
                 cmds
             }
+            Row::Person(pk) => self.open_dm(&pk),
             Row::Message(ev) => {
                 let Some(i) = ev.channel().and_then(|h| self.channels.iter().position(|c| c.id == h)) else { return Vec::new() };
                 let id = self.channels[i].id.clone();

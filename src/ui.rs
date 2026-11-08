@@ -75,6 +75,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Overlay::Keys => draw_keys(f, body),
         Overlay::Help => draw_help(f, area),
         Overlay::Search => draw_search(f, app, area),
+        Overlay::Whois => draw_whois(f, app, area),
         Overlay::Panel => draw_panel(f, app, area),
         Overlay::None => {}
     }
@@ -361,13 +362,16 @@ pub const KEYS: &[(&str, &str)] = &[
     ("c", "copy the selected message to the clipboard"),
     ("e", "edit the selected message (yours only)"),
     ("d", "delete the selected message (yours only; asks first)"),
-    ("Ctrl+F", "search channels and every message"),
+    ("Ctrl+F", "search channels, people and every message"),
     ("click", "select; open the thread; on a link: copy it"),
     ("mouse wheel", "scroll"),
     ("", ""),
     ("Panel (from /plugins or a plugin)", ""),
     ("Up / Down, PgUp / PgDn, Home / End", "move"),
     ("Enter", "run the selected row"),
+    ("Esc", "close"),
+    ("", ""),
+    ("Profile card (from /whois)", ""),
     ("Esc", "close"),
     ("", ""),
     ("Writing", ""),
@@ -404,6 +408,7 @@ pub const HELP: &[&str] = &[
     "  /more       load older messages        /refresh   reload now",
     "  /help       this screen                /q   quit",
     "  /edit N     edit your message N        /delete N   delete your message N (asks first)",
+    "  /whois NAME their profile             /dm NAME   start (or open) a DM",
     "  /search text   search                  /new [private] name [about]   create a channel",
     "  /plugins    what is loaded, and the commands plugins added",
     "  /update     how to upgrade this copy (brew, cargo or the release page)",
@@ -411,7 +416,8 @@ pub const HELP: &[&str] = &[
     "  /read       mark this channel read     /read all   mark every channel read",
     "Unread survives a restart: it comes from the last-read position in ~/.config/buzzr/read-state.json, and a",
     "\"new messages\" line marks where new messages start.",
-    "Search (Ctrl+F): channel names and full-text message search; Enter opens the result in its channel or thread.",
+    "Search (Ctrl+F): channel names, people and full-text message search; Enter opens the result — a person starts a DM.",
+    "A person is found by the name in their profile, or by their npub (hex or npub1…): /dm and /whois take either.",
     "Others see \"typing…\" while you write (start with --no-typing to turn that off).",
     "",
     "New messages, edits, deletions, reactions and typing indicators arrive live; there is no polling.",
@@ -461,6 +467,10 @@ fn draw_search(f: &mut Frame, app: &App, area: Rect) {
                 spans.push(Span::styled(if ch.is_dm() { ch.label.clone() } else { format!("# {}", ch.label) }, Style::default().fg(crate::theme::get().accent).add_modifier(Modifier::BOLD)));
                 spans.push(Span::styled("  channel", dim()));
             }
+            Row::Person(pk) => {
+                spans.push(Span::styled(app.name_of(pk), Style::default().fg(crate::theme::get().accent).add_modifier(Modifier::BOLD)));
+                spans.push(Span::styled("  person · Enter opens a DM", dim()));
+            }
             Row::Message(e) => {
                 let chan = app.channels.iter().find(|c| Some(c.id.as_str()) == e.channel()).map(|c| c.label.clone()).unwrap_or_default();
                 let head = format!(" {chan} · {} · ", app.name_of(&e.pubkey));
@@ -484,6 +494,31 @@ fn draw_search(f: &mut Frame, app: &App, area: Rect) {
         lines.push(Line::from(Span::styled(" nothing found", dim())));
     }
     f.render_widget(Paragraph::new(lines), list_area);
+}
+
+/// Somebody's profile card (`/whois NAME`): the name, the npub, and what they wrote about themselves. Everything from the
+/// relay goes through the Markdown renderer (which strips control characters and wraps), so nothing in a profile can reach the
+/// terminal as anything but text.
+fn draw_whois(f: &mut Frame, app: &App, area: Rect) {
+    let Some(w) = &app.whois else { return };
+    let width = 72.min(area.width.saturating_sub(4)).max(24);
+    let inner_w = width.saturating_sub(2) as usize;
+    let text = |s: &str| crate::markdown::render(s, inner_w).into_iter().map(|l| Line::from(l.spans));
+    let mut lines: Vec<Line> = Vec::new();
+    let name = if w.name.trim().is_empty() { "(no name in their profile)" } else { w.name.as_str() };
+    lines.extend(text(name).map(|l| l.style(Style::default().add_modifier(Modifier::BOLD))));
+    lines.extend(text(&w.npub).map(|l| l.style(dim())));
+    lines.push(Line::default());
+    match (w.about.as_deref().map(str::trim), w.loading) {
+        (Some(about), _) if !about.is_empty() => lines.extend(text(about)),
+        (_, true) => lines.push(Line::from(Span::styled("loading their profile…", dim()))),
+        _ => lines.push(Line::from(Span::styled("no about line in their profile", dim()))),
+    }
+    let h = (lines.len() as u16 + 2).min(area.height.saturating_sub(2)).max(4);
+    let r = Rect::new(area.x + (area.width.saturating_sub(width)) / 2, area.y + (area.height.saturating_sub(h)) / 2, width, h);
+    clear_popup(f, r);
+    let title = format!(" {} · Esc closes ", if w.name.trim().is_empty() { "profile" } else { w.name.as_str() });
+    f.render_widget(Paragraph::new(lines).block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(crate::theme::get().accent)).title(title)), r);
 }
 
 fn draw_help(f: &mut Frame, area: Rect) {
@@ -525,6 +560,28 @@ mod tests {
         app.handle(AppEvent::Window { channel: "c1".into(), cursor: None, result: Ok(Window { events: vec![m1, m2, r], has_more: true, next_cursor: Some((1, "a".into())) }) });
         app.handle(AppEvent::Live(Live::Up));
         app
+    }
+
+    #[test]
+    fn a_person_in_the_search_and_a_profile_card_are_drawn() {
+        let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        let alice = "aa".repeat(32);
+        let mut app = app();
+        app.handle(AppEvent::Names(Ok([("bob".to_string(), "Bob".to_string()), (alice.clone(), "Alice Smith".to_string())].into())));
+        app.overlay = Overlay::Search;
+        app.search.query.insert_str("ali");
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(s.contains("Alice Smith") && s.contains("person · Enter opens a DM"), "a person in the search says what Enter does\n{s}");
+
+        app.overlay = Overlay::Whois;
+        app.whois = Some(crate::app::Whois { pubkey: alice.clone(), name: "Alice Smith".into(), npub: crate::relay::npub_of(&alice).unwrap(), about: Some("I sail. **A lot.**".into()), loading: false });
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(s.contains("Alice Smith") && s.contains("npub1"), "the card names the person and shows their npub\n{s}");
+        assert!(s.contains("I sail. A lot."), "the about line is rendered as markdown\n{s}");
+        assert!(!s.contains("**"), "and not shown raw");
+        assert!(s.contains("Esc closes"), "the card says how to close it\n{s}");
     }
 
     #[test]
