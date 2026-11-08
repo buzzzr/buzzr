@@ -19,7 +19,7 @@ as much as to coding agents.
 
 Open pull requests against `main` of `buzzzr/buzzr`, from a branch in your fork. One change per pull request: a small, focused diff gets
 reviewed faster than a large one. For anything bigger than a bug fix, open an issue first so the approach can be agreed before you
-write it. The pull request template (`.github/pull_request_template.md`) fills in for you; the requirements behind it are:
+write it. The pull request template (`.github/pull_request_template.md`) has three sections to fill in (what and why, screenshots, how it was tested); the requirements behind it are:
 
 1. **Say what and why**, and link the issue (`Closes #123`).
 2. **Green build:** `./build.sh test` passes and there are no new warnings. CI runs the same.
