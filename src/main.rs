@@ -401,6 +401,18 @@ fn run(cmd: Cmd, relay: &Arc<Relay>, tx: &UnboundedSender<AppEvent>, subscriptio
                 let _ = tx.send(AppEvent::Created(result));
             });
         }
+        Cmd::OpenDm { peer } => {
+            tokio::spawn(async move {
+                let result = async { relay.submit(relay::dm_open_builder(&peer)?).await.map(|_| ()) }.await.map_err(e);
+                let _ = tx.send(AppEvent::DmOpened(result));
+            });
+        }
+        Cmd::LoadProfile(pubkey) => {
+            tokio::spawn(async move {
+                let result = relay.profile(&pubkey).await.map_err(e);
+                let _ = tx.send(AppEvent::Profile { pubkey, result });
+            });
+        }
         Cmd::Search { query, seq } => {
             tokio::spawn(async move {
                 let result = relay.search(&query, 25).await.map_err(e);

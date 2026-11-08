@@ -1,7 +1,7 @@
 //! Drawing the screen. Everything here reads `App`; the only thing it changes is the geometry it reports back (so that clicks
 //! can be mapped to what is on screen).
 
-use crate::app::{App, Conn, Focus, Overlay, Row, View};
+use crate::app::{App, Conn, Focus, Overlay, Row, SideRow, View};
 use crate::list;
 use ratatui::layout::{Alignment, Constraint, Layout, Position, Rect};
 use ratatui::style::{Modifier, Style};
@@ -75,6 +75,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Overlay::Keys => draw_keys(f, body),
         Overlay::Help => draw_help(f, area),
         Overlay::Search => draw_search(f, app, area),
+        Overlay::Whois => draw_whois(f, app, area),
         Overlay::Panel => draw_panel(f, app, area),
         Overlay::None => {}
     }
@@ -88,8 +89,8 @@ fn spans(segments: &[crate::contrib::Segment], width: usize) -> Vec<Span<'static
 fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     let title = match (app.channel(), &app.view) {
         (None, _) => "no channel".to_owned(),
-        (Some(c), View::Channel) => if c.is_dm { c.label.clone() } else { format!("#{}", c.label) },
-        (Some(c), View::Thread(_)) => format!("{} › thread", if c.is_dm { c.label.clone() } else { format!("#{}", c.label) }),
+        (Some(c), View::Channel) => if c.is_dm() { c.label.clone() } else { format!("#{}", c.label) },
+        (Some(c), View::Thread(_)) => format!("{} › thread", if c.is_dm() { c.label.clone() } else { format!("#{}", c.label) }),
     };
     let left = Line::from(vec![Span::styled(" buzzr ", Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED)), Span::raw(format!(" {title}"))]);
     let (dot, text, color) = match &app.conn {
@@ -120,7 +121,17 @@ fn draw_channels(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(block, area);
     let focused = app.focus == Focus::Channels;
     let mut lines = Vec::new();
-    for (i, c) in app.channels.iter().enumerate().take(inner.height as usize) {
+    let rows = app.sidebar_rows();
+    let top = app.sidebar_scroll(&rows, inner.height as usize);
+    for row in rows.into_iter().skip(top).take(inner.height as usize) {
+        let i = match row {
+            SideRow::Title(section) => {
+                lines.push(Line::from(Span::styled(format!(" {}", section.title()), dim().add_modifier(Modifier::BOLD))));
+                continue;
+            }
+            SideRow::Channel(i) => i,
+        };
+        let c = &app.channels[i];
         let open = app.cur == Some(i);
         let bar = app.channel_bar() == Some(i);
         let unread = app.unread.get(&c.id).copied().unwrap_or(0);
@@ -132,15 +143,24 @@ fn draw_channels(f: &mut Frame, app: &App, area: Rect) {
             style = style.fg(crate::theme::get().warn).add_modifier(Modifier::BOLD);
         }
         let marker = if bar { "▌" } else { " " };
+        // `#` for an open channel, `*` for a private one (RFC 2811's private-channel prefix); both are ASCII, so every font
+        // has them. DMs are pulled out by `is_dm` and already labelled `✉ name`, so they get no marker.
+        let glyph = if c.is_dm() {
+            ""
+        } else if c.is_private {
+            "*"
+        } else {
+            "#"
+        };
         let badge = if unread > 0 { format!(" ({unread})") } else { String::new() };
         let mark = app.plugins.channel_mark(&c.id);
         let mark_text = mark.map(|m| format!(" {}", m.text)).unwrap_or_default();
-        let room = (inner.width as usize).saturating_sub(2 + badge.width() + mark_text.width());
+        let room = (inner.width as usize).saturating_sub(2 + glyph.width() + badge.width() + mark_text.width());
         let mut label: String = c.label.clone();
         while label.width() > room {
             label.pop();
         }
-        let mut spans = vec![Span::styled(marker, Style::default().fg(crate::theme::get().bar_on)), Span::styled(format!(" {label}{badge}"), style)];
+        let mut spans = vec![Span::styled(marker, Style::default().fg(crate::theme::get().bar_on)), Span::styled(format!(" {glyph}{label}{badge}"), style)];
         if let Some(m) = mark {
             spans.push(Span::styled(mark_text, m.tone.style()));
         }
@@ -163,6 +183,9 @@ fn draw_messages(f: &mut Frame, app: &App, area: Rect) {
     }
     let selected = list::selected_index(layout, &app.state);
     let focused = app.focus == Focus::Messages;
+    // One column is reserved for the scrollbar, so the text pane is a column narrower than the area.
+    let text_area = Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height);
+    let pane_w = text_area.width as usize;
     let mut rows: Vec<Line> = Vec::with_capacity(view_h);
     for y in 0..view_h {
         match layout.at_line(app.state.scroll + y) {
@@ -176,13 +199,18 @@ fn draw_messages(f: &mut Frame, app: &App, area: Rect) {
                 }
                 let mut line = Line::from(spans);
                 if is_sel {
+                    // A ratatui `Line` only paints the cells its spans cover, so pad the row out first: the background then
+                    // runs from the left edge (over the gutter marker) to the right edge of the message pane.
+                    let used = line.width();
+                    if used < pane_w {
+                        line.spans.push(Span::raw(" ".repeat(pane_w - used)));
+                    }
                     line = line.style(Style::default().bg(crate::theme::get().sel_bg));
                 }
                 rows.push(line);
             }
         }
     }
-    let text_area = Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height);
     f.render_widget(Paragraph::new(rows), text_area);
     if layout.total > view_h {
         let mut sb = ScrollbarState::new(layout.max_scroll(view_h)).position(app.state.scroll);
@@ -351,13 +379,16 @@ pub const KEYS: &[(&str, &str)] = &[
     ("c", "copy the selected message to the clipboard"),
     ("e", "edit the selected message (yours only)"),
     ("d", "delete the selected message (yours only; asks first)"),
-    ("Ctrl+F", "search channels and every message"),
+    ("Ctrl+F", "search channels, people and every message"),
     ("click", "select; open the thread; on a link: copy it"),
     ("mouse wheel", "scroll"),
     ("", ""),
     ("Panel (from /plugins or a plugin)", ""),
     ("Up / Down, PgUp / PgDn, Home / End", "move"),
     ("Enter", "run the selected row"),
+    ("Esc", "close"),
+    ("", ""),
+    ("Profile card (from /whois)", ""),
     ("Esc", "close"),
     ("", ""),
     ("Writing", ""),
@@ -394,6 +425,7 @@ pub const HELP: &[&str] = &[
     "  /more       load older messages        /refresh   reload now",
     "  /help       this screen                /q   quit",
     "  /edit N     edit your message N        /delete N   delete your message N (asks first)",
+    "  /whois NAME their profile             /dm NAME   start (or open) a DM",
     "  /search text   search                  /new [private] name [about]   create a channel",
     "  /plugins    what is loaded, and the commands plugins added",
     "  /update     how to upgrade this copy (brew, cargo or the release page)",
@@ -401,7 +433,8 @@ pub const HELP: &[&str] = &[
     "  /read       mark this channel read     /read all   mark every channel read",
     "Unread survives a restart: it comes from the last-read position in ~/.config/buzzr/read-state.json, and a",
     "\"new messages\" line marks where new messages start.",
-    "Search (Ctrl+F): channel names and full-text message search; Enter opens the result in its channel or thread.",
+    "Search (Ctrl+F): channel names, people and full-text message search; Enter opens the result — a person starts a DM.",
+    "A person is found by the name in their profile, or by their npub (hex or npub1…): /dm and /whois take either.",
     "Others see \"typing…\" while you write (start with --no-typing to turn that off).",
     "",
     "New messages, edits, deletions, reactions and typing indicators arrive live; there is no polling.",
@@ -448,8 +481,12 @@ fn draw_search(f: &mut Frame, app: &App, area: Rect) {
         match row {
             Row::Channel(c) => {
                 let ch = &app.channels[*c];
-                spans.push(Span::styled(if ch.is_dm { ch.label.clone() } else { format!("# {}", ch.label) }, Style::default().fg(crate::theme::get().accent).add_modifier(Modifier::BOLD)));
+                spans.push(Span::styled(if ch.is_dm() { ch.label.clone() } else { format!("# {}", ch.label) }, Style::default().fg(crate::theme::get().accent).add_modifier(Modifier::BOLD)));
                 spans.push(Span::styled("  channel", dim()));
+            }
+            Row::Person(pk) => {
+                spans.push(Span::styled(app.name_of(pk), Style::default().fg(crate::theme::get().accent).add_modifier(Modifier::BOLD)));
+                spans.push(Span::styled("  person · Enter opens a DM", dim()));
             }
             Row::Message(e) => {
                 let chan = app.channels.iter().find(|c| Some(c.id.as_str()) == e.channel()).map(|c| c.label.clone()).unwrap_or_default();
@@ -474,6 +511,31 @@ fn draw_search(f: &mut Frame, app: &App, area: Rect) {
         lines.push(Line::from(Span::styled(" nothing found", dim())));
     }
     f.render_widget(Paragraph::new(lines), list_area);
+}
+
+/// Somebody's profile card (`/whois NAME`): the name, the npub, and what they wrote about themselves. Everything from the
+/// relay goes through the Markdown renderer (which strips control characters and wraps), so nothing in a profile can reach the
+/// terminal as anything but text.
+fn draw_whois(f: &mut Frame, app: &App, area: Rect) {
+    let Some(w) = &app.whois else { return };
+    let width = 72.min(area.width.saturating_sub(4)).max(24);
+    let inner_w = width.saturating_sub(2) as usize;
+    let text = |s: &str| crate::markdown::render(s, inner_w).into_iter().map(|l| Line::from(l.spans));
+    let mut lines: Vec<Line> = Vec::new();
+    let name = if w.name.trim().is_empty() { "(no name in their profile)" } else { w.name.as_str() };
+    lines.extend(text(name).map(|l| l.style(Style::default().add_modifier(Modifier::BOLD))));
+    lines.extend(text(&w.npub).map(|l| l.style(dim())));
+    lines.push(Line::default());
+    match (w.about.as_deref().map(str::trim), w.loading) {
+        (Some(about), _) if !about.is_empty() => lines.extend(text(about)),
+        (_, true) => lines.push(Line::from(Span::styled("loading their profile…", dim()))),
+        _ => lines.push(Line::from(Span::styled("no about line in their profile", dim()))),
+    }
+    let h = (lines.len() as u16 + 2).min(area.height.saturating_sub(2)).max(4);
+    let r = Rect::new(area.x + (area.width.saturating_sub(width)) / 2, area.y + (area.height.saturating_sub(h)) / 2, width, h);
+    clear_popup(f, r);
+    let title = format!(" {} · Esc closes ", if w.name.trim().is_empty() { "profile" } else { w.name.as_str() });
+    f.render_widget(Paragraph::new(lines).block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(crate::theme::get().accent)).title(title)), r);
 }
 
 fn draw_help(f: &mut Frame, area: Rect) {
@@ -503,7 +565,7 @@ mod tests {
 
     fn app() -> App {
         let mut app = App::new("me".into(), false, chrono_tz::UTC);
-        let chan = |id: &str, name: &str| Channel { id: id.into(), name: name.into(), about: String::new(), created_at: 1, is_dm: false, label: name.into() };
+        let chan = |id: &str, name: &str| Channel { id: id.into(), name: name.into(), about: String::new(), created_at: 1, section: crate::model::Section::Channels, label: name.into(), is_private: false };
         let _: Vec<Cmd> = app.handle(AppEvent::Channels(Ok(vec![chan("c1", "general"), chan("c2", "random")])));
         let mut m1 = ev("a", 1000, "**Hello** there, see [docs](https://example.com)", &[]);
         m1.pubkey = "bob".into();
@@ -515,6 +577,28 @@ mod tests {
         app.handle(AppEvent::Window { channel: "c1".into(), cursor: None, result: Ok(Window { events: vec![m1, m2, r], has_more: true, next_cursor: Some((1, "a".into())) }) });
         app.handle(AppEvent::Live(Live::Up));
         app
+    }
+
+    #[test]
+    fn a_person_in_the_search_and_a_profile_card_are_drawn() {
+        let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        let alice = "aa".repeat(32);
+        let mut app = app();
+        app.handle(AppEvent::Names(Ok([("bob".to_string(), "Bob".to_string()), (alice.clone(), "Alice Smith".to_string())].into())));
+        app.overlay = Overlay::Search;
+        app.search.query.insert_str("ali");
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(s.contains("Alice Smith") && s.contains("person · Enter opens a DM"), "a person in the search says what Enter does\n{s}");
+
+        app.overlay = Overlay::Whois;
+        app.whois = Some(crate::app::Whois { pubkey: alice.clone(), name: "Alice Smith".into(), npub: crate::relay::npub_of(&alice).unwrap(), about: Some("I sail. **A lot.**".into()), loading: false });
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(s.contains("Alice Smith") && s.contains("npub1"), "the card names the person and shows their npub\n{s}");
+        assert!(s.contains("I sail. A lot."), "the about line is rendered as markdown\n{s}");
+        assert!(!s.contains("**"), "and not shown raw");
+        assert!(s.contains("Esc closes"), "the card says how to close it\n{s}");
     }
 
     #[test]
@@ -530,6 +614,43 @@ mod tests {
         assert!(s.contains("● live"), "connection state\n{s}");
         assert!(s.contains("Open thread") && s.contains("Switch pane"), "footer hints\n{s}");
         assert!(!s.contains("**"), "markdown is rendered, not shown");
+    }
+
+    #[test]
+    fn state_is_never_colour_alone() {
+        // The colourless scheme leans on these: every state also has a glyph, a word or a number.
+        let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        let mut app = app();
+        app.handle(AppEvent::Unread { channel: "c2".into(), count: 3 });
+        app.conn = Conn::Down("boom".into());
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(s.contains("(3)") && s.contains("3 unread"), "the unread count is written out, not only coloured\n{s}");
+        assert!(s.contains("✕ offline, retrying (boom)"), "the connection state is a word, not only a colour\n{s}");
+        assert!(s.contains("▌ #general"), "the selection is the bar glyph, not only a background\n{s}");
+    }
+
+    #[test]
+    fn the_selected_message_is_one_band_across_the_whole_pane() {
+        let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        let mut app = app();
+        app.focus = Focus::Messages;
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let sel = crate::theme::get().sel_bg;
+        // the message pane starts after the channel list; the last column is the scrollbar, not part of the band
+        let (x0, x1) = (app.areas.msgs.x, app.areas.msgs.x + app.areas.msgs.width - 1);
+        let buf = term.backend().buffer();
+        let mut bands = 0;
+        for y in 0..buf.area.height {
+            if !(x0..x1).any(|x| buf[(x, y)].bg == sel) {
+                continue;
+            }
+            bands += 1;
+            for x in x0..x1 {
+                assert_eq!(buf[(x, y)].bg, sel, "selected row {y} is not a full band: gap at x={x}");
+            }
+        }
+        assert!(bands > 0, "no row was drawn as selected");
     }
 
     #[test]
@@ -637,19 +758,49 @@ mod tests {
         // the channel list has no focus: the bar marks the channel on screen
         term.draw(|f| draw(f, &mut app)).unwrap();
         let s = screen(&term);
-        assert!(s[1].starts_with("▌ general"), "the bar is on the open channel\n{}", s.join("\n"));
-        assert!(s[2].starts_with("  random"), "the other channel has none\n{}", s.join("\n"));
+        assert!(s[2].starts_with("▌ #general"), "the bar is on the open channel\n{}", s.join("\n"));
+        assert!(s[3].starts_with("  #random"), "the other channel has none\n{}", s.join("\n"));
         // (Messages -> Channels) then Down: the bar moves with the cursor
         app.handle(key(KeyCode::BackTab));
         app.handle(key(KeyCode::Down));
         term.draw(|f| draw(f, &mut app)).unwrap();
         let s = screen(&term);
-        assert!(s[1].starts_with("  general") && s[2].starts_with("▌ random"), "the bar moved to the cursor\n{}", s.join("\n"));
+        assert!(s[2].starts_with("  #general") && s[3].starts_with("▌ #random"), "the bar moved to the cursor\n{}", s.join("\n"));
         // Tab away without opening one: the bar is back on the channel on screen
         app.handle(key(KeyCode::Tab));
         term.draw(|f| draw(f, &mut app)).unwrap();
         let s = screen(&term);
-        assert!(s[1].starts_with("▌ general") && s[2].starts_with("  random"), "the bar came back\n{}", s.join("\n"));
+        assert!(s[2].starts_with("▌ #general") && s[3].starts_with("  #random"), "the bar came back\n{}", s.join("\n"));
+    }
+
+    #[test]
+    fn the_channel_list_shows_a_title_per_section() {
+        let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        let mut app = App::new("me".into(), false, chrono_tz::UTC);
+        let chan = |id: &str, name: &str, section| Channel { id: id.into(), name: name.into(), about: String::new(), created_at: 1, section, label: name.into(), is_private: false };
+        use crate::model::Section::*;
+        app.handle(AppEvent::Channels(Ok(vec![chan("d", "DM", Dms), chan("c", "general", Channels), chan("s", "chat", Solo)])));
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term);
+        let col: Vec<String> = s[1..7].iter().map(|l| l.chars().take(26).collect::<String>().trim().to_owned()).collect();
+        assert_eq!(col[0], "Solo", "{}", s.join("\n"));
+        assert!(col[1].ends_with("chat") && col[2] == "Channels" && col[3].ends_with("general"), "{col:?}");
+        assert!(col[4] == "DMs" && col[5].ends_with("DM"), "{col:?}");
+    }
+
+    #[test]
+    fn the_channel_list_marks_private_channels_and_leaves_dms_alone() {
+        use crate::model::Section::*;
+        let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        let mut app = App::new("me".into(), false, chrono_tz::UTC);
+        let chan = |id: &str, name: &str, section, is_private| Channel { id: id.into(), name: name.into(), about: String::new(), created_at: 1, section, label: name.into(), is_private };
+        app.handle(AppEvent::Channels(Ok(vec![chan("p", "general", Channels, false), chan("q", "dev-buzzr", Channels, true), chan("d", "DM", Dms, true)])));
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term);
+        let col: Vec<String> = s[1..8].iter().map(|l| l.chars().take(26).collect::<String>().trim().to_owned()).collect();
+        assert!(col.iter().any(|r| r.ends_with("#general")), "an open channel is marked #\n{col:?}");
+        assert!(col.iter().any(|r| r.ends_with("*dev-buzzr")), "a private channel is marked *\n{col:?}");
+        assert!(col.iter().any(|r| r.ends_with("DM") && !r.contains('#') && !r.contains('*')), "a DM gets no marker\n{col:?}");
     }
 
     #[test]

@@ -29,7 +29,8 @@
 
 ## Features
 
-- **Channels and DMs** with unread counts. DMs are labelled with the other person.
+- **Channels and DMs** with unread counts, in sections: Solo chats, Channels (private and open) and DMs. DMs are labelled with the other
+  person; start one with `/dm name`, or from search. An open channel is marked `#` and a private one `*`.
 - **Unread that survives a restart.** The last-read position is saved per channel, so the badges are right again next time and a
   `new messages` line shows where you left off.
 - **Threads.** A channel shows top-level messages only, as the Buzz app does, each with its reply count and the time of the last reply.
@@ -39,10 +40,13 @@
 - **Reads like a chat.** Markdown (bold, italic, lists, code, quotes, headings), clickable links, reactions, and edited messages say so.
 - **Keeps your place.** New messages never move the view unless you were at the bottom, and older history loads above without a jump.
 - **Write, edit, delete.** A multi-line input with bracketed paste and `@name` mentions. Edit or delete your own messages with `e` and `d`.
-- **Search everything.** Ctrl+F searches channel names instantly and every message you can read, with full text from the relay.
+- **Search everything.** Ctrl+F searches channel names, people and every message you can read, with full text from the relay. Enter on a
+  person opens the DM you already have with them, or starts a new one.
 - **Create channels** from the input with `/new`.
+- **People and profiles.** `/whois name` shows a short card (name, npub, what they wrote about themselves); `/dm name` opens your DM with
+  someone or starts a new one. Both take a name from a channel or an npub.
 - **Plugins.** Add your own `/commands`, status items, badges and panels from any language. See [PLUGIN.md](PLUGIN.md).
-- **Themes.** The default `buzz-dark` uses the dark palette of the Buzz desktop app. `BUZZR_THEME=dark` keeps your terminal's own background, `BUZZR_THEME=buzz-light` is the desktop app's light palette, and `BUZZR_THEME=light` is for a light terminal.
+- **Themes.** The default `buzz-dark` uses the dark palette of the Buzz desktop app. `BUZZR_THEME=dark` keeps your terminal's own background, `BUZZR_THEME=buzz-light` is the desktop app's light palette, and `BUZZR_THEME=light` is for a light terminal. `BUZZR_THEME=high-contrast` is black-on-white at WCAG AAA (7:1), and `NO_COLOR` or `TERM=dumb` turns colour off entirely.
 - **Read-only mode** (`--read-only`) for identities you should not speak for.
 
 <p align="center">
@@ -51,9 +55,18 @@
 
 ## Install
 
-buzzr is not on crates.io or in a package manager yet. There are two ways to get it.
+**Homebrew** (tested on macOS; the formula also lists the Linux binaries, untested):
 
-**With cargo** (Rust 1.88 or newer):
+```bash
+brew install buzzzr/buzzr/buzzr
+```
+
+Upgrade with `brew update && brew upgrade buzzr`.
+
+**A prebuilt binary:** download the archive for your system from the [latest release](https://github.com/buzzzr/buzzr/releases/latest)
+(macOS and Linux, arm64 and x86_64; the Linux ones are static), check it against `SHA256SUMS`, and put `buzzr` somewhere on your `PATH`.
+
+**With cargo** (Rust 1.88 or newer; not on crates.io yet):
 
 ```bash
 cargo install --git https://github.com/buzzzr/buzzr
@@ -106,8 +119,10 @@ values and skip the questions (for scripts and containers; the key is never acce
 
 The full behaviour, for when the feature list above is not enough.
 
-- **Channels and DMs** on the left (DMs are labelled with the other person, `✉ name`), with unread counts. The bar marks the
+- **Channels and DMs** on the left (DMs are labelled with the other person, `✉ name`), with unread counts. An open channel is
+  marked `#` and a private (restricted) one `*`; DMs get no marker. The bar marks the
   channel on screen; while the list has focus it follows the cursor, and leaving the list without opening a channel puts it back.
+  `/dm name` opens the DM you already have with someone, or starts a new one; a name from a channel or an npub both work.
 - **Unread that survives a restart:** the last-read position per channel lives in `~/.config/buzzr/read-state.json`, so the
   counts are there again next time (each one asked of the relay on startup) and a `new messages` line marks where the unseen
   ones begin. Opening a channel marks it read; `/read` does it again and `/read all` clears every channel.
@@ -126,9 +141,13 @@ The full behaviour, for when the feature list above is not enough.
   bracketed paste; `@name` mentions members. Word and line editing keys.
 - **Edit and delete your own messages:** select one and press `e` (it loads into the input; Enter saves, Esc cancels) or `d` (asks
   `y` to confirm). Others see edits and deletions live. `/edit N` and `/delete N` do the same by number.
-- **Search everything:** Ctrl+F (or `/search words`) searches channel names (instantly) and every message you can read (full text,
-  from the relay); Enter opens the result in its channel or thread with the message selected.
+- **Search everything:** Ctrl+F (or `/search words`) searches channel names (instantly), people you have seen (from their profiles) and
+  every message you can read (full text, from the relay); Enter opens the result — a message or channel in its channel or thread, a
+  person in the DM with them (starting one if there is none).
 - **New channels:** `/new [private] name [description]` creates one and opens it.
+- **People:** `/whois name` shows a short card for someone — their name, npub and about line, filled in as the relay answers. `/dm name`
+  and `/whois name` take a display name from a channel, or a key (`npub1…`, `nostr:` URI or hex); an ambiguous or unknown name is
+  reported rather than guessed.
 - **Your typing shows:** others see `<your name> is typing…` while you write (once every three seconds; not for `/commands` or
   edits). `--no-typing` turns it off.
 - **Help on screen:** F1 lists the keys, F2 the commands. Esc closes a panel first, then cancels a reply, then leaves a thread.
@@ -151,13 +170,13 @@ The full behaviour, for when the feature list above is not enough.
 | Up / Down | select a channel or message (Up at the top of a channel loads older messages) |
 | Enter | open the channel / open the thread / send |
 | r, c, e, d | reply in the thread, copy, edit, delete the selected message (e and d: yours only) |
-| Ctrl+F | search channels and messages |
+| Ctrl+F | search channels, people and messages |
 | Esc | close a panel, cancel a reply, leave a thread |
 | F1, F2 | keys, help |
 | Ctrl+R, Ctrl+O | reload, load older |
 | Ctrl+Q, Ctrl+C | quit |
 
-Commands in the input (N is the number shown as `#N`): `/r N text`, `/t N`, `/c`, `/copy N`, `/edit N`, `/delete N`, `/search text`, `/new [private] name [about]`, `/plugins`, `/update`, `/read [all]`, `/more`, `/refresh`, `/help`, `/q`.
+Commands in the input (N is the number shown as `#N`): `/r N text`, `/t N`, `/c`, `/copy N`, `/edit N`, `/delete N`, `/search text`, `/whois NAME`, `/dm NAME`, `/new [private] name [about]`, `/plugins`, `/update`, `/read [all]`, `/more`, `/refresh`, `/help`, `/q`.
 
 ## Clipboard
 
@@ -171,7 +190,7 @@ browser as well.
 `--relay URL` (default `$BUZZ_RELAY_URL`, else the saved relay), `--setup`, `--forget-key`, `--read-only` (never send), `--no-typing`
 (do not announce typing), `--no-mouse` (leave the mouse to the terminal), `--no-plugins` (start without plugins), `--plugins-dir DIR`
 (where plugins live), `--selftest` (below). Environment: `BUZZR_TZ` for the display
-time zone (default: the computer's), `BUZZR_THEME` (`buzz-dark`, `buzz-light`, `dark`, `light`), `BUZZR_CONFIG_DIR`, `BUZZR_PLUGINS_DIR`,
+time zone (default: the computer's), `BUZZR_THEME` (`buzz-dark`, `buzz-light`, `high-contrast`, `dark`, `light`), `BUZZR_CONFIG_DIR`, `BUZZR_PLUGINS_DIR`,
 `BUZZR_SAFE_MODE=1` (same as `--no-plugins`), `BUZZR_NO_UPDATE_CHECK=1` (skip the once-a-day release check), `BUZZR_SCRYPT_LOG_N` (cost of a new
 key file, 10-20, default 19).
 
@@ -199,7 +218,7 @@ expects it to come back live.
 ## Status and limitations
 
 buzzr is young (0.1) and under active development. It works against real Buzz relays, but expect rough edges. Not done yet:
-adding reactions, attachments and images (shown as links only), people search, joining or leaving channels, and creating DMs.
+adding reactions, attachments and images (shown as links only), joining or leaving channels.
 
 If something is missing that you need, please [open an issue](https://github.com/buzzzr/buzzr/issues).
 

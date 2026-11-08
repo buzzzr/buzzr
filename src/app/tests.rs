@@ -1,13 +1,13 @@
 use super::*;
 use crate::model::tests::ev;
-use crate::relay::Window;
+use crate::relay::{Profile, Window};
 use ratatui::crossterm::event::{KeyEvent, KeyModifiers};
 
 const ME: &str = "me";
 const BOB: &str = "bob";
 
 fn chan(id: &str, name: &str) -> Channel {
-    Channel { id: id.into(), name: name.into(), about: String::new(), created_at: 1, is_dm: name == "DM", label: name.into() }
+    Channel { id: id.into(), name: name.into(), about: String::new(), created_at: 1, section: if name == "DM" { Section::Dms } else { Section::Channels }, label: name.into(), is_private: false }
 }
 
 fn msg(id: &str, at: u64, who: &str, content: &str, tags: &[&[&str]]) -> Ev {
@@ -533,10 +533,10 @@ fn clicking_selects_opens_threads_and_follows_links() {
 fn clicking_a_channel_opens_it_and_the_wheel_scrolls() {
     let mut app = app_with(40);
     let click = |app: &mut App, col: u16, row: u16| app.handle(AppEvent::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: col, row, modifiers: KeyModifiers::NONE }));
-    let cmds = click(&mut app, 3, 1 + 1); // second row of the channel list: "random"
+    let cmds = click(&mut app, 3, 1 + 2); // the list is a "Channels" title, "general", "random"
     assert_eq!(app.channel().map(|c| c.id.as_str()), Some("c2"));
     assert!(cmds.contains(&Cmd::LoadWindow { channel: "c2".into(), cursor: None }));
-    click(&mut app, 3, 1); // back to "general"
+    click(&mut app, 3, 1 + 1); // back to "general"
     app.layout(78);
     let before = app.state.scroll;
     app.handle(AppEvent::Mouse(MouseEvent { kind: MouseEventKind::ScrollUp, column: 30, row: 5, modifiers: KeyModifiers::NONE }));
@@ -719,6 +719,101 @@ fn new_channels_are_created_from_a_command_and_opened_when_they_appear() {
     let mut ro = app_with(1);
     ro.read_only = true;
     assert!(ro.create_channel("x").is_empty());
+}
+
+#[test]
+fn dm_opens_an_existing_conversation_and_starts_a_new_one() {
+    const ALICE: &str = "alice";
+    let mut app = app_with(1);
+    // Alice already has a DM with us, Bob does not; both have names we have learned
+    app.handle(AppEvent::Members { channel: "dm1".into(), result: Ok(vec![(ME.into(), "member".into()), (ALICE.into(), "member".into())]) });
+    app.handle(AppEvent::Names(Ok([(ALICE.to_string(), "Alice".to_string()), (BOB.to_string(), "Bob".to_string())].into())));
+    app.focus = Focus::Input;
+    type_text(&mut app, "/dm Alice");
+    let cmds = press(&mut app, KeyCode::Enter);
+    assert_eq!(app.channel().map(|c| c.id.as_str()), Some("dm1"), "the DM that is already there is opened");
+    assert_eq!(app.focus, Focus::Input);
+    assert!(!cmds.iter().any(|c| matches!(c, Cmd::OpenDm { .. })), "nothing is sent for a conversation we have: {cmds:?}");
+
+    // Bob has none: the relay is asked, and the conversation opens once the reloaded list has it
+    type_text(&mut app, "/dm Bob");
+    let cmds = press(&mut app, KeyCode::Enter);
+    assert!(matches!(cmds.as_slice(), [Cmd::OpenDm { peer }] if peer == BOB));
+    assert_eq!(app.handle(AppEvent::DmOpened(Ok(()))), vec![Cmd::LoadChannels]);
+    let mut list = app.channels.clone();
+    list.push(chan("dm2", "DM"));
+    app.handle(AppEvent::Channels(Ok(list)));
+    app.handle(AppEvent::Members { channel: "dm2".into(), result: Ok(vec![(ME.into(), "member".into()), (BOB.into(), "member".into())]) });
+    assert_eq!(app.channel().map(|c| c.id.as_str()), Some("dm2"), "the new DM is opened as soon as its members are known");
+    assert_eq!(app.focus, Focus::Input);
+
+    // a name nobody has, and an empty argument, are reported rather than guessed
+    type_text(&mut app, "/dm nobody");
+    assert!(press(&mut app, KeyCode::Enter).is_empty());
+    assert!(app.flash_text().unwrap().contains("nobody here is called nobody"));
+    type_text(&mut app, "/dm");
+    assert!(press(&mut app, KeyCode::Enter).is_empty());
+    assert!(app.flash_text().unwrap().starts_with("usage: /dm"));
+
+    // read-only never sends, and never opens a conversation that does not exist yet
+    let mut ro = app_with(1);
+    ro.read_only = true;
+    ro.handle(AppEvent::Names(Ok([(BOB.to_string(), "Bob".to_string())].into())));
+    assert!(ro.open_dm(BOB).is_empty());
+    assert!(ro.flash_text().unwrap().contains("read-only"));
+}
+
+#[test]
+fn whois_shows_a_card_that_fills_in_when_the_profile_arrives() {
+    let alice = "aa".repeat(32);
+    let mut app = app_with(1);
+    app.handle(AppEvent::Names(Ok([(alice.clone(), "Alice".to_string())].into())));
+    app.focus = Focus::Input;
+    type_text(&mut app, "/whois Alice");
+    let cmds = press(&mut app, KeyCode::Enter);
+    assert_eq!(cmds, vec![Cmd::LoadProfile(alice.clone())]);
+    assert_eq!(app.overlay, Overlay::Whois);
+    let card = app.whois.clone().unwrap();
+    assert_eq!(card.name, "Alice");
+    assert!(card.npub.starts_with("npub1") && card.loading, "the card opens at once with what we know");
+    assert_eq!(crate::relay::as_pubkey(&card.npub).as_deref(), Some(alice.as_str()), "and shows the npub for the person asked about");
+    // an answer for somebody else is dropped: the card is about the person it names
+    app.handle(AppEvent::Profile { pubkey: BOB.into(), result: Ok(Profile { name: "Bob".into(), about: "hi".into() }) });
+    assert_eq!(app.whois.as_ref().unwrap(), &card);
+    // the right answer fills the card in
+    app.handle(AppEvent::Profile { pubkey: card.pubkey.clone(), result: Ok(Profile { name: "Alice Smith".into(), about: "I sail".into() }) });
+    let card = app.whois.as_ref().unwrap();
+    assert_eq!((card.name.as_str(), card.about.as_deref(), card.loading), ("Alice Smith", Some("I sail"), false));
+    press(&mut app, KeyCode::Esc);
+    assert_eq!(app.overlay, Overlay::None);
+    // a profile that will not load closes the wait and says so
+    type_text(&mut app, "/whois Alice");
+    press(&mut app, KeyCode::Enter);
+    app.handle(AppEvent::Profile { pubkey: alice.clone(), result: Err("offline".into()) });
+    assert!(!app.whois.as_ref().unwrap().loading);
+    assert!(app.flash_text().unwrap().contains("offline"));
+    // Esc closes the card and ends the wait, so the next command goes to the input
+    press(&mut app, KeyCode::Esc);
+    assert_eq!(app.overlay, Overlay::None);
+    // a name nobody has is reported, not guessed
+    app.focus = Focus::Input;
+    type_text(&mut app, "/whois nobody");
+    assert!(press(&mut app, KeyCode::Enter).is_empty());
+    assert_eq!(app.overlay, Overlay::None);
+    assert!(app.flash_text().unwrap().contains("nobody here is called"));
+}
+
+#[test]
+fn the_search_lists_people_and_enter_starts_a_dm() {
+    let mut app = app_with(1);
+    app.handle(AppEvent::Names(Ok([(BOB.to_string(), "Bob Roberts".to_string())].into())));
+    app.handle(AppEvent::Key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL)));
+    app.search.query.insert_str("roberts");
+    assert!(matches!(app.search_rows().as_slice(), [Row::Person(pk)] if pk == BOB), "the name in the profile finds the person");
+    app.search.asked = "roberts".into(); // it has been searched: Enter opens the row
+    let cmds = app.handle(key(KeyCode::Enter));
+    assert_eq!(app.overlay, Overlay::None);
+    assert!(matches!(cmds.as_slice(), [Cmd::OpenDm { peer }] if peer == BOB));
 }
 
 #[test]
@@ -973,4 +1068,128 @@ fn a_newer_release_is_kept_for_the_status_line() {
     app.handle(AppEvent::Update("0.2.0".into()));
     assert_eq!(app.latest.as_deref(), Some("0.2.0"));
     assert_eq!(app.update_hint().as_deref(), Some("buzzr 0.2.0 available · /update"));
+}
+
+fn chan_in(id: &str, name: &str, section: Section) -> Channel {
+    Channel { section, ..chan(id, name) }
+}
+
+fn sectioned_app() -> App {
+    let mut app = App::new(ME.into(), false, chrono_tz::UTC);
+    app.handle(AppEvent::Channels(Ok(vec![
+        chan("dm1", "DM"),
+        chan_in("s1", "Plan the week", Section::Solo),
+        chan("c2", "random"),
+        chan_in("g1", "team", Section::Channels),
+        chan("c1", "general"),
+        chan_in("s2", "Another chat", Section::Solo),
+    ])));
+    app
+}
+
+/// The list as drawn, titles and channels: "# Title" for a title, the label for a channel.
+fn side(app: &App) -> Vec<String> {
+    app.sidebar_rows()
+        .into_iter()
+        .map(|r| match r {
+            SideRow::Title(s) => format!("# {}", s.title()),
+            SideRow::Channel(i) => app.channels[i].label.clone(),
+        })
+        .collect()
+}
+
+#[test]
+fn the_list_is_split_into_groups_solo_channels_and_dms() {
+    let app = sectioned_app();
+    assert_eq!(side(&app), ["# Solo", "Another chat", "Plan the week", "# Channels", "general", "random", "team", "# DMs", "DM"]);
+}
+
+#[test]
+fn empty_sections_have_no_title() {
+    let mut app = App::new(ME.into(), false, chrono_tz::UTC);
+    app.handle(AppEvent::Channels(Ok(vec![chan("c1", "general"), chan_in("s1", "chat", Section::Solo)])));
+    assert_eq!(side(&app), ["# Solo", "chat", "# Channels", "general"]);
+    app.handle(AppEvent::Channels(Ok(vec![])));
+    assert!(app.sidebar_rows().is_empty());
+}
+
+#[test]
+fn the_first_channel_opens_on_start_and_the_cursor_skips_titles() {
+    let mut app = sectioned_app();
+    assert_eq!(app.channel().map(|c| c.id.as_str()), Some("s2"), "the first channel of the first section, not its title");
+    app.set_focus(Focus::Channels);
+    let mut seen = vec![app.channels[app.chan_cursor].label.clone()];
+    for _ in 0..9 {
+        app.handle(key(KeyCode::Down));
+        seen.push(app.channels[app.chan_cursor].label.clone());
+    }
+    assert_eq!(seen, ["Another chat", "Plan the week", "general", "random", "team", "DM", "DM", "DM", "DM", "DM"]);
+    app.handle(key(KeyCode::Home));
+    assert_eq!(app.channels[app.chan_cursor].label, "Another chat");
+}
+
+#[test]
+fn clicking_a_title_does_nothing_and_a_channel_row_opens_that_channel() {
+    let mut app = sectioned_app();
+    app.areas.channels = Rect::new(0, 1, 20, 20);
+    let click = |app: &mut App, row: u16| app.handle(AppEvent::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: 3, row, modifiers: KeyModifiers::NONE }));
+    assert!(click(&mut app, 1 + 3).is_empty(), "row 3 is the Channels title");
+    assert_eq!(app.channel().map(|c| c.id.as_str()), Some("s2"));
+    click(&mut app, 1 + 2); // "Plan the week"
+    assert_eq!(app.channel().map(|c| c.id.as_str()), Some("s1"));
+    click(&mut app, 1 + 6); // "team", a private channel in the Channels section
+    assert_eq!(app.channel().map(|c| c.id.as_str()), Some("g1"));
+    click(&mut app, 1 + 8); // the DM
+    assert_eq!(app.channel().map(|c| c.id.as_str()), Some("dm1"));
+}
+
+#[test]
+fn a_long_list_scrolls_to_keep_the_bar_in_view_and_clicks_follow() {
+    let mut app = sectioned_app();
+    app.areas.channels = Rect::new(0, 1, 20, 4);
+    let rows = app.sidebar_rows();
+    assert_eq!(app.sidebar_scroll(&rows, 4), 0, "the bar on the first channel");
+    app.set_focus(Focus::Channels);
+    app.handle(key(KeyCode::End));
+    // the DM is row 8 of 9, so rows 5..=8 are shown
+    assert_eq!(app.sidebar_scroll(&rows, 4), 5);
+    let click = |app: &mut App, row: u16| app.handle(AppEvent::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: 3, row, modifiers: KeyModifiers::NONE }));
+    click(&mut app, 1); // first shown row is row 5: "random"
+    assert_eq!(app.channel().map(|c| c.label.as_str()), Some("random"));
+}
+
+#[test]
+fn dm_labels_resolving_later_keep_dms_in_their_own_section_and_sorted() {
+    let mut app = App::new(ME.into(), false, chrono_tz::UTC);
+    app.handle(AppEvent::Channels(Ok(vec![chan("dm1", "DM"), chan("dm2", "DM"), chan("c1", "general"), chan_in("s1", "chat", Section::Solo)])));
+    app.handle(AppEvent::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+    app.set_focus(Focus::Channels);
+    app.handle(key(KeyCode::End));
+    assert_eq!(app.channels[app.chan_cursor].id, "dm2");
+    app.handle(AppEvent::Members { channel: "dm1".into(), result: Ok(vec![(ME.into(), "member".into()), ("zed".into(), "member".into())]) });
+    app.handle(AppEvent::Members { channel: "dm2".into(), result: Ok(vec![(ME.into(), "member".into()), ("alice".into(), "member".into())]) });
+    app.handle(AppEvent::Names(Ok([("zed".to_string(), "Zed".to_string()), ("alice".to_string(), "Alice".to_string())].into())));
+    assert_eq!(side(&app), ["# Solo", "chat", "# Channels", "general", "# DMs", "✉ Alice", "✉ Zed"]);
+    assert_eq!(app.channels[app.chan_cursor].id, "dm2", "the cursor stays on the channel it was on");
+    assert_eq!(app.channel().map(|c| c.id.as_str()), Some("s1"), "so does the open channel");
+}
+
+#[test]
+fn a_refresh_in_another_relay_order_keeps_the_open_channel_and_the_cursor() {
+    let mut app = sectioned_app();
+    app.set_focus(Focus::Channels);
+    app.handle(key(KeyCode::End));
+    let before = app.channels[app.chan_cursor].id.clone();
+    let open = app.channel().map(|c| c.id.clone());
+    let cmds = app.handle(AppEvent::Channels(Ok(vec![
+        chan_in("s2", "Another chat", Section::Solo),
+        chan("c1", "general"),
+        chan("dm1", "DM"),
+        chan_in("g1", "team", Section::Channels),
+        chan("c2", "random"),
+        chan_in("s1", "Plan the week", Section::Solo),
+    ])));
+    assert_eq!(app.channels[app.chan_cursor].id, before);
+    assert_eq!(app.channel().map(|c| c.id.clone()), open);
+    assert!(!cmds.iter().any(|c| matches!(c, Cmd::Subscribe(_))), "same channels, no resubscribe");
 }

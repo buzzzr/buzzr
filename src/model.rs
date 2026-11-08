@@ -118,6 +118,30 @@ impl Summary {
     }
 }
 
+/// Which section of the channel list a channel belongs to; the variant order is the order on screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Section {
+    /// Solo chats: channels carrying the `buzz.solo` label.
+    Solo,
+    /// Open channels.
+    Channels,
+    /// Direct messages.
+    Dms,
+}
+
+impl Section {
+    pub fn title(self) -> &'static str {
+        match self {
+            Section::Solo => "Solo",
+            Section::Channels => "Channels",
+            Section::Dms => "DMs",
+        }
+    }
+}
+
+/// The NIP-CL label the Buzz apps put on a Solo chat.
+const SOLO_LABEL: &str = "buzz.solo";
+
 #[derive(Debug, Clone)]
 pub struct Channel {
     pub id: String,
@@ -126,23 +150,39 @@ pub struct Channel {
     pub about: String,
     #[allow(dead_code)]
     pub created_at: u64,
-    /// Direct messages all come with the generic name "DM"; they are labelled with the other participants instead.
-    pub is_dm: bool,
+    pub section: Section,
     pub label: String,
+    /// A private (restricted) channel: the relay's group metadata says `["private"]` instead of `["public"]`. Shown as `*` in
+    /// the channel list, against `#` for an open one; DMs have no such marker.
+    pub is_private: bool,
 }
 
 impl Channel {
     pub fn from_event(e: &Ev) -> Option<Channel> {
         let id = e.tag("d")?.to_owned();
         let name = e.tag("name").unwrap_or("").to_owned();
+        // Direct messages all come with the generic name "DM"; they are labelled with the other participants instead.
+        let has = |tag: &str, value: Option<&str>| e.tags.iter().any(|t| t.first().map(String::as_str) == Some(tag) && value.is_none_or(|v| t.get(1).map(String::as_str) == Some(v)));
+        let section = if name == "DM" {
+            Section::Dms
+        } else if has("t", Some(SOLO_LABEL)) {
+            Section::Solo
+        } else {
+            Section::Channels
+        };
         Some(Channel {
-            is_dm: name == "DM",
+            section,
             label: name.clone(),
             about: e.tag("about").unwrap_or("").to_owned(),
             created_at: e.created_at,
+            is_private: has("private", None),
             id,
             name,
         })
+    }
+
+    pub fn is_dm(&self) -> bool {
+        self.section == Section::Dms
     }
 }
 
@@ -373,6 +413,34 @@ pub mod tests {
     fn channel_metadata_and_dm_naming() {
         let e = Ev { kind: 39000, tags: vec![vec!["d".into(), "chan1".into()], vec!["name".into(), "DM".into()]], ..ev("m", 3, "", &[]) };
         let c = Channel::from_event(&e).unwrap();
-        assert!(c.is_dm && c.id == "chan1");
+        assert!(c.is_dm() && c.id == "chan1");
+    }
+
+    #[test]
+    fn channel_sections_come_from_the_metadata_tags() {
+        let section = |name: &str, extra: &[&[&str]]| {
+            let mut tags = vec![vec!["d".to_string(), "c".into()], vec!["name".into(), name.into()]];
+            tags.extend(extra.iter().map(|t| t.iter().map(|s| s.to_string()).collect()));
+            Channel::from_event(&Ev { kind: 39000, tags, ..ev("m", 3, "", &[]) }).unwrap().section
+        };
+        assert_eq!(section("general", &[]), Section::Channels);
+        assert_eq!(section("general", &[&["public"], &["t", "stream"]]), Section::Channels);
+        assert_eq!(section("team", &[&["private"]]), Section::Channels, "private and open channels are the same section");
+        assert_eq!(section("chat", &[&["private"], &["t", "buzz.solo"]]), Section::Solo);
+        assert_eq!(section("chat", &[&["t", "buzz.solo"]]), Section::Solo, "the label decides, as in the desktop app");
+        assert_eq!(section("DM", &[&["private"]]), Section::Dms);
+        assert_eq!(section("x", &[&["t", "other"]]), Section::Channels);
+    }
+
+    #[test]
+    fn a_channel_knows_whether_it_is_private() {
+        let channel = |tags: &[&[&str]]| {
+            let mut t = vec![vec!["d".to_string(), "c".into()], vec!["name".into(), "general".into()]];
+            t.extend(tags.iter().map(|tag| tag.iter().map(|s| s.to_string()).collect()));
+            Channel::from_event(&Ev { kind: 39000, tags: t, ..ev("m", 3, "", &[]) }).unwrap()
+        };
+        assert!(!channel(&[&["public"]]).is_private, "an open channel says [\"public\"]");
+        assert!(channel(&[&["private"], &["restricted"], &["closed"]]).is_private, "a private channel says [\"private\"]");
+        assert!(!channel(&[]).is_private, "neither tag: treated as open rather than guessing");
     }
 }
