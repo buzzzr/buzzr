@@ -1,6 +1,6 @@
 use super::*;
 use crate::model::tests::ev;
-use crate::relay::Window;
+use crate::relay::{Profile, Window};
 use ratatui::crossterm::event::{KeyEvent, KeyModifiers};
 
 const ME: &str = "me";
@@ -719,6 +719,101 @@ fn new_channels_are_created_from_a_command_and_opened_when_they_appear() {
     let mut ro = app_with(1);
     ro.read_only = true;
     assert!(ro.create_channel("x").is_empty());
+}
+
+#[test]
+fn dm_opens_an_existing_conversation_and_starts_a_new_one() {
+    const ALICE: &str = "alice";
+    let mut app = app_with(1);
+    // Alice already has a DM with us, Bob does not; both have names we have learned
+    app.handle(AppEvent::Members { channel: "dm1".into(), result: Ok(vec![(ME.into(), "member".into()), (ALICE.into(), "member".into())]) });
+    app.handle(AppEvent::Names(Ok([(ALICE.to_string(), "Alice".to_string()), (BOB.to_string(), "Bob".to_string())].into())));
+    app.focus = Focus::Input;
+    type_text(&mut app, "/dm Alice");
+    let cmds = press(&mut app, KeyCode::Enter);
+    assert_eq!(app.channel().map(|c| c.id.as_str()), Some("dm1"), "the DM that is already there is opened");
+    assert_eq!(app.focus, Focus::Input);
+    assert!(!cmds.iter().any(|c| matches!(c, Cmd::OpenDm { .. })), "nothing is sent for a conversation we have: {cmds:?}");
+
+    // Bob has none: the relay is asked, and the conversation opens once the reloaded list has it
+    type_text(&mut app, "/dm Bob");
+    let cmds = press(&mut app, KeyCode::Enter);
+    assert!(matches!(cmds.as_slice(), [Cmd::OpenDm { peer }] if peer == BOB));
+    assert_eq!(app.handle(AppEvent::DmOpened(Ok(()))), vec![Cmd::LoadChannels]);
+    let mut list = app.channels.clone();
+    list.push(chan("dm2", "DM"));
+    app.handle(AppEvent::Channels(Ok(list)));
+    app.handle(AppEvent::Members { channel: "dm2".into(), result: Ok(vec![(ME.into(), "member".into()), (BOB.into(), "member".into())]) });
+    assert_eq!(app.channel().map(|c| c.id.as_str()), Some("dm2"), "the new DM is opened as soon as its members are known");
+    assert_eq!(app.focus, Focus::Input);
+
+    // a name nobody has, and an empty argument, are reported rather than guessed
+    type_text(&mut app, "/dm nobody");
+    assert!(press(&mut app, KeyCode::Enter).is_empty());
+    assert!(app.flash_text().unwrap().contains("nobody here is called nobody"));
+    type_text(&mut app, "/dm");
+    assert!(press(&mut app, KeyCode::Enter).is_empty());
+    assert!(app.flash_text().unwrap().starts_with("usage: /dm"));
+
+    // read-only never sends, and never opens a conversation that does not exist yet
+    let mut ro = app_with(1);
+    ro.read_only = true;
+    ro.handle(AppEvent::Names(Ok([(BOB.to_string(), "Bob".to_string())].into())));
+    assert!(ro.open_dm(BOB).is_empty());
+    assert!(ro.flash_text().unwrap().contains("read-only"));
+}
+
+#[test]
+fn whois_shows_a_card_that_fills_in_when_the_profile_arrives() {
+    let alice = "aa".repeat(32);
+    let mut app = app_with(1);
+    app.handle(AppEvent::Names(Ok([(alice.clone(), "Alice".to_string())].into())));
+    app.focus = Focus::Input;
+    type_text(&mut app, "/whois Alice");
+    let cmds = press(&mut app, KeyCode::Enter);
+    assert_eq!(cmds, vec![Cmd::LoadProfile(alice.clone())]);
+    assert_eq!(app.overlay, Overlay::Whois);
+    let card = app.whois.clone().unwrap();
+    assert_eq!(card.name, "Alice");
+    assert!(card.npub.starts_with("npub1") && card.loading, "the card opens at once with what we know");
+    assert_eq!(crate::relay::as_pubkey(&card.npub).as_deref(), Some(alice.as_str()), "and shows the npub for the person asked about");
+    // an answer for somebody else is dropped: the card is about the person it names
+    app.handle(AppEvent::Profile { pubkey: BOB.into(), result: Ok(Profile { name: "Bob".into(), about: "hi".into() }) });
+    assert_eq!(app.whois.as_ref().unwrap(), &card);
+    // the right answer fills the card in
+    app.handle(AppEvent::Profile { pubkey: card.pubkey.clone(), result: Ok(Profile { name: "Alice Smith".into(), about: "I sail".into() }) });
+    let card = app.whois.as_ref().unwrap();
+    assert_eq!((card.name.as_str(), card.about.as_deref(), card.loading), ("Alice Smith", Some("I sail"), false));
+    press(&mut app, KeyCode::Esc);
+    assert_eq!(app.overlay, Overlay::None);
+    // a profile that will not load closes the wait and says so
+    type_text(&mut app, "/whois Alice");
+    press(&mut app, KeyCode::Enter);
+    app.handle(AppEvent::Profile { pubkey: alice.clone(), result: Err("offline".into()) });
+    assert!(!app.whois.as_ref().unwrap().loading);
+    assert!(app.flash_text().unwrap().contains("offline"));
+    // Esc closes the card and ends the wait, so the next command goes to the input
+    press(&mut app, KeyCode::Esc);
+    assert_eq!(app.overlay, Overlay::None);
+    // a name nobody has is reported, not guessed
+    app.focus = Focus::Input;
+    type_text(&mut app, "/whois nobody");
+    assert!(press(&mut app, KeyCode::Enter).is_empty());
+    assert_eq!(app.overlay, Overlay::None);
+    assert!(app.flash_text().unwrap().contains("nobody here is called"));
+}
+
+#[test]
+fn the_search_lists_people_and_enter_starts_a_dm() {
+    let mut app = app_with(1);
+    app.handle(AppEvent::Names(Ok([(BOB.to_string(), "Bob Roberts".to_string())].into())));
+    app.handle(AppEvent::Key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL)));
+    app.search.query.insert_str("roberts");
+    assert!(matches!(app.search_rows().as_slice(), [Row::Person(pk)] if pk == BOB), "the name in the profile finds the person");
+    app.search.asked = "roberts".into(); // it has been searched: Enter opens the row
+    let cmds = app.handle(key(KeyCode::Enter));
+    assert_eq!(app.overlay, Overlay::None);
+    assert!(matches!(cmds.as_slice(), [Cmd::OpenDm { peer }] if peer == BOB));
 }
 
 #[test]

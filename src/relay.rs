@@ -11,6 +11,7 @@ pub const UNREAD_LIMIT: u32 = 200;
 use anyhow::{anyhow, bail, Context, Result};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
+use nostr::nips::nip19::ToBech32;
 use nostr::{EventBuilder, JsonUtil, Keys, Kind, Tag};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -57,6 +58,41 @@ pub struct Window {
     pub events: Vec<Ev>,
     pub has_more: bool,
     pub next_cursor: Option<(u64, String)>,
+}
+
+/// What a `kind:0` profile says about one person.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Profile {
+    pub name: String,
+    pub about: String,
+}
+
+impl Profile {
+    /// Read a profile event; `display_name` wins over `name`, as in the Buzz apps.
+    fn from_event(e: &Ev) -> Profile {
+        let v: Value = serde_json::from_str(&e.content).unwrap_or(Value::Null);
+        let field = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").trim().to_owned();
+        let name = ["display_name", "name"].iter().map(|k| field(k)).find(|n| !n.is_empty()).unwrap_or_default();
+        Profile { name, about: field("about") }
+    }
+}
+
+/// The hex pubkey when `who` is one: hex, or an `npub1…`, either bare or as a `nostr:` URI.
+pub fn as_pubkey(who: &str) -> Option<String> {
+    let w = who.trim();
+    let w = w.strip_prefix("nostr:").unwrap_or(w);
+    if w.len() == 64 && w.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Some(w.to_lowercase());
+    }
+    if w.starts_with("npub1") {
+        return nostr::PublicKey::parse(w).ok().map(|p| p.to_hex());
+    }
+    None
+}
+
+/// `npub1…` for a hex pubkey, when it is one.
+pub fn npub_of(pubkey: &str) -> Option<String> {
+    nostr::PublicKey::from_hex(pubkey).ok().and_then(|p| p.to_bech32().ok())
 }
 
 impl Relay {
@@ -189,8 +225,8 @@ impl Relay {
             .unwrap_or_default())
     }
 
-    /// Display names for pubkeys (`display_name`, else `name`).
-    pub async fn names(&self, pubkeys: &[String]) -> Result<HashMap<String, String>> {
+    /// The newest `kind:0` profile per pubkey: the name to show and what the person says about themselves.
+    pub async fn profiles(&self, pubkeys: &[String]) -> Result<HashMap<String, Profile>> {
         let mut out = HashMap::new();
         for chunk in pubkeys.chunks(100) {
             let evs = self.query(&[json!({"kinds": [KIND_PROFILE], "authors": chunk, "limit": 500})]).await?;
@@ -201,14 +237,20 @@ impl Relay {
                 }
             }
             for (pk, e) in newest {
-                let profile: Value = serde_json::from_str(&e.content).unwrap_or(Value::Null);
-                let name = ["display_name", "name"].iter().filter_map(|k| profile.get(*k).and_then(Value::as_str)).find(|s| !s.is_empty());
-                if let Some(n) = name {
-                    out.insert(pk.to_owned(), n.to_owned());
-                }
+                out.insert(pk.to_owned(), Profile::from_event(e));
             }
         }
         Ok(out)
+    }
+
+    /// Display names for pubkeys (`display_name`, else `name`); someone who never wrote a name is left out.
+    pub async fn names(&self, pubkeys: &[String]) -> Result<HashMap<String, String>> {
+        Ok(self.profiles(pubkeys).await?.into_iter().filter(|(_, p)| !p.name.is_empty()).map(|(pk, p)| (pk, p.name)).collect())
+    }
+
+    /// One person's profile; someone who never wrote one reads as an empty profile, which is not an error.
+    pub async fn profile(&self, pubkey: &str) -> Result<Profile> {
+        Ok(self.profiles(&[pubkey.to_owned()]).await?.remove(pubkey).unwrap_or_default())
     }
 
     /// Full-text search over the messages you can read, most relevant first (NIP-50).
@@ -328,6 +370,13 @@ pub fn delete_channel_builder(channel: &str) -> Result<EventBuilder> {
     buzz_sdk::build_delete_channel(channel_id).map_err(|e| anyhow!("{e}"))
 }
 
+/// Open a direct message with `peer` (`kind:41010`, what `/dm` sends). The relay creates the conversation if it does not exist
+/// and reuses it if it does, so this is safe to send for someone you already have a DM with; it answers with no channel id, so
+/// the client finds the conversation in the channel list afterwards.
+pub fn dm_open_builder(peer: &str) -> Result<EventBuilder> {
+    buzz_sdk::build_dm_open(&[peer]).map_err(|e| anyhow!("{e}"))
+}
+
 /// The human-readable part of a relay error body.
 fn relay_message(body: &str) -> String {
     serde_json::from_str::<Value>(body)
@@ -412,6 +461,44 @@ mod tests {
         assert!(ev.tags.iter().any(|t| t.as_slice().first().map(String::as_str) == Some("name")));
         assert!(create_channel_builder("   ", false, None).is_err(), "a channel needs a name");
         assert!(edit_builder("nope", &target, "x").is_err() && delete_builder(channel, "zz").is_err());
+    }
+
+    #[test]
+    fn a_profile_gives_the_name_to_show_and_the_about_line() {
+        let profile = |at: u64, content: &str| Ev { id: format!("p{at}"), pubkey: "alice".into(), created_at: at, kind: KIND_PROFILE, content: content.into(), tags: Vec::new() };
+        assert_eq!(
+            Profile::from_event(&profile(5, r#"{"name":"alice","display_name":"Alice Smith","about":"  I sail  "}"#)),
+            Profile { name: "Alice Smith".into(), about: "I sail".into() },
+            "display_name wins, and the fields are trimmed"
+        );
+        assert_eq!(Profile::from_event(&profile(6, r#"{"name":"alice"}"#)), Profile { name: "alice".into(), about: String::new() }, "no about line");
+        assert_eq!(Profile::from_event(&profile(7, "not json")), Profile::default(), "a broken profile is an empty one, not an error");
+    }
+
+    #[test]
+    fn a_person_is_recognised_by_hex_npub_or_neither() {
+        let keys = Keys::generate();
+        let hex = keys.public_key().to_hex();
+        let npub = keys.public_key().to_bech32().unwrap();
+        assert_eq!(as_pubkey(&hex).as_deref(), Some(hex.as_str()));
+        assert_eq!(as_pubkey(&hex.to_uppercase()).as_deref(), Some(hex.as_str()));
+        assert_eq!(as_pubkey(&npub).as_deref(), Some(hex.as_str()));
+        assert_eq!(as_pubkey(&format!("nostr:{npub}")).as_deref(), Some(hex.as_str()));
+        assert_eq!(npub_of(&hex).as_deref(), Some(npub.as_str()));
+        assert_eq!(as_pubkey("alice"), None, "a display name is not a key");
+        assert_eq!(as_pubkey("npub1nope"), None);
+        assert_eq!(npub_of("alice"), None);
+    }
+
+    #[test]
+    fn a_dm_open_names_the_other_person() {
+        let keys = Keys::generate();
+        let peer = "cd".repeat(32);
+        let ev = dm_open_builder(&peer).unwrap().sign_with_keys(&keys).unwrap();
+        assert_eq!(ev.kind.as_u16(), 41010);
+        assert_eq!(ev.content, "");
+        assert!(ev.tags.iter().any(|t| t.as_slice() == ["p", peer.as_str()]), "{:?}", ev.tags);
+        assert!(dm_open_builder("alice").is_err(), "a pubkey is required");
     }
 
     #[test]
