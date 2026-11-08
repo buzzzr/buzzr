@@ -143,15 +143,24 @@ fn draw_channels(f: &mut Frame, app: &App, area: Rect) {
             style = style.fg(crate::theme::get().warn).add_modifier(Modifier::BOLD);
         }
         let marker = if bar { "▌" } else { " " };
+        // `#` for an open channel, `*` for a private one (RFC 2811's private-channel prefix); both are ASCII, so every font
+        // has them. DMs are pulled out by `is_dm` and already labelled `✉ name`, so they get no marker.
+        let glyph = if c.is_dm() {
+            ""
+        } else if c.is_private {
+            "*"
+        } else {
+            "#"
+        };
         let badge = if unread > 0 { format!(" ({unread})") } else { String::new() };
         let mark = app.plugins.channel_mark(&c.id);
         let mark_text = mark.map(|m| format!(" {}", m.text)).unwrap_or_default();
-        let room = (inner.width as usize).saturating_sub(2 + badge.width() + mark_text.width());
+        let room = (inner.width as usize).saturating_sub(2 + glyph.width() + badge.width() + mark_text.width());
         let mut label: String = c.label.clone();
         while label.width() > room {
             label.pop();
         }
-        let mut spans = vec![Span::styled(marker, Style::default().fg(crate::theme::get().bar_on)), Span::styled(format!(" {label}{badge}"), style)];
+        let mut spans = vec![Span::styled(marker, Style::default().fg(crate::theme::get().bar_on)), Span::styled(format!(" {glyph}{label}{badge}"), style)];
         if let Some(m) = mark {
             spans.push(Span::styled(mark_text, m.tone.style()));
         }
@@ -548,7 +557,7 @@ mod tests {
 
     fn app() -> App {
         let mut app = App::new("me".into(), false, chrono_tz::UTC);
-        let chan = |id: &str, name: &str| Channel { id: id.into(), name: name.into(), about: String::new(), created_at: 1, section: crate::model::Section::Channels, label: name.into() };
+        let chan = |id: &str, name: &str| Channel { id: id.into(), name: name.into(), about: String::new(), created_at: 1, section: crate::model::Section::Channels, label: name.into(), is_private: false };
         let _: Vec<Cmd> = app.handle(AppEvent::Channels(Ok(vec![chan("c1", "general"), chan("c2", "random")])));
         let mut m1 = ev("a", 1000, "**Hello** there, see [docs](https://example.com)", &[]);
         m1.pubkey = "bob".into();
@@ -610,7 +619,7 @@ mod tests {
         let s = screen(&term).join("\n");
         assert!(s.contains("(3)") && s.contains("3 unread"), "the unread count is written out, not only coloured\n{s}");
         assert!(s.contains("✕ offline, retrying (boom)"), "the connection state is a word, not only a colour\n{s}");
-        assert!(s.contains("▌ general"), "the selection is the bar glyph, not only a background\n{s}");
+        assert!(s.contains("▌ #general"), "the selection is the bar glyph, not only a background\n{s}");
     }
 
     #[test]
@@ -718,26 +727,26 @@ mod tests {
         // the channel list has no focus: the bar marks the channel on screen
         term.draw(|f| draw(f, &mut app)).unwrap();
         let s = screen(&term);
-        assert!(s[2].starts_with("▌ general"), "the bar is on the open channel\n{}", s.join("\n"));
-        assert!(s[3].starts_with("  random"), "the other channel has none\n{}", s.join("\n"));
+        assert!(s[2].starts_with("▌ #general"), "the bar is on the open channel\n{}", s.join("\n"));
+        assert!(s[3].starts_with("  #random"), "the other channel has none\n{}", s.join("\n"));
         // (Messages -> Channels) then Down: the bar moves with the cursor
         app.handle(key(KeyCode::BackTab));
         app.handle(key(KeyCode::Down));
         term.draw(|f| draw(f, &mut app)).unwrap();
         let s = screen(&term);
-        assert!(s[2].starts_with("  general") && s[3].starts_with("▌ random"), "the bar moved to the cursor\n{}", s.join("\n"));
+        assert!(s[2].starts_with("  #general") && s[3].starts_with("▌ #random"), "the bar moved to the cursor\n{}", s.join("\n"));
         // Tab away without opening one: the bar is back on the channel on screen
         app.handle(key(KeyCode::Tab));
         term.draw(|f| draw(f, &mut app)).unwrap();
         let s = screen(&term);
-        assert!(s[2].starts_with("▌ general") && s[3].starts_with("  random"), "the bar came back\n{}", s.join("\n"));
+        assert!(s[2].starts_with("▌ #general") && s[3].starts_with("  #random"), "the bar came back\n{}", s.join("\n"));
     }
 
     #[test]
     fn the_channel_list_shows_a_title_per_section() {
         let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
         let mut app = App::new("me".into(), false, chrono_tz::UTC);
-        let chan = |id: &str, name: &str, section| Channel { id: id.into(), name: name.into(), about: String::new(), created_at: 1, section, label: name.into() };
+        let chan = |id: &str, name: &str, section| Channel { id: id.into(), name: name.into(), about: String::new(), created_at: 1, section, label: name.into(), is_private: false };
         use crate::model::Section::*;
         app.handle(AppEvent::Channels(Ok(vec![chan("d", "DM", Dms), chan("c", "general", Channels), chan("s", "chat", Solo)])));
         term.draw(|f| draw(f, &mut app)).unwrap();
@@ -746,6 +755,21 @@ mod tests {
         assert_eq!(col[0], "Solo", "{}", s.join("\n"));
         assert!(col[1].ends_with("chat") && col[2] == "Channels" && col[3].ends_with("general"), "{col:?}");
         assert!(col[4] == "DMs" && col[5].ends_with("DM"), "{col:?}");
+    }
+
+    #[test]
+    fn the_channel_list_marks_private_channels_and_leaves_dms_alone() {
+        use crate::model::Section::*;
+        let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        let mut app = App::new("me".into(), false, chrono_tz::UTC);
+        let chan = |id: &str, name: &str, section, is_private| Channel { id: id.into(), name: name.into(), about: String::new(), created_at: 1, section, label: name.into(), is_private };
+        app.handle(AppEvent::Channels(Ok(vec![chan("p", "general", Channels, false), chan("q", "dev-buzzr", Channels, true), chan("d", "DM", Dms, true)])));
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term);
+        let col: Vec<String> = s[1..8].iter().map(|l| l.chars().take(26).collect::<String>().trim().to_owned()).collect();
+        assert!(col.iter().any(|r| r.ends_with("#general")), "an open channel is marked #\n{col:?}");
+        assert!(col.iter().any(|r| r.ends_with("*dev-buzzr")), "a private channel is marked *\n{col:?}");
+        assert!(col.iter().any(|r| r.ends_with("DM") && !r.contains('#') && !r.contains('*')), "a DM gets no marker\n{col:?}");
     }
 
     #[test]

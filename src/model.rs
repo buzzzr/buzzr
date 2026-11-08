@@ -152,6 +152,9 @@ pub struct Channel {
     pub created_at: u64,
     pub section: Section,
     pub label: String,
+    /// A private (restricted) channel: the relay's group metadata says `["private"]` instead of `["public"]`. Shown as `*` in
+    /// the channel list, against `#` for an open one; DMs have no such marker.
+    pub is_private: bool,
 }
 
 impl Channel {
@@ -172,6 +175,7 @@ impl Channel {
             label: name.clone(),
             about: e.tag("about").unwrap_or("").to_owned(),
             created_at: e.created_at,
+            is_private: has("private", None),
             id,
             name,
         })
@@ -426,5 +430,17 @@ pub mod tests {
         assert_eq!(section("chat", &[&["t", "buzz.solo"]]), Section::Solo, "the label decides, as in the desktop app");
         assert_eq!(section("DM", &[&["private"]]), Section::Dms);
         assert_eq!(section("x", &[&["t", "other"]]), Section::Channels);
+    }
+
+    #[test]
+    fn a_channel_knows_whether_it_is_private() {
+        let channel = |tags: &[&[&str]]| {
+            let mut t = vec![vec!["d".to_string(), "c".into()], vec!["name".into(), "general".into()]];
+            t.extend(tags.iter().map(|tag| tag.iter().map(|s| s.to_string()).collect()));
+            Channel::from_event(&Ev { kind: 39000, tags: t, ..ev("m", 3, "", &[]) }).unwrap()
+        };
+        assert!(!channel(&[&["public"]]).is_private, "an open channel says [\"public\"]");
+        assert!(channel(&[&["private"], &["restricted"], &["closed"]]).is_private, "a private channel says [\"private\"]");
+        assert!(!channel(&[]).is_private, "neither tag: treated as open rather than guessing");
     }
 }

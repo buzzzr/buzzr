@@ -30,7 +30,7 @@
 ## Features
 
 - **Channels and DMs** with unread counts, in sections: Solo chats, Channels (private and open) and DMs. DMs are labelled with the other
-  person; start one with `/dm name`, or from search.
+  person; start one with `/dm name`, or from search. An open channel is marked `#` and a private one `*`.
 - **Unread that survives a restart.** The last-read position is saved per channel, so the badges are right again next time and a
   `new messages` line shows where you left off.
 - **Threads.** A channel shows top-level messages only, as the Buzz app does, each with its reply count and the time of the last reply.
@@ -119,7 +119,8 @@ values and skip the questions (for scripts and containers; the key is never acce
 
 The full behaviour, for when the feature list above is not enough.
 
-- **Channels and DMs** on the left (DMs are labelled with the other person, `✉ name`), with unread counts. The bar marks the
+- **Channels and DMs** on the left (DMs are labelled with the other person, `✉ name`), with unread counts. An open channel is
+  marked `#` and a private (restricted) one `*`; DMs get no marker. The bar marks the
   channel on screen; while the list has focus it follows the cursor, and leaving the list without opening a channel puts it back.
   `/dm name` opens the DM you already have with someone, or starts a new one; a name from a channel or an npub both work.
 - **Unread that survives a restart:** the last-read position per channel lives in `~/.config/buzzr/read-state.json`, so the
