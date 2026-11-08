@@ -8,7 +8,7 @@ use crate::editor::Editor;
 use crate::list::{self, Layout, ListState, Rendered};
 use crate::live::Live;
 use crate::markdown::{self, Line};
-use crate::model::{Channel, Ev, Store, MESSAGE_KINDS};
+use crate::model::{Channel, Ev, Section, Store, MESSAGE_KINDS};
 use crate::relay::Window;
 use crate::update::InstallSource;
 use base64::Engine;
@@ -23,6 +23,17 @@ use std::time::{Duration, Instant};
 const FLASH: Duration = Duration::from_secs(5);
 const TYPING_FOR: Duration = Duration::from_secs(7);
 const CHANNEL_REFRESH: Duration = Duration::from_secs(60);
+
+/// One row of the channel list on screen: a section title or a channel (an index into `App::channels`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SideRow {
+    Title(Section),
+    Channel(usize),
+}
+
+fn sort_channel_list(list: &mut [Channel]) {
+    list.sort_by(|a, b| (a.section, a.label.to_lowercase(), &a.id).cmp(&(b.section, b.label.to_lowercase(), &b.id)));
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Focus {
@@ -298,6 +309,29 @@ impl App {
         } else {
             self.cur
         }
+    }
+
+    /// The channel list as drawn: `channels` is sorted by section, so a title goes in front of the first channel of each
+    /// non-empty section. Titles are not selectable: the cursor and `open_channel` only deal in channel indices.
+    pub fn sidebar_rows(&self) -> Vec<SideRow> {
+        let mut rows = Vec::with_capacity(self.channels.len() + 4);
+        let mut last = None;
+        for (i, c) in self.channels.iter().enumerate() {
+            if last != Some(c.section) {
+                rows.push(SideRow::Title(c.section));
+                last = Some(c.section);
+            }
+            rows.push(SideRow::Channel(i));
+        }
+        rows
+    }
+
+    /// The first row of the channel list shown in `height` rows: the list scrolls just far enough to keep the selection
+    /// bar in view. The drawing and mouse clicks both use this, so a click lands on the row that was drawn.
+    pub fn sidebar_scroll(&self, rows: &[SideRow], height: usize) -> usize {
+        let Some(bar) = self.channel_bar() else { return 0 };
+        let at = rows.iter().position(|r| *r == SideRow::Channel(bar)).unwrap_or(0);
+        (at + 1).saturating_sub(height)
     }
 
     /// Move the focus. A channel cursor only means something while the list has focus: entering the list starts the
@@ -778,13 +812,27 @@ impl App {
     fn relabel_dms(&mut self) {
         let me = self.me.clone();
         for i in 0..self.channels.len() {
-            if !self.channels[i].is_dm {
+            if !self.channels[i].is_dm() {
                 continue;
             }
             let others: Vec<String> = self.members.get(&self.channels[i].id).map(|m| m.iter().filter(|(p, _)| *p != me).map(|(p, _)| self.name_of(p)).collect()).unwrap_or_default();
             if !others.is_empty() {
                 self.channels[i].label = format!("✉ {}", others.join(", "));
             }
+        }
+        self.sort_channels();
+    }
+
+    /// Sections first, then by label. Run after every label change: DMs all arrive named "DM" and only get their
+    /// "✉ name" label later, so sorting once on arrival would leave them out of order. The open channel and the keyboard
+    /// cursor follow their channel, not their index.
+    fn sort_channels(&mut self) {
+        let open_id = self.channel().map(|c| c.id.clone());
+        let cursor_id = self.channels.get(self.chan_cursor).map(|c| c.id.clone());
+        sort_channel_list(&mut self.channels);
+        self.cur = open_id.and_then(|id| self.channels.iter().position(|c| c.id == id));
+        if let Some(id) = cursor_id {
+            self.chan_cursor = self.channels.iter().position(|c| c.id == id).unwrap_or(0);
         }
     }
 
@@ -807,7 +855,6 @@ impl App {
                 return Vec::new();
             }
         };
-        list.sort_by(|a, b| (a.is_dm, a.label.to_lowercase()).cmp(&(b.is_dm, b.label.to_lowercase())));
         let open_id = self.channel().map(|c| c.id.clone());
         let old_ids: Vec<String> = self.channels.iter().map(|c| c.id.clone()).collect();
         // keep labels we already resolved
@@ -816,16 +863,18 @@ impl App {
                 c.label = old.label.clone();
             }
         }
+        sort_channel_list(&mut list);
+        let cursor_id = self.channels.get(self.chan_cursor).map(|c| c.id.clone());
         self.channels = list;
         self.cur = open_id.and_then(|id| self.channels.iter().position(|c| c.id == id));
-        self.chan_cursor = self.chan_cursor.min(self.channels.len().saturating_sub(1));
+        self.chan_cursor = cursor_id.and_then(|id| self.channels.iter().position(|c| c.id == id)).unwrap_or(0).min(self.channels.len().saturating_sub(1));
         let ids: Vec<String> = self.channels.iter().map(|c| c.id.clone()).collect();
         let mut cmds = Vec::new();
         if ids != old_ids {
             cmds.push(Cmd::Subscribe(ids.clone()));
         }
         for c in self.channels.clone() {
-            if c.is_dm && !self.members.contains_key(&c.id) && self.loading.insert(format!("members:{}", c.id)) {
+            if c.is_dm() && !self.members.contains_key(&c.id) && self.loading.insert(format!("members:{}", c.id)) {
                 cmds.push(Cmd::LoadMembers { channel: c.id });
             }
         }
@@ -838,7 +887,7 @@ impl App {
             }
         }
         if self.cur.is_none() && !self.channels.is_empty() {
-            let first = self.channels.iter().position(|c| !c.is_dm).unwrap_or(0);
+            let first = self.channels.iter().position(|c| !c.is_dm()).unwrap_or(0);
             cmds.extend(self.open_channel(first));
             self.set_focus(Focus::Messages);
         }
@@ -1445,9 +1494,10 @@ impl App {
             }
             MouseEventKind::Down(MouseButton::Left) => {
                 if inside(self.areas.channels) {
-                    let row = (m.row - self.areas.channels.y) as usize;
-                    if row < self.channels.len() {
-                        let cmds = self.open_channel(row);
+                    let rows = self.sidebar_rows();
+                    let row = (m.row - self.areas.channels.y) as usize + self.sidebar_scroll(&rows, self.areas.channels.height as usize);
+                    if let Some(SideRow::Channel(i)) = rows.get(row).copied() {
+                        let cmds = self.open_channel(i);
                         self.set_focus(Focus::Messages);
                         return cmds;
                     }
