@@ -1,0 +1,378 @@
+//! Plain data: events as the relay sends them, and the per-channel store that turns them into what the screen shows.
+//!
+//! Nothing here touches the network or the terminal, so all of it is unit tested.
+
+use serde::Deserialize;
+use serde_json::Value;
+use std::collections::{BTreeMap, HashMap, HashSet};
+
+/// Event kinds shown as messages in a channel (the same set the `buzz` CLI reads).
+pub const MESSAGE_KINDS: [u64; 5] = [9, 40002, 40008, 45001, 45003];
+pub const KIND_PROFILE: u64 = 0;
+pub const KIND_DELETION: u64 = 5;
+pub const KIND_REACTION: u64 = 7;
+pub const KIND_TYPING: u64 = 20002;
+pub const KIND_GROUP_METADATA: u64 = 39000;
+pub const KIND_GROUP_MEMBERS: u64 = 39002;
+pub const KIND_THREAD_SUMMARY: u64 = 39005;
+pub const KIND_WINDOW_BOUNDS: u64 = 39006;
+pub const KIND_EDIT: u64 = 40003;
+pub const KIND_DELETE_MESSAGE: u64 = 9005;
+
+/// A Nostr event, reduced to what the client reads. Signatures are not checked here: the transport is authenticated (HTTPS with
+/// NIP-98 or a NIP-42 WebSocket) and the relay is trusted for what it serves.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct Ev {
+    pub id: String,
+    pub pubkey: String,
+    pub created_at: u64,
+    pub kind: u64,
+    #[serde(default)]
+    pub content: String,
+    #[serde(default)]
+    pub tags: Vec<Vec<String>>,
+}
+
+impl Ev {
+    pub fn from_value(v: &Value) -> Option<Ev> {
+        serde_json::from_value(v.clone()).ok()
+    }
+
+    /// First value of the first tag called `name`.
+    pub fn tag(&self, name: &str) -> Option<&str> {
+        self.tags.iter().find(|t| t.first().map(String::as_str) == Some(name)).and_then(|t| t.get(1)).map(String::as_str)
+    }
+
+    pub fn root_tag(&self) -> Option<&str> {
+        self.e_marked("root")
+    }
+
+    pub fn reply_tag(&self) -> Option<&str> {
+        self.e_marked("reply")
+    }
+
+    /// The `e` tag with a given marker (`root` or `reply`).
+    fn e_marked(&self, marker: &str) -> Option<&str> {
+        self.tags
+            .iter()
+            .find(|t| t.first().map(String::as_str) == Some("e") && t.get(3).map(String::as_str) == Some(marker))
+            .and_then(|t| t.get(1))
+            .map(String::as_str)
+    }
+
+    /// The message this one replies to directly.
+    pub fn parent(&self) -> Option<&str> {
+        self.e_marked("reply").or_else(|| self.e_marked("root"))
+    }
+
+    /// The message that starts this one's thread, as far as its own tags say: a nested reply carries a `root` tag, a direct reply
+    /// only a `reply` tag (its parent is the root).
+    pub fn root_hint(&self) -> Option<&str> {
+        self.e_marked("root").or_else(|| self.e_marked("reply"))
+    }
+
+    pub fn channel(&self) -> Option<&str> {
+        self.tag("h")
+    }
+
+    /// A reply that its author also sent to the channel (`["broadcast","1"]`) is listed on the timeline.
+    pub fn is_broadcast(&self) -> bool {
+        self.tags.iter().any(|t| t.first().map(String::as_str) == Some("broadcast") && t.get(1).map(String::as_str) == Some("1"))
+    }
+
+    /// Whether the channel timeline lists this message itself, rather than inside a thread.
+    pub fn is_top_level(&self) -> bool {
+        match (self.e_marked("root"), self.e_marked("reply")) {
+            (None, None) => true,
+            (None, Some(_)) => self.is_broadcast(), // depth 1 and broadcast
+            (Some(_), _) => false,
+        }
+    }
+
+}
+
+/// What the relay says about one thread: `kind:39005`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Summary {
+    pub reply_count: u64,
+    pub last_reply_at: Option<u64>,
+    pub participants: Vec<String>,
+}
+
+impl Summary {
+    pub fn from_event(e: &Ev) -> Option<(String, Summary)> {
+        let root = e.tag("e").or_else(|| e.tag("d"))?.to_owned();
+        let v: Value = serde_json::from_str(&e.content).ok()?;
+        Some((
+            root,
+            Summary {
+                reply_count: v.get("reply_count").and_then(Value::as_u64).unwrap_or(0),
+                last_reply_at: v.get("last_reply_at").and_then(Value::as_u64),
+                participants: v
+                    .get("participants")
+                    .and_then(Value::as_array)
+                    .map(|a| a.iter().filter_map(|p| p.as_str().map(str::to_owned)).collect())
+                    .unwrap_or_default(),
+            },
+        ))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Channel {
+    pub id: String,
+    pub name: String,
+    #[allow(dead_code)]
+    pub about: String,
+    #[allow(dead_code)]
+    pub created_at: u64,
+    /// Direct messages all come with the generic name "DM"; they are labelled with the other participants instead.
+    pub is_dm: bool,
+    pub label: String,
+}
+
+impl Channel {
+    pub fn from_event(e: &Ev) -> Option<Channel> {
+        let id = e.tag("d")?.to_owned();
+        let name = e.tag("name").unwrap_or("").to_owned();
+        Some(Channel {
+            is_dm: name == "DM",
+            label: name.clone(),
+            about: e.tag("about").unwrap_or("").to_owned(),
+            created_at: e.created_at,
+            id,
+            name,
+        })
+    }
+}
+
+/// Everything loaded for one channel: its messages (top-level and replies together), thread summaries, edits, deletions,
+/// reactions. Views (the channel timeline, one thread) are filters over this.
+#[derive(Debug, Default)]
+pub struct Store {
+    pub msgs: HashMap<String, Ev>,
+    /// Latest edit per target message: `(created_at, new content)`.
+    pub edits: HashMap<String, (u64, String)>,
+    pub deleted: HashSet<String>,
+    pub summaries: HashMap<String, Summary>,
+    /// target message -> emoji -> reactor pubkeys
+    pub reactions: HashMap<String, BTreeMap<String, HashSet<String>>>,
+    /// The next page of older top-level messages, from the relay's window bounds (`None` once exhausted).
+    pub next_cursor: Option<(u64, String)>,
+    pub has_more: bool,
+    pub head_loaded: bool,
+    /// Newest message time, for unread markers.
+    pub latest: u64,
+}
+
+impl Store {
+    /// Add an event of any kind the client cares about. Returns true when something visible changed.
+    pub fn apply(&mut self, e: &Ev) -> bool {
+        match e.kind {
+            k if MESSAGE_KINDS.contains(&k) => {
+                if self.deleted.contains(&e.id) {
+                    return false;
+                }
+                self.latest = self.latest.max(e.created_at);
+                self.msgs.insert(e.id.clone(), e.clone()).is_none()
+            }
+            KIND_EDIT => {
+                let Some(target) = e.tag("e") else { return false };
+                // only the author may edit, and only a newer edit replaces an older one
+                let by_author = self.msgs.get(target).map(|m| m.pubkey == e.pubkey).unwrap_or(true);
+                if !by_author {
+                    return false;
+                }
+                let newer = self.edits.get(target).map(|(t, _)| e.created_at >= *t).unwrap_or(true);
+                if newer {
+                    self.edits.insert(target.to_owned(), (e.created_at, e.content.clone()));
+                }
+                newer
+            }
+            KIND_DELETION | KIND_DELETE_MESSAGE => {
+                let mut changed = false;
+                for t in e.tags.iter().filter(|t| t.first().map(String::as_str) == Some("e")) {
+                    if let Some(target) = t.get(1) {
+                        self.deleted.insert(target.clone());
+                        changed |= self.msgs.remove(target).is_some();
+                    }
+                }
+                changed
+            }
+            KIND_REACTION => {
+                let Some(target) = e.tag("e") else { return false };
+                self.reactions.entry(target.to_owned()).or_default().entry(e.content.clone()).or_default().insert(e.pubkey.clone())
+            }
+            KIND_THREAD_SUMMARY => match Summary::from_event(e) {
+                Some((root, s)) => {
+                    let changed = self.summaries.get(&root) != Some(&s);
+                    self.summaries.insert(root, s);
+                    changed
+                }
+                None => false,
+            },
+            _ => false,
+        }
+    }
+
+    pub fn content_of<'a>(&'a self, m: &'a Ev) -> (&'a str, bool) {
+        match self.edits.get(&m.id) {
+            Some((_, text)) => (text.as_str(), true),
+            None => (m.content.as_str(), false),
+        }
+    }
+
+    /// The root of `m`'s thread: itself if it is not a reply. A nested reply names its root in a `root` tag; a direct reply names
+    /// only its parent, which is the root unless the parent is itself a reply (older clients), in which case we climb.
+    pub fn thread_root<'a>(&'a self, m: &'a Ev) -> &'a str {
+        self.root_inner(m, 0)
+    }
+
+    fn root_inner<'a>(&'a self, m: &'a Ev, depth: usize) -> &'a str {
+        if let Some(root) = m.root_tag() {
+            return root;
+        }
+        match m.reply_tag() {
+            None => &m.id,
+            Some(parent) => match self.msgs.get(parent) {
+                Some(p) if depth < 32 => self.root_inner(p, depth + 1),
+                _ => parent,
+            },
+        }
+    }
+
+    /// Messages in time order (oldest first), deleted ones excluded.
+    fn sorted<'a>(&'a self, keep: impl Fn(&Ev) -> bool) -> Vec<&'a Ev> {
+        let mut v: Vec<&Ev> = self.msgs.values().filter(|m| !self.deleted.contains(&m.id) && keep(m)).collect();
+        v.sort_by(|a, b| (a.created_at, &a.id).cmp(&(b.created_at, &b.id)));
+        v
+    }
+
+    /// What the channel timeline lists: top-level messages, plus replies whose parent is not loaded (so that nothing
+    /// disappears), oldest first.
+    pub fn timeline(&self) -> Vec<&Ev> {
+        self.sorted(|m| m.is_top_level() || m.root_hint().map(|r| !self.msgs.contains_key(r)).unwrap_or(false))
+    }
+
+    /// A thread: the root (if loaded) and every message that belongs to it, oldest first.
+    pub fn thread(&self, root: &str) -> Vec<&Ev> {
+        self.sorted(|m| m.id == root || self.thread_root(m) == root)
+    }
+
+    /// Reply count and time of the latest reply for a timeline row: the relay's summary when we have it, otherwise what is
+    /// loaded.
+    pub fn replies_of(&self, m: &Ev) -> (u64, Option<u64>) {
+        let loaded: Vec<&Ev> = self.msgs.values().filter(|r| r.id != m.id && !self.deleted.contains(&r.id) && self.thread_root(r) == m.id).collect();
+        let from_loaded = (loaded.len() as u64, loaded.iter().map(|r| r.created_at).max());
+        match self.summaries.get(&m.id) {
+            Some(s) if s.reply_count >= from_loaded.0 => (s.reply_count, s.last_reply_at.or(from_loaded.1)),
+            _ => from_loaded,
+        }
+    }
+
+    pub fn reaction_summary(&self, id: &str) -> Vec<(String, usize)> {
+        self.reactions.get(id).map(|m| m.iter().map(|(emoji, who)| (emoji.clone(), who.len())).collect()).unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+pub mod tests {
+    use super::*;
+
+    pub fn ev(id: &str, at: u64, content: &str, tags: &[&[&str]]) -> Ev {
+        Ev {
+            id: id.into(),
+            pubkey: "alice".into(),
+            created_at: at,
+            kind: 9,
+            content: content.into(),
+            tags: tags.iter().map(|t| t.iter().map(|s| s.to_string()).collect()).collect(),
+        }
+    }
+
+    fn reply(id: &str, at: u64, parent: &str) -> Ev {
+        ev(id, at, "reply", &[&["e", parent, "", "reply"]])
+    }
+
+    fn nested(id: &str, at: u64, root: &str, parent: &str) -> Ev {
+        ev(id, at, "nested", &[&["e", root, "", "root"], &["e", parent, "", "reply"]])
+    }
+
+    #[test]
+    fn tags_decide_top_level_parent_and_root() {
+        let top = ev("a", 1, "x", &[&["h", "chan"]]);
+        let direct = reply("b", 2, "a");
+        let deep = nested("c", 3, "a", "b");
+        assert!(top.is_top_level() && !direct.is_top_level() && !deep.is_top_level());
+        assert_eq!(direct.parent(), Some("a"));
+        assert_eq!(deep.parent(), Some("b"));
+        assert_eq!(deep.root_hint(), Some("a"));
+        assert_eq!(direct.root_hint(), Some("a"));
+        let mut broadcast = reply("d", 4, "a");
+        broadcast.tags.push(vec!["broadcast".into(), "1".into()]);
+        assert!(broadcast.is_top_level(), "a broadcast reply is listed on the timeline");
+    }
+
+    #[test]
+    fn timeline_lists_top_level_only_and_orphans() {
+        let mut s = Store::default();
+        for e in [ev("a", 1, "one", &[]), reply("b", 2, "a"), nested("c", 3, "a", "b"), ev("d", 4, "two", &[]), reply("o", 5, "gone")] {
+            s.apply(&e);
+        }
+        let ids: Vec<&str> = s.timeline().iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["a", "d", "o"], "replies stay in their thread; an orphan reply stays visible");
+        assert_eq!(s.replies_of(&s.msgs["a"].clone()), (2, Some(3)), "nested replies count toward the top message");
+    }
+
+    #[test]
+    fn thread_contains_root_and_all_descendants() {
+        let mut s = Store::default();
+        for e in [ev("a", 1, "one", &[]), reply("b", 2, "a"), nested("c", 3, "a", "b"), ev("d", 4, "other", &[]), reply("e", 5, "d")] {
+            s.apply(&e);
+        }
+        let ids: Vec<&str> = s.thread("a").iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["a", "b", "c"]);
+        // an old-style nested reply without a root tag still finds its root through its parent
+        s.apply(&reply("f", 6, "b"));
+        assert_eq!(s.thread_root(&s.msgs["f"].clone()), "a");
+    }
+
+    #[test]
+    fn relay_summary_beats_what_is_loaded() {
+        let mut s = Store::default();
+        s.apply(&ev("a", 1, "one", &[]));
+        s.apply(&reply("b", 2, "a"));
+        let summary = Ev { kind: 39005, content: r#"{"reply_count":5,"descendant_count":5,"last_reply_at":99,"participants":["x"]}"#.into(), tags: vec![vec!["e".into(), "a".into()], vec!["d".into(), "a".into()]], ..ev("s", 9, "", &[]) };
+        assert!(s.apply(&summary));
+        assert_eq!(s.replies_of(&s.msgs["a"].clone()), (5, Some(99)));
+        assert!(!s.apply(&summary), "the same summary again changes nothing");
+    }
+
+    #[test]
+    fn edits_deletions_and_reactions() {
+        let mut s = Store::default();
+        s.apply(&ev("a", 1, "typo", &[]));
+        let edit = Ev { kind: 40003, content: "fixed".into(), tags: vec![vec!["e".into(), "a".into()]], ..ev("e1", 5, "", &[]) };
+        assert!(s.apply(&edit));
+        assert_eq!(s.content_of(&s.msgs["a"].clone()), ("fixed", true));
+        let stranger = Ev { pubkey: "mallory".into(), content: "hacked".into(), ..edit.clone() };
+        let stranger = Ev { id: "e2".into(), created_at: 9, ..stranger };
+        assert!(!s.apply(&stranger), "only the author may edit");
+        assert_eq!(s.content_of(&s.msgs["a"].clone()).0, "fixed");
+        let like = Ev { kind: 7, content: "👍".into(), tags: vec![vec!["e".into(), "a".into()]], ..ev("r1", 6, "", &[]) };
+        assert!(s.apply(&like));
+        assert!(!s.apply(&like), "a repeated reaction is not new");
+        assert_eq!(s.reaction_summary("a"), vec![("👍".to_string(), 1)]);
+        let del = Ev { kind: 5, tags: vec![vec!["e".into(), "a".into()]], ..ev("d1", 7, "", &[]) };
+        assert!(s.apply(&del));
+        assert!(s.timeline().is_empty());
+        assert!(!s.apply(&ev("a", 1, "typo", &[])), "a deleted message does not come back");
+    }
+
+    #[test]
+    fn channel_metadata_and_dm_naming() {
+        let e = Ev { kind: 39000, tags: vec![vec!["d".into(), "chan1".into()], vec!["name".into(), "DM".into()]], ..ev("m", 3, "", &[]) };
+        let c = Channel::from_event(&e).unwrap();
+        assert!(c.is_dm && c.id == "chan1");
+    }
+}

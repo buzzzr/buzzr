@@ -1,0 +1,113 @@
+name: release
+
+# Push a tag like v0.2.0 (it must match `version` in Cargo.toml) to build binaries for every
+# target and publish them, with SHA256SUMS, as a GitHub release. A pull request that changes this
+# file only builds and smoke-tests the binaries; nothing is published.
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - .github/scripts/package.sh
+
+permissions:
+  contents: read
+
+env:
+  # Same image as build.sh: Alpine, so the binary is a static musl executable.
+  LINUX_IMAGE: rust:1.98-alpine3.22
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        name: Read the version from Cargo.toml and check it against the tag
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
+          [ -n "$version" ] || { echo "no version in Cargo.toml"; exit 1; }
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-musl,  os: ubuntu-latest,    linux: true }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm, linux: true }
+          - { target: aarch64-apple-darwin,       os: macos-latest,     linux: false }
+          - { target: x86_64-apple-darwin,        os: macos-latest,     linux: false }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build (Linux, static, in Alpine)
+        if: matrix.linux
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src "$LINUX_IMAGE" sh -euc '
+            apk add --no-cache build-base cmake perl pkgconf git musl-dev
+            cargo build --release --target-dir /tmp/target
+            cp /tmp/target/release/buzzr /src/buzzr-bin'
+          sudo chown "$(id -u):$(id -g)" buzzr-bin
+
+      - name: Build (macOS)
+        if: ${{ !matrix.linux }}
+        run: |
+          rustup toolchain install stable --profile minimal --target ${{ matrix.target }}
+          cargo build --release --target ${{ matrix.target }}
+          cp target/${{ matrix.target }}/release/buzzr buzzr-bin
+
+      - name: Smoke test
+        run: |
+          run() { if [ "${{ matrix.target }}" = x86_64-apple-darwin ]; then arch -x86_64 "$@"; else "$@"; fi; }
+          out="$(run ./buzzr-bin --version)"
+          echo "$out"
+          [ "$out" = "buzzr ${{ needs.version.outputs.version }}" ]
+          run ./buzzr-bin --help > /dev/null
+          if [ "${{ matrix.linux }}" = true ]; then
+            # a static executable has no dynamic section
+            ! readelf -d buzzr-bin | grep -q NEEDED
+          fi
+
+      - name: Package
+        run: .github/scripts/package.sh buzzr-bin "${{ matrix.target }}" "${{ needs.version.outputs.version }}" dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: buzzr-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    if: github.ref_type == 'tag'
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: buzzr-*
+          merge-multiple: true
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum *.tar.gz | tee SHA256SUMS
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # a tag with a suffix (v0.2.0-rc1) is published as a pre-release
+          pre=""; case "$GITHUB_REF_NAME" in *-*) pre="--prerelease" ;; esac
+          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" --title "buzzr ${{ needs.version.outputs.version }}" \
+            --generate-notes --verify-tag $pre

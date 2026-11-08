@@ -1,0 +1,686 @@
+//! Drawing the screen. Everything here reads `App`; the only thing it changes is the geometry it reports back (so that clicks
+//! can be mapped to what is on screen).
+
+use crate::app::{App, Conn, Focus, Overlay, Row, View};
+use crate::list;
+use ratatui::layout::{Alignment, Constraint, Layout, Position, Rect};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
+use ratatui::Frame;
+use unicode_width::UnicodeWidthStr;
+
+const CHANNELS_W: u16 = 28;
+
+fn dim() -> Style {
+    Style::default().fg(crate::theme::get().dim)
+}
+
+fn faint() -> Style {
+    Style::default().fg(crate::theme::get().faint)
+}
+
+fn key_hint(key: &str, what: &str) -> Vec<Span<'static>> {
+    vec![Span::styled(format!(" {key} "), Style::default().add_modifier(Modifier::REVERSED)), Span::styled(format!(" {what}  "), dim())]
+}
+
+pub fn draw(f: &mut Frame, app: &mut App) {
+    let area = f.area();
+    let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(3), Constraint::Length(1)]).split(area);
+    let (header, body, footer) = (rows[0], rows[1], rows[2]);
+    let cols = Layout::horizontal([Constraint::Length(CHANNELS_W.min(body.width / 3)), Constraint::Min(10)]).split(body);
+    let (chans, right) = (cols[0], cols[1]);
+
+    // the input box grows with its text, up to 10 lines
+    let input_inner_w = right.width.saturating_sub(4).max(4) as usize;
+    let input_rows = app.editor.rows(input_inner_w).len().clamp(1, 10) as u16;
+    let rr = Layout::vertical([Constraint::Min(2), Constraint::Length(1), Constraint::Length(1), Constraint::Length(input_rows + 2)]).split(right);
+    let (msgs, typing, status, input) = (rr[0], rr[1], rr[2], rr[3]);
+
+    app.areas.channels = chans;
+    app.areas.msgs = msgs;
+    app.areas.input = input;
+    app.view_h = msgs.height as usize;
+    let content_w = msgs.width.saturating_sub(2).max(10) as usize;
+    app.layout(content_w); // (re)build the layout for this width before reading it
+
+    draw_header(f, app, header);
+    draw_channels(f, app, chans);
+    draw_messages(f, app, msgs);
+    draw_typing(f, app, typing);
+    draw_status(f, app, status);
+    draw_input(f, app, input, input_inner_w);
+    draw_footer(f, app, footer);
+    match app.overlay {
+        Overlay::Keys => draw_keys(f, body),
+        Overlay::Help => draw_help(f, area),
+        Overlay::Search => draw_search(f, app, area),
+        Overlay::Panel => draw_panel(f, app, area),
+        Overlay::None => {}
+    }
+}
+
+/// Contribution segments as ratatui spans, clipped to the space that is actually left.
+fn spans(segments: &[crate::contrib::Segment], width: usize) -> Vec<Span<'static>> {
+    crate::contrib::clip(segments.to_vec(), width).into_iter().map(|s| Span::styled(s.text, s.tone.style())).collect()
+}
+
+fn draw_header(f: &mut Frame, app: &App, area: Rect) {
+    let title = match (app.channel(), &app.view) {
+        (None, _) => "no channel".to_owned(),
+        (Some(c), View::Channel) => if c.is_dm { c.label.clone() } else { format!("#{}", c.label) },
+        (Some(c), View::Thread(_)) => format!("{} › thread", if c.is_dm { c.label.clone() } else { format!("#{}", c.label) }),
+    };
+    let left = Line::from(vec![Span::styled(" buzzr ", Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED)), Span::raw(format!(" {title}"))]);
+    let (dot, text, color) = match &app.conn {
+        Conn::Live => ("●", "live".to_owned(), Color::Green),
+        Conn::Connecting => ("◌", "connecting…".to_owned(), Color::Yellow),
+        Conn::Down(why) => ("✕", format!("offline, retrying ({})", why.chars().take(40).collect::<String>()), Color::Red),
+    };
+    let mut right = vec![];
+    let badges = app.plugins.header();
+    if !badges.is_empty() {
+        right.extend(spans(&badges, area.width as usize / 2));
+        right.push(Span::raw("   "));
+    }
+    let unread = app.total_unread();
+    if unread > 0 {
+        right.push(Span::styled(format!("• {unread} unread   "), Style::default().fg(Color::Yellow)));
+    }
+    right.push(Span::styled(format!("{dot} {text} "), Style::default().fg(color)));
+    let right_w: u16 = right.iter().map(|s| s.content.width() as u16).sum();
+    let parts = Layout::horizontal([Constraint::Min(1), Constraint::Length(right_w.min(area.width))]).split(area);
+    f.render_widget(Paragraph::new(left), parts[0]);
+    f.render_widget(Paragraph::new(Line::from(right)), parts[1]);
+}
+
+fn draw_channels(f: &mut Frame, app: &App, area: Rect) {
+    let block = Block::default().borders(Borders::RIGHT).border_style(faint());
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let focused = app.focus == Focus::Channels;
+    let mut lines = Vec::new();
+    for (i, c) in app.channels.iter().enumerate().take(inner.height as usize) {
+        let open = app.cur == Some(i);
+        let bar = app.channel_bar() == Some(i);
+        let unread = app.unread.get(&c.id).copied().unwrap_or(0);
+        let mut style = Style::default();
+        if open {
+            style = style.add_modifier(Modifier::BOLD);
+        }
+        if unread > 0 {
+            style = style.fg(Color::Yellow).add_modifier(Modifier::BOLD);
+        }
+        let marker = if bar { "▌" } else { " " };
+        let badge = if unread > 0 { format!(" ({unread})") } else { String::new() };
+        let mark = app.plugins.channel_mark(&c.id);
+        let mark_text = mark.map(|m| format!(" {}", m.text)).unwrap_or_default();
+        let room = (inner.width as usize).saturating_sub(2 + badge.width() + mark_text.width());
+        let mut label: String = c.label.clone();
+        while label.width() > room {
+            label.pop();
+        }
+        let mut spans = vec![Span::styled(marker, Style::default().fg(crate::theme::get().bar_on)), Span::styled(format!(" {label}{badge}"), style)];
+        if let Some(m) = mark {
+            spans.push(Span::styled(mark_text, m.tone.style()));
+        }
+        let mut line = Line::from(spans);
+        if bar && focused {
+            line = line.style(Style::default().bg(crate::theme::get().sel_bg));
+        }
+        lines.push(line);
+    }
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+fn draw_messages(f: &mut Frame, app: &App, area: Rect) {
+    let Some((_, layout)) = app.layout_ref() else { return };
+    let view_h = area.height as usize;
+    if layout.items.is_empty() {
+        let text = if app.channel().is_none() { "Pick a channel on the left." } else if app.store().map(|s| s.head_loaded).unwrap_or(false) { "No messages yet." } else { "Loading…" };
+        f.render_widget(Paragraph::new(Span::styled(text, dim())).alignment(Alignment::Center), Rect::new(area.x, area.y + area.height / 3, area.width, 1));
+        return;
+    }
+    let selected = list::selected_index(layout, &app.state);
+    let focused = app.focus == Focus::Messages;
+    let mut rows: Vec<Line> = Vec::with_capacity(view_h);
+    for y in 0..view_h {
+        match layout.at_line(app.state.scroll + y) {
+            None => rows.push(Line::default()),
+            Some((i, within)) => {
+                let is_sel = Some(i) == selected && within.is_some();
+                let gutter = if is_sel { Span::styled("▌", Style::default().fg(if focused { crate::theme::get().bar_on } else { crate::theme::get().bar_off })) } else { Span::raw(" ") };
+                let mut spans = vec![gutter];
+                if let Some(l) = within {
+                    spans.extend(layout.items[i].lines[l].spans.iter().cloned());
+                }
+                let mut line = Line::from(spans);
+                if is_sel {
+                    line = line.style(Style::default().bg(crate::theme::get().sel_bg));
+                }
+                rows.push(line);
+            }
+        }
+    }
+    let text_area = Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height);
+    f.render_widget(Paragraph::new(rows), text_area);
+    if layout.total > view_h {
+        let mut sb = ScrollbarState::new(layout.max_scroll(view_h)).position(app.state.scroll);
+        f.render_stateful_widget(Scrollbar::new(ScrollbarOrientation::VerticalRight).track_symbol(Some("│")).thumb_symbol("█").style(faint()), area, &mut sb);
+    }
+}
+
+fn draw_typing(f: &mut Frame, app: &App, area: Rect) {
+    let who = app.typing_now();
+    if who.is_empty() {
+        return;
+    }
+    let dots = ".".repeat(1 + (app.tick_count / 2 % 3) as usize);
+    let verb = if who.len() == 1 { "is typing" } else { "are typing" };
+    f.render_widget(Paragraph::new(Span::styled(format!(" {} {verb}{dots}", who.join(", ")), dim().add_modifier(Modifier::ITALIC))), area);
+}
+
+fn draw_status(f: &mut Frame, app: &App, area: Rect) {
+    if app.confirm_delete.is_some() {
+        let prompt = Span::styled("Delete this message? press y to delete, anything else cancels", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+        f.render_widget(Paragraph::new(prompt).alignment(Alignment::Right), area);
+        return;
+    }
+    let text = if let Some(t) = app.flash_text() {
+        t.to_owned()
+    } else if app.reply_target.is_some() {
+        "replying in a thread · Esc cancels".to_owned()
+    } else if app.in_thread() {
+        "thread · Esc: back to the channel".to_owned()
+    } else if let Some(s) = app.store() {
+        let more = if s.has_more { " · Up at the top loads older" } else { "" };
+        format!("{} {} loaded{more}", s.timeline().len(), if s.timeline().len() == 1 { "message" } else { "messages" })
+    } else {
+        String::new()
+    };
+    let mut items = app.plugins.status();
+    if let Some(hint) = app.update_hint() {
+        items.insert(0, crate::contrib::Segment::new(hint, crate::contrib::Tone::Warn));
+    }
+    if items.is_empty() {
+        f.render_widget(Paragraph::new(Span::styled(text, dim())).alignment(Alignment::Right), area);
+        return;
+    }
+    let right_w = (text.width() as u16).min(area.width);
+    let parts = Layout::horizontal([Constraint::Min(1), Constraint::Length(right_w)]).split(area);
+    f.render_widget(Paragraph::new(Line::from(spans(&items, parts[0].width as usize))), parts[0]);
+    f.render_widget(Paragraph::new(Span::styled(text, dim())).alignment(Alignment::Right), parts[1]);
+}
+
+/// A plugin panel (or the built-in `/plugins` list): rows, a cursor and the row actions the host owns.
+fn draw_panel(f: &mut Frame, app: &App, area: Rect) {
+    let Some(panel) = &app.panel else { return };
+    let w = 100.min(area.width.saturating_sub(4)).max(24);
+    let h = (panel.rows.len() as u16 + 4).min(area.height.saturating_sub(2)).max(6);
+    let r = Rect::new(area.x + (area.width.saturating_sub(w)) / 2, area.y + (area.height.saturating_sub(h)) / 2, w, h);
+    f.render_widget(Clear, r);
+    let title = format!(" {} · Up/Down · Enter runs · Esc closes ", panel.title);
+    let block = Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Cyan)).title(title);
+    let inner = block.inner(r);
+    f.render_widget(block, r);
+    if inner.height == 0 {
+        return;
+    }
+    let rows: Vec<Line> = panel
+        .rows
+        .iter()
+        .map(|row| {
+            let marker = if row.action.is_some() { "▸ " } else { "  " };
+            let mut spans = vec![Span::styled(marker, dim())];
+            spans.extend(spans_of(row.text.chars().take(crate::contrib::MAX_TEXT).collect::<String>(), row.tone, inner.width as usize));
+            Line::from(spans)
+        })
+        .collect();
+    let vis = inner.height as usize;
+    let start = panel.cursor.saturating_sub(vis.saturating_sub(1) / 2).min(rows.len().saturating_sub(vis));
+    let visible: Vec<Line> = rows.into_iter().skip(start).take(vis).collect();
+    f.render_widget(Paragraph::new(visible), inner);
+    if panel.cursor >= start && panel.cursor < start + vis {
+        f.set_cursor_position(Position::new(inner.x, inner.y + (panel.cursor - start) as u16));
+    }
+}
+
+fn spans_of(text: String, tone: crate::contrib::Tone, width: usize) -> Vec<Span<'static>> {
+    spans(&[crate::contrib::Segment { text, tone }], width)
+}
+
+fn draw_input(f: &mut Frame, app: &App, area: Rect, inner_w: usize) {
+    let focused = app.focus == Focus::Input;
+    let title = if app.editing.is_some() {
+        " edit message "
+    } else if app.reply_target.is_some() || app.in_thread() {
+        " reply in thread "
+    } else {
+        " message "
+    };
+    let block = Block::default().borders(Borders::ALL).border_style(if focused { Style::default().fg(Color::Cyan) } else { faint() }).title(title);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if app.editor.is_empty() {
+        let hint = if app.read_only { "read-only: nothing will be sent" } else { "Type a message · /help for commands · F1 for keys" };
+        f.render_widget(Paragraph::new(Span::styled(hint, dim())), inner);
+    } else {
+        let lines: Vec<Line> = app.editor.rows(inner_w).iter().map(|r| Line::raw(app.editor.row_text(r))).collect();
+        let scroll = lines.len().saturating_sub(inner.height as usize) as u16;
+        f.render_widget(Paragraph::new(lines).scroll((scroll, 0)), inner);
+    }
+    if focused && app.overlay == Overlay::None {
+        let (row, col) = app.editor.cursor_pos(inner_w);
+        let total = app.editor.rows(inner_w).len();
+        let visible_row = row.saturating_sub(total.saturating_sub(inner.height as usize));
+        f.set_cursor_position(Position::new(inner.x + col as u16, inner.y + visible_row as u16));
+    }
+}
+
+fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
+    let mut spans: Vec<Span> = Vec::new();
+    match app.focus {
+        Focus::Channels => spans.extend(key_hint("⏎", "Open channel")),
+        Focus::Messages => {
+            spans.extend(key_hint("⏎", if app.in_thread() { "Reply" } else { "Open thread" }));
+            spans.extend(key_hint("r", "Reply"));
+            spans.extend(key_hint("c", "Copy"));
+            if app.selected_is_own() {
+                spans.extend(key_hint("e", "Edit"));
+                spans.extend(key_hint("d", "Delete"));
+            }
+            if app.in_thread() {
+                spans.extend(key_hint("esc", "Back"));
+            }
+        }
+        Focus::Input => {
+            spans.extend(key_hint("⏎", "Send"));
+            if app.editing.is_some() {
+                spans.extend(key_hint("esc", "Cancel edit"));
+            } else if app.reply_target.is_some() {
+                spans.extend(key_hint("esc", "Cancel reply"));
+            }
+        }
+    }
+    spans.extend(key_hint("tab", "Switch pane"));
+    spans.extend(key_hint("^F", "Search"));
+    spans.extend(key_hint("F1", "Keys"));
+    spans.extend(key_hint("F2", "Help"));
+    spans.extend(key_hint("^q", "Quit"));
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+pub const KEYS: &[(&str, &str)] = &[
+    ("Tab / Shift+Tab", "switch between channels, messages and the input"),
+    ("Esc", "close a panel, cancel a reply, leave a thread (in that order)"),
+    ("F1", "this list of keys"),
+    ("F2", "help: commands and how things work"),
+    ("Ctrl+R", "reload the open channel or thread"),
+    ("Ctrl+O", "load older messages"),
+    ("Ctrl+Q / Ctrl+C", "quit"),
+    ("", ""),
+    ("Channels", ""),
+    ("Up / Down, Home / End", "move"),
+    ("Enter", "open the channel"),
+    ("", ""),
+    ("Messages", ""),
+    ("Up / Down", "select a message (Up at the top loads older)"),
+    ("PgUp / PgDn, Home / End", "scroll, first, last"),
+    ("Enter", "open the thread (in a thread: reply)"),
+    ("r", "reply in the thread of the selected message"),
+    ("c", "copy the selected message to the clipboard"),
+    ("e", "edit the selected message (yours only)"),
+    ("d", "delete the selected message (yours only; asks first)"),
+    ("Ctrl+F", "search channels and every message"),
+    ("click", "select; open the thread; on a link: copy it"),
+    ("mouse wheel", "scroll"),
+    ("", ""),
+    ("Panel (from /plugins or a plugin)", ""),
+    ("Up / Down, PgUp / PgDn, Home / End", "move"),
+    ("Enter", "run the selected row"),
+    ("Esc", "close"),
+    ("", ""),
+    ("Writing", ""),
+    ("Enter", "send"),
+    ("Shift+Enter, Alt+Enter, Ctrl+J", "new line"),
+    ("Ctrl+A / E, Ctrl+W / U / K", "line start / end, kill word / to start / to end"),
+    ("Ctrl+← →, Alt+B / F", "move by word"),
+];
+
+fn draw_keys(f: &mut Frame, body: Rect) {
+    let w = 92.min(body.width);
+    let area = Rect::new(body.x + body.width - w, body.y, w, body.height);
+    f.render_widget(Clear, area);
+    let mut lines = vec![Line::from(Span::styled("Keys  (Esc closes)", Style::default().add_modifier(Modifier::BOLD))), Line::default()];
+    for (k, d) in KEYS {
+        if k.is_empty() && d.is_empty() {
+            lines.push(Line::default());
+        } else if d.is_empty() {
+            lines.push(Line::from(Span::styled(*k, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))));
+        } else {
+            lines.push(Line::from(vec![Span::styled(format!("{k:<32}"), Style::default().fg(Color::Yellow)), Span::styled((*d).to_owned(), dim())]));
+        }
+    }
+    f.render_widget(Paragraph::new(lines).block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Cyan))), area);
+}
+
+pub const HELP: &[&str] = &[
+    "Channels list the top-level messages only; replies live in their thread (Enter or a click opens it).",
+    "A message with replies shows how many and when the last one was. Esc returns you to the same place.",
+    "",
+    "Commands, typed in the input (N is the message number shown as #N):",
+    "  /r N text   reply to message N        /t N   open the thread of message N",
+    "  /c          back to the channel        /copy N   copy message N",
+    "  /more       load older messages        /refresh   reload now",
+    "  /help       this screen                /q   quit",
+    "  /edit N     edit your message N        /delete N   delete your message N (asks first)",
+    "  /search text   search                  /new [private] name [about]   create a channel",
+    "  /plugins    what is loaded, and the commands plugins added",
+    "  /update     how to upgrade this copy (brew, cargo or the release page)",
+    "A newer release shows up in the status line (BUZZR_NO_UPDATE_CHECK=1 turns the once-a-day check off).",
+    "  /read       mark this channel read     /read all   mark every channel read",
+    "Unread survives a restart: it comes from the last-read position in ~/.config/buzzr/read-state.json, and a",
+    "\"new messages\" line marks where new messages start.",
+    "Search (Ctrl+F): channel names and full-text message search; Enter opens the result in its channel or thread.",
+    "Others see \"typing…\" while you write (start with --no-typing to turn that off).",
+    "",
+    "New messages, edits, deletions, reactions and typing indicators arrive live; there is no polling.",
+    "Links: clicking one copies its URL to your clipboard (your terminal must allow OSC 52; in tmux:",
+    "  set -g set-clipboard on). `c` copies a whole message the same way.",
+    "@name in a message mentions that member of the channel.",
+    "",
+    "Press Esc, Enter or F2 to close.",
+];
+
+/// Universal search: a query line, then channels whose name matches, then messages the relay found.
+fn draw_search(f: &mut Frame, app: &App, area: Rect) {
+    let w = 110.min(area.width.saturating_sub(4)).max(20);
+    let h = 26.min(area.height.saturating_sub(2)).max(6);
+    let r = Rect::new(area.x + (area.width.saturating_sub(w)) / 2, area.y + (area.height.saturating_sub(h)) / 2, w, h);
+    f.render_widget(Clear, r);
+    let block = Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Cyan)).title(" Search · Enter opens · Esc closes ");
+    let inner = block.inner(r);
+    f.render_widget(block, r);
+    if inner.height < 3 || inner.width < 10 {
+        return;
+    }
+    let query = app.search.query.text();
+    let prefix = "Search: ";
+    f.render_widget(Paragraph::new(Line::from(vec![Span::styled(prefix, Style::default().add_modifier(Modifier::BOLD)), Span::raw(query.clone())])), Rect::new(inner.x, inner.y, inner.width, 1));
+    let (_, col) = app.search.query.cursor_pos(inner.width as usize);
+    f.set_cursor_position(Position::new((inner.x + prefix.len() as u16 + col as u16).min(inner.x + inner.width - 1), inner.y));
+    let status = if app.search.loading {
+        "searching…".to_owned()
+    } else if query.trim().chars().count() < 2 {
+        "type at least two characters: channel names and all messages are searched".to_owned()
+    } else {
+        format!("{} messages found", app.search.messages.len())
+    };
+    f.render_widget(Paragraph::new(Span::styled(status, dim())), Rect::new(inner.x, inner.y + 1, inner.width, 1));
+
+    let list_area = Rect::new(inner.x, inner.y + 3, inner.width, inner.height.saturating_sub(3));
+    let rows = app.search_rows();
+    let vis = list_area.height as usize;
+    let start = app.search.cursor.saturating_sub(vis.saturating_sub(1) / 2).min(rows.len().saturating_sub(vis));
+    let mut lines = Vec::new();
+    for (i, row) in rows.iter().enumerate().skip(start).take(vis) {
+        let mut spans = vec![Span::raw(if i == app.search.cursor { "▌" } else { " " })];
+        match row {
+            Row::Channel(c) => {
+                let ch = &app.channels[*c];
+                spans.push(Span::styled(if ch.is_dm { ch.label.clone() } else { format!("# {}", ch.label) }, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)));
+                spans.push(Span::styled("  channel", dim()));
+            }
+            Row::Message(e) => {
+                let chan = app.channels.iter().find(|c| Some(c.id.as_str()) == e.channel()).map(|c| c.label.clone()).unwrap_or_default();
+                let head = format!(" {chan} · {} · ", app.name_of(&e.pubkey));
+                let snippet: String = crate::markdown::strip_controls(&e.content).split_whitespace().collect::<Vec<_>>().join(" ");
+                spans.push(Span::styled(head.clone(), dim()));
+                let room = (list_area.width as usize).saturating_sub(head.width() + 2);
+                let mut text = snippet;
+                while text.width() > room {
+                    text.pop();
+                }
+                spans.push(Span::raw(text));
+            }
+        }
+        let mut line = Line::from(spans);
+        if i == app.search.cursor {
+            line = line.style(Style::default().bg(crate::theme::get().sel_bg));
+        }
+        lines.push(line);
+    }
+    if rows.is_empty() && query.trim().chars().count() >= 2 && !app.search.loading {
+        lines.push(Line::from(Span::styled(" nothing found", dim())));
+    }
+    f.render_widget(Paragraph::new(lines), list_area);
+}
+
+fn draw_help(f: &mut Frame, area: Rect) {
+    let w = 100.min(area.width.saturating_sub(4));
+    let h = (HELP.len() as u16 + 4).min(area.height);
+    let r = Rect::new(area.x + (area.width - w) / 2, area.y + (area.height - h) / 2, w, h);
+    f.render_widget(Clear, r);
+    let mut lines = vec![Line::from(Span::styled("Help", Style::default().add_modifier(Modifier::BOLD))), Line::default()];
+    lines.extend(HELP.iter().map(|l| Line::raw(*l)));
+    f.render_widget(Paragraph::new(lines).block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Cyan))), r);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::{AppEvent, Cmd};
+    use crate::live::Live;
+    use crate::model::{tests::ev, Channel};
+    use crate::relay::Window;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    fn screen(term: &Terminal<TestBackend>) -> Vec<String> {
+        let buf = term.backend().buffer();
+        (0..buf.area.height).map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol().to_owned()).collect::<String>()).collect()
+    }
+
+    fn app() -> App {
+        let mut app = App::new("me".into(), false, chrono_tz::UTC);
+        let chan = |id: &str, name: &str| Channel { id: id.into(), name: name.into(), about: String::new(), created_at: 1, is_dm: false, label: name.into() };
+        let _: Vec<Cmd> = app.handle(AppEvent::Channels(Ok(vec![chan("c1", "general"), chan("c2", "random")])));
+        let mut m1 = ev("a", 1000, "**Hello** there, see [docs](https://example.com)", &[]);
+        m1.pubkey = "bob".into();
+        let mut m2 = ev("b", 1001, "second\nline", &[]);
+        m2.pubkey = "me".into();
+        let mut r = ev("r1", 1002, "reply", &[&["e", "a", "", "reply"]]);
+        r.pubkey = "bob".into();
+        app.handle(AppEvent::Names(Ok([("bob".to_string(), "Bob".to_string())].into())));
+        app.handle(AppEvent::Window { channel: "c1".into(), cursor: None, result: Ok(Window { events: vec![m1, m2, r], has_more: true, next_cursor: Some((1, "a".into())) }) });
+        app.handle(AppEvent::Live(Live::Up));
+        app
+    }
+
+    #[test]
+    fn the_screen_shows_channels_top_level_messages_and_reply_counts() {
+        let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        let mut app = app();
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(s.contains("general") && s.contains("random"), "channel list\n{s}");
+        assert!(s.contains("Bob") && s.contains("Hello there, see docs"), "message with rendered markdown\n{s}");
+        assert!(s.contains("1 reply · last"), "reply count\n{s}");
+        assert!(!s.contains("a reply") && !s.contains("\nreply"), "the reply itself is not listed\n{s}");
+        assert!(s.contains("● live"), "connection state\n{s}");
+        assert!(s.contains("Open thread") && s.contains("Switch pane"), "footer hints\n{s}");
+        assert!(!s.contains("**"), "markdown is rendered, not shown");
+    }
+
+    #[test]
+    fn the_input_grows_with_its_text_and_the_geometry_is_reported() {
+        let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        let mut app = app();
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let one_line = app.areas.input.height;
+        app.editor.insert_str("a\nb\nc\nd");
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        assert!(app.areas.input.height > one_line);
+        assert_eq!(app.areas.channels.x, 0);
+        assert!(app.areas.msgs.width > 50 && app.view_h == app.areas.msgs.height as usize);
+    }
+
+    #[test]
+    fn panels_and_typing_are_drawn() {
+        let mut term = Terminal::new(TestBackend::new(110, 40)).unwrap();
+        let mut app = app();
+        app.overlay = Overlay::Keys;
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        assert!(screen(&term).join("\n").contains("Keys  (Esc closes)"));
+        app.overlay = Overlay::Help;
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        assert!(screen(&term).join("\n").contains("/r N text"));
+        assert!(screen(&term).join("\n").contains("/update"), "the help screen lists /update");
+        app.overlay = Overlay::None;
+        app.typing.insert(("c1".into(), "bob".into()), std::time::Instant::now());
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        assert!(screen(&term).join("\n").contains("Bob is typing"));
+    }
+
+    #[test]
+    fn the_status_line_shows_the_upgrade_advice() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut term = Terminal::new(TestBackend::new(110, 30)).unwrap();
+        let mut app = app();
+        app.update_source = crate::update::InstallSource::Homebrew;
+        app.focus = Focus::Input;
+        for c in "/update".chars() {
+            app.handle(AppEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)));
+        }
+        app.handle(AppEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(s.contains("upgrade with: brew update && brew upgrade buzzr"), "the advice is on the status line\n{s}");
+    }
+
+    #[test]
+    fn a_known_newer_release_is_shown_in_the_status_line() {
+        let mut term = Terminal::new(TestBackend::new(110, 30)).unwrap();
+        let mut app = app();
+        app.handle(AppEvent::Update("0.2.0".into()));
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(s.contains("buzzr 0.2.0 available · /update"), "the update notice is on the status line\n{s}");
+    }
+
+    #[test]
+    fn your_own_message_offers_edit_and_delete_and_the_prompts_show() {
+        let mut term = Terminal::new(TestBackend::new(110, 30)).unwrap();
+        let mut app = app();
+        let mut mine = ev("m3", 1500, "just mine", &[&["h", "c1"]]);
+        mine.pubkey = "me".into();
+        app.handle(AppEvent::Live(Live::Event(mine)));
+        app.layout(70);
+        app.handle(AppEvent::Key(ratatui::crossterm::event::KeyEvent::new(ratatui::crossterm::event::KeyCode::End, ratatui::crossterm::event::KeyModifiers::NONE)));
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(s.contains("Edit") && s.contains("Delete") && s.contains("Search"), "footer offers e and d on your own message\n{s}");
+        app.handle(AppEvent::Key(ratatui::crossterm::event::KeyEvent::new(ratatui::crossterm::event::KeyCode::Char('d'), ratatui::crossterm::event::KeyModifiers::NONE)));
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        assert!(screen(&term).join("\n").contains("Delete this message? press y"));
+        app.handle(AppEvent::Key(ratatui::crossterm::event::KeyEvent::new(ratatui::crossterm::event::KeyCode::Char('n'), ratatui::crossterm::event::KeyModifiers::NONE)));
+        app.handle(AppEvent::Key(ratatui::crossterm::event::KeyEvent::new(ratatui::crossterm::event::KeyCode::Char('e'), ratatui::crossterm::event::KeyModifiers::NONE)));
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(s.contains("edit message") && s.contains("just mine") && s.contains("Cancel edit"), "{s}");
+    }
+
+    #[test]
+    fn the_channel_bar_follows_the_cursor_and_returns_when_the_list_loses_focus() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let key = |code| AppEvent::Key(KeyEvent::new(code, KeyModifiers::NONE));
+        let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        let mut app = app();
+        // the channel list has no focus: the bar marks the channel on screen
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term);
+        assert!(s[1].starts_with("▌ general"), "the bar is on the open channel\n{}", s.join("\n"));
+        assert!(s[2].starts_with("  random"), "the other channel has none\n{}", s.join("\n"));
+        // (Messages -> Channels) then Down: the bar moves with the cursor
+        app.handle(key(KeyCode::BackTab));
+        app.handle(key(KeyCode::Down));
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term);
+        assert!(s[1].starts_with("  general") && s[2].starts_with("▌ random"), "the bar moved to the cursor\n{}", s.join("\n"));
+        // Tab away without opening one: the bar is back on the channel on screen
+        app.handle(key(KeyCode::Tab));
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term);
+        assert!(s[1].starts_with("▌ general") && s[2].starts_with("  random"), "the bar came back\n{}", s.join("\n"));
+    }
+
+    #[test]
+    fn the_search_overlay_lists_channels_and_messages() {
+        let mut term = Terminal::new(TestBackend::new(110, 30)).unwrap();
+        let mut app = app();
+        app.open_search("ran".into());
+        let mut hit = ev("h1", 1200, "a random thought about boats", &[&["h", "c1"]]);
+        hit.pubkey = "bob".into();
+        app.search.seq = 1;
+        app.handle(AppEvent::Search { seq: 1, result: Ok(vec![hit]) });
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(s.contains("Search · Enter opens"), "{s}");
+        assert!(s.contains("Search: ran"), "{s}");
+        assert!(s.contains("# random") && s.contains("channel"), "channel match\n{s}");
+        assert!(s.contains("general · Bob") && s.contains("a random thought about boats"), "message match\n{s}");
+        assert!(s.contains("1 messages found") || s.contains("found"), "{s}");
+    }
+
+    #[test]
+    fn it_survives_tiny_terminals() {
+        for (w, h) in [(20, 6), (1, 1), (40, 3), (200, 5)] {
+            let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+            let mut app = app();
+            term.draw(|f| draw(f, &mut app)).unwrap();
+        }
+    }
+
+    #[test]
+    fn plugin_contributions_are_drawn_on_the_surfaces_they_target() {
+        use crate::contrib::{Contributions, Mark, PluginEvent, Segment, Tone};
+        let mut term = Terminal::new(TestBackend::new(110, 30)).unwrap();
+        let mut app = app();
+        app.handle(AppEvent::Plugin(PluginEvent::Ready {
+            id: "demo".into(),
+            name: "Demo".into(),
+            contributions: Contributions {
+                status: vec![Segment::new("2 left", Tone::Ok)],
+                header: vec![Segment::new("DEMO", Tone::Accent)],
+                channel_marks: vec![Mark { target: "c1".into(), text: "★".into(), tone: Tone::Warn }],
+                message_marks: vec![Mark { target: "a".into(), text: "TODO".into(), tone: Tone::Accent }],
+                ..Default::default()
+            },
+        }));
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(s.contains("DEMO"), "header badge\n{s}");
+        assert!(s.contains("2 left"), "status item\n{s}");
+        assert!(s.contains('★'), "channel mark\n{s}");
+        assert!(s.contains("TODO"), "message mark\n{s}");
+    }
+
+    #[test]
+    fn a_plugin_panel_is_drawn_with_its_title_and_rows() {
+        use crate::contrib::{Panel, PanelRow, PluginEvent, Tone};
+        let mut term = Terminal::new(TestBackend::new(110, 30)).unwrap();
+        let mut app = app();
+        app.handle(AppEvent::Plugin(PluginEvent::Panel {
+            plugin: "demo".into(),
+            panel: Panel {
+                id: "prs".into(),
+                title: "Pull requests".into(),
+                rows: vec![PanelRow { text: "#42 fix the anchor".into(), tone: Tone::Default, action: Some("open:42".into()) }],
+            },
+        }));
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(s.contains("Pull requests") && s.contains("#42 fix the anchor"), "{s}");
+        assert!(s.contains("Esc closes"), "the panel title bar says how to leave\n{s}");
+    }
+}
