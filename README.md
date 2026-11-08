@@ -51,9 +51,18 @@
 
 ## Install
 
-buzzr is not on crates.io or in a package manager yet. There are two ways to get it.
+**Homebrew** (tested on macOS; the formula also lists the Linux binaries, untested):
 
-**With cargo** (Rust 1.88 or newer):
+```bash
+brew install buzzzr/buzzr/buzzr
+```
+
+Upgrade with `brew update && brew upgrade buzzr`.
+
+**A prebuilt binary:** download the archive for your system from the [latest release](https://github.com/buzzzr/buzzr/releases/latest)
+(macOS and Linux, arm64 and x86_64; the Linux ones are static), check it against `SHA256SUMS`, and put `buzzr` somewhere on your `PATH`.
+
+**With cargo** (Rust 1.88 or newer; not on crates.io yet):
 
 ```bash
 cargo install --git https://github.com/buzzzr/buzzr
