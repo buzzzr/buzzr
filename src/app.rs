@@ -18,7 +18,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, M
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Span;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 const FLASH: Duration = Duration::from_secs(5);
@@ -207,6 +207,9 @@ pub struct App {
     /// reply we have seen in it. A thread with replies newer than this is marked unread in the message list. A thread never
     /// opened has no entry, and is not marked (unread starts at zero, as it does for a channel).
     pub thread_read: HashMap<String, u64>,
+    /// Messages the reader forced unread with `u`, per channel: the message ids, kept apart from the frontiers because a mark is
+    /// intent rather than a position — it survives the frontier moving past it and only `/read` clears it. Device-local.
+    pub marks: HashMap<String, BTreeSet<String>>,
     /// Where each channel's last visit stopped, for the "new messages" line: taken from `read` as a channel is opened and kept
     /// while we stay in it, so reading on does not move the line under the reader.
     new_since: HashMap<String, u64>,
@@ -293,6 +296,7 @@ impl App {
             unread: HashMap::new(),
             read: HashMap::new(),
             thread_read: HashMap::new(),
+            marks: HashMap::new(),
             new_since: HashMap::new(),
             typing: HashMap::new(),
             flash: None,
@@ -420,21 +424,48 @@ impl App {
 
     // ---- read state ------------------------------------------------------------------------------------------------------
 
-    /// Take the last-read positions loaded from disk; the loop fills this in before the first event, tests set it directly.
+    /// Take the last-read positions and the unread marks loaded from disk; the loop fills this in before the first event, tests
+    /// set it directly.
     pub fn seed_read(&mut self, state: ReadState) {
         self.read = state.channels;
         self.thread_read = state.threads;
+        self.marks = state.marks;
+        // A mark is durable intent, so the badges it stands for are there again on the next start, before the relay is asked
+        // anything. Messages of the reader's own are not exempt: marking one is the whole point of an explicit `u`.
+        let channels: Vec<String> = self.marks.keys().cloned().collect();
+        for id in channels {
+            self.sync_mark_badge(&id);
+        }
     }
 
-    /// The whole read state (channels and threads), for `Cmd::SaveRead`.
+    /// The whole read state (the frontiers and the marks), for `Cmd::SaveRead`.
     fn read_state(&self) -> ReadState {
-        ReadState { channels: self.read.clone(), threads: self.thread_read.clone() }
+        ReadState { channels: self.read.clone(), threads: self.thread_read.clone(), marks: self.marks.clone() }
+    }
+
+    /// How many messages a channel still has marked unread, and the earliest one that is on screen — the badge count and where
+    /// the divider goes. A mark on a message we no longer have (an older page, a deleted message) still counts as unread.
+    fn marks_of(&self, channel: &str) -> u32 {
+        self.marks.get(channel).map(|ids| ids.len() as u32).unwrap_or(0)
+    }
+
+    /// Put a channel's badge at what its marks stand for, keeping a higher automatic count: a mark can only add to what is
+    /// unread, never hide it.
+    fn sync_mark_badge(&mut self, channel: &str) {
+        let marked = self.marks_of(channel);
+        if marked == 0 {
+            return;
+        }
+        let entry = self.unread.entry(channel.to_owned()).or_insert(0);
+        *entry = (*entry).max(marked);
     }
 
     /// Record that a channel has been read through its newest loaded message, and return the command that writes the new
     /// position to disk when it moved. The unread badge clears either way: whatever we counted, we are looking at the channel.
+    /// A message forced unread with `u` is not what we counted, though: it stays unread until `/read`, so its badge comes back.
     fn read_through(&mut self, channel: &str) -> Option<Cmd> {
         self.unread.remove(channel);
+        self.sync_mark_badge(channel);
         let newest = self.stores.get(channel).map(|s| s.latest).unwrap_or(0);
         if newest <= self.read.get(channel).copied().unwrap_or(0) {
             return None;
@@ -459,13 +490,21 @@ impl App {
         Some(Cmd::SaveRead(self.read_state()))
     }
 
-    /// The first message on screen that arrived after the last visit stopped, so the view can draw the divider above it.
+    /// The first message on screen that is unread, so the view can draw the divider above it: a message forced unread with `u`
+    /// counts wherever it sits, and messages from other people after the last visit stopped count as they always did. The
+    /// earlier of the two wins, so the divider never sits below an unread message.
     fn first_unread(&self) -> Option<usize> {
         if self.in_thread() {
             return None;
         }
-        let frontier = *self.new_since.get(&self.channel()?.id)?;
-        self.shown().iter().position(|m| m.pubkey != self.me && m.created_at > frontier)
+        let id = &self.channel()?.id;
+        let shown = self.shown();
+        let marked = self.marks.get(id).and_then(|ids| shown.iter().position(|m| ids.contains(&m.id)));
+        let frontier = self.new_since.get(id).and_then(|at| shown.iter().position(|m| m.pubkey != self.me && m.created_at > *at));
+        match (marked, frontier) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
     }
 
     /// Every thread root a channel's store knows about: what the relay told us about in a summary, plus any reply we have
@@ -513,6 +552,7 @@ impl App {
             }
             self.mark_threads_read(None, now);
             self.unread.clear();
+            self.marks.clear();
             self.new_since.clear();
             self.content_changed();
             self.flash("all channels marked read");
@@ -523,8 +563,10 @@ impl App {
             self.flash("no channel is open");
             return cmds;
         };
-        // The threads in this channel are read too: the marks in the message list go with the badge.
+        // The threads in this channel are read too: the marks in the message list go with the badge. The unread marks go
+        // before the frontier is moved, or `read_through` would put the badge straight back from them.
         let threads_moved = self.mark_threads_read(Some(&id), now_secs());
+        let unmarked = self.marks.remove(&id).is_some();
         match self.read_through(&id) {
             Some(cmd) => {
                 self.new_since.remove(&id);
@@ -536,7 +578,7 @@ impl App {
                 self.unread.remove(&id);
                 self.new_since.remove(&id);
                 self.content_changed();
-                if threads_moved {
+                if threads_moved || unmarked {
                     self.flash("marked read");
                     cmds.push(Cmd::SaveRead(self.read_state()));
                 } else {
@@ -547,32 +589,25 @@ impl App {
         cmds
     }
 
-    /// `u` on the message list marks the channel unread from the selected message: the badge comes back and the `new messages`
-    /// line is drawn above it. The earlier position is written, so the mark survives a restart.
+    /// `u` on the message list forces the selected message unread on this device: the badge comes back and the `new messages`
+    /// line is drawn above it, and it survives a restart. It is a mark on that message, not a move of the read frontier, so it
+    /// works on a message of the reader's own and on the newest one in the channel — the two cases a frontier cannot express.
+    /// `/read` clears it; reading on does not.
     fn mark_unread_from_selected(&mut self) -> Vec<Cmd> {
         let Some(m) = self.selected_msg() else {
             self.flash("select a message first (Up/Down)");
             return Vec::new();
         };
         let Some(id) = self.channel().map(|c| c.id.clone()) else { return Vec::new() };
-        // The position just before the message, so the message itself and everything after it count as unread. The relay's
-        // resolution is seconds, so a message sharing this timestamp with an earlier one takes that one with it.
-        let at = m.created_at.saturating_sub(1);
-        let count = self
-            .stores
-            .get(&id)
-            .map(|s| s.timeline().iter().filter(|e| e.pubkey != self.me && e.created_at > at).count() as u32)
-            .unwrap_or(0);
-        if count == 0 {
-            self.flash("nothing after that message to mark unread");
+        let selected = m.id.clone();
+        if !self.marks.entry(id.clone()).or_default().insert(selected) {
+            self.flash("already marked unread");
             return Vec::new();
         }
-        self.read.insert(id.clone(), at);
-        self.new_since.insert(id.clone(), at);
-        self.unread.insert(id, count);
+        self.sync_mark_badge(&id);
         self.content_changed();
         let n = self.selected_number().unwrap_or(0);
-        self.flash(format!("marked unread from #{n}"));
+        self.flash(format!("marked #{n} unread"));
         vec![Cmd::SaveRead(self.read_state())]
     }
 
@@ -1226,7 +1261,9 @@ impl App {
         if is_message {
             self.typing.remove(&(channel.clone(), e.pubkey.clone()));
             let current = self.channel().map(|c| c.id == channel).unwrap_or(false);
-            if !current && e.pubkey != self.me {
+            // Only rows the channel timeline lists raise its badge; a thread reply is unread per thread (`thread_read`), not
+            // per channel, and there is no channel position it could ever move to clear the badge.
+            if !current && e.pubkey != self.me && e.is_top_level() {
                 *self.unread.entry(channel.clone()).or_default() += 1;
             }
         }

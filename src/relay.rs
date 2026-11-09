@@ -42,6 +42,13 @@ pub fn ws_url(url: &str) -> String {
     }
 }
 
+/// Whether an event counts toward a channel's unread badge: one of the message kinds, someone else's, and listed on the
+/// channel timeline. A thread reply does not count here — it has its own per-thread unread position — otherwise the badge
+/// would include rows the timeline never shows, and opening the channel could not clear it.
+fn counts_as_unread(e: &Ev, me: &str) -> bool {
+    MESSAGE_KINDS.contains(&e.kind) && e.pubkey != me && e.is_top_level()
+}
+
 pub struct Relay {
     http: reqwest::Client,
     base: String,
@@ -259,11 +266,18 @@ impl Relay {
     }
 
     /// How many messages in `channel` arrived after `since` that someone else wrote: the unread badge at startup. Counts at
-    /// most `UNREAD_LIMIT`, so a very busy channel reads as that many rather than making one huge query.
+    /// most `UNREAD_LIMIT`, so a very busy channel reads as that many rather than making one huge query. Only rows the
+    /// channel timeline lists are counted: a thread reply has its own unread mark (`thread_read`), and counting it in the
+    /// channel badge would leave a badge that opening the channel can never clear, because the reply is not on the timeline
+    /// and so never moves the channel's read position — it came back after every restart.
     pub async fn unread(&self, channel: &str, since: u64) -> Result<u32> {
         let me = self.me();
-        let evs = self.query(&[json!({"kinds": MESSAGE_KINDS, "#h": [channel], "since": since, "limit": UNREAD_LIMIT})]).await?;
-        Ok(evs.iter().filter(|e| MESSAGE_KINDS.contains(&e.kind) && e.pubkey != me).count() as u32)
+        // `top_level` asks a relay that understands it to leave replies out; the filter below keeps the count right on an
+        // older relay that ignores the field.
+        let evs = self
+            .query(&[json!({"kinds": MESSAGE_KINDS, "#h": [channel], "since": since, "limit": UNREAD_LIMIT, "top_level": true})])
+            .await?;
+        Ok(evs.iter().filter(|e| counts_as_unread(e, &me)).count() as u32)
     }
 
     /// A page of the channel timeline, the way the Buzz app asks for it: top-level messages only, with thread summaries and the
@@ -398,6 +412,35 @@ mod tests {
         assert_eq!(ws_url("https://chat.example.com"), "wss://chat.example.com");
         assert_eq!(ws_url("http://192.0.2.10:3000"), "ws://192.0.2.10:3000");
         assert_eq!(ws_url("wss://a.b"), "wss://a.b");
+    }
+
+    #[test]
+    fn an_unread_count_skips_thread_replies() {
+        let me = "me";
+        let ev = |id: &str, who: &str, tags: &[&[&str]]| Ev {
+            id: id.into(),
+            pubkey: who.into(),
+            created_at: 1000,
+            kind: 9,
+            content: "hi".into(),
+            tags: tags.iter().map(|t| t.iter().map(|s| (*s).to_owned()).collect()).collect(),
+        };
+        let root = "aa".repeat(32);
+        assert!(counts_as_unread(&ev("top", "alice", &[&["h", "c"]]), me), "a top-level channel message counts");
+        assert!(
+            counts_as_unread(&ev("bcast", "alice", &[&["h", "c"], &["e", &root, "", "reply"], &["broadcast", "1"]]), me),
+            "a broadcast reply is listed on the timeline, so it counts"
+        );
+        assert!(
+            !counts_as_unread(&ev("reply", "alice", &[&["h", "c"], &["e", &root, "", "reply"]]), me),
+            "a thread reply is not on the channel timeline and must not count"
+        );
+        assert!(
+            !counts_as_unread(&ev("nested", "alice", &[&["h", "c"], &["e", &root, "", "root"], &["e", &root, "", "reply"]]), me),
+            "a nested reply does not count either"
+        );
+        assert!(!counts_as_unread(&ev("mine", me, &[&["h", "c"]]), me), "your own message never counts");
+        assert!(!counts_as_unread(&Ev { kind: 7, ..ev("react", "alice", &[&["h", "c"]]) }, me), "a reaction is not a message");
     }
 
     #[test]

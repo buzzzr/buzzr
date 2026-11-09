@@ -418,7 +418,7 @@ pub const KEYS: &[(&str, &str)] = &[
     ("Enter", "open the thread and read it (in a thread: reply)"),
     ("r", "reply in the thread of the selected message"),
     ("c", "copy the selected message to the clipboard"),
-    ("u", "mark the channel unread from the selected message"),
+    ("u", "mark the selected message unread (until /read)"),
     ("e", "edit the selected message (yours only)"),
     ("d", "delete the selected message (yours only; asks first)"),
     ("Ctrl+F", "search channels, people and every message"),
