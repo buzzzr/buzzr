@@ -15,7 +15,7 @@ pub const RELEASES_URL: &str = concat!(env!("CARGO_PKG_REPOSITORY"), "/releases/
 pub enum InstallSource {
     /// `brew install buzzr`: the binary lives in the Homebrew Cellar.
     Homebrew,
-    /// `cargo install buzzr`: the binary lives in the cargo bin directory.
+    /// `cargo install --git <repository>`: the binary lives in the cargo bin directory.
     Cargo,
     /// A build out of a checkout (`cargo run`, `target/debug/buzzr`): nothing to upgrade.
     Dev,
@@ -55,7 +55,10 @@ impl InstallSource {
     pub fn upgrade_command(self) -> Option<&'static str> {
         match self {
             InstallSource::Homebrew => Some(concat!("brew update && brew upgrade ", env!("CARGO_PKG_NAME"))),
-            InstallSource::Cargo => Some(concat!("cargo install --force ", env!("CARGO_PKG_NAME"))),
+            // From the repository, not the registry: the crate is not on crates.io (its Buzz dependencies are git
+            // dependencies, which a published crate cannot carry), so a bare `cargo install --force buzzr` would fail.
+            // Once it is published this can become the registry form.
+            InstallSource::Cargo => Some(concat!("cargo install --force --git ", env!("CARGO_PKG_REPOSITORY"))),
             InstallSource::Dev | InstallSource::Other => None,
         }
     }
@@ -136,7 +139,7 @@ mod tests {
     #[test]
     fn a_known_place_names_the_command_that_upgrades_it() {
         assert_eq!(InstallSource::Homebrew.upgrade_command(), Some("brew update && brew upgrade buzzr"));
-        assert_eq!(InstallSource::Cargo.upgrade_command(), Some("cargo install --force buzzr"));
+        assert_eq!(InstallSource::Cargo.upgrade_command(), Some("cargo install --force --git https://github.com/buzzzr/buzzr"));
     }
 
     #[test]
@@ -149,7 +152,7 @@ mod tests {
     #[test]
     fn the_advice_line_names_the_command_or_the_release_page() {
         assert_eq!(InstallSource::Homebrew.advice(), "upgrade with: brew update && brew upgrade buzzr");
-        assert_eq!(InstallSource::Cargo.advice(), "upgrade with: cargo install --force buzzr");
+        assert_eq!(InstallSource::Cargo.advice(), "upgrade with: cargo install --force --git https://github.com/buzzzr/buzzr");
         assert_eq!(InstallSource::Dev.advice(), "this is a working copy; rebuild it from your checkout");
         assert_eq!(InstallSource::Other.advice(), format!("install the newest release: {RELEASES_URL}"));
     }
