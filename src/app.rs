@@ -636,11 +636,11 @@ impl App {
             let (count, last) = store.replies_of(m);
             if count > 0 {
                 head.push(Span::styled(format!("  💬 {} {}", count, if count == 1 { "reply" } else { "replies" }), Style::default().fg(crate::theme::get().warn)));
-                if let Some(badge) = self.thread_unread_badge(store, &m.id) {
-                    head.push(badge);
-                }
                 if let Some(at) = last {
                     head.push(Span::styled(format!(" · last {}", self.fmt_time(at)), dim));
+                }
+                if let Some(badge) = self.thread_unread_badge(store, &m.id) {
+                    head.push(badge);
                 }
             }
         }
