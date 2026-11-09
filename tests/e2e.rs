@@ -184,7 +184,7 @@ impl Session {
     }
 
     fn write(&self, bytes: &[u8]) {
-        let mut out = (&self.out).try_clone().unwrap();
+        let mut out = self.out.try_clone().unwrap();
         out.write_all(bytes).expect("could not write to the pty");
         out.flush().ok();
     }
@@ -263,8 +263,9 @@ fn key_bytes(key: &str) -> (Vec<u8>, Duration) {
     (b, if key == "esc" { slow } else { quick })
 }
 
-/// The sidebar, top to bottom, as the app draws it: the labels in the channel pane (the pane is 28
-/// columns wide, and a `▌` marks the row the channel cursor is on).
+/// The sidebar, top to bottom, as the app draws it: the rows in the channel pane (the pane is 28
+/// columns wide, and a `▌` marks the row the channel cursor is on). Every row is returned, including
+/// the section titles: a channel row starts with `#` (or `*` when private) and a DM row with `✉ `.
 fn sidebar_marked(screen: &str) -> Vec<(bool, String)> {
     screen
         .lines()
@@ -299,8 +300,9 @@ fn session(relay: &Relay) -> Session {
     // The app opens the first channel by itself; wait for it and for the live connection.
     s.expect("the app to draw the first channel", "#design");
     s.expect("the live WebSocket to connect", "● live");
-    // Startup settles with the messages pane focused (the last pane the app moved to).
-    s.expect("the messages pane to have focus", "Open thread");
+    // Startup settles with the channel list focused: the first channel is opened so its messages are
+    // on screen, but the keyboard stays on the channels, and Escape comes back here from the messages.
+    s.expect("the channel list to have focus", "Open channel");
     s
 }
 
@@ -318,28 +320,29 @@ fn the_sidebar_lists_the_channels_the_relay_serves_and_opens_the_first_one() {
         sidebar(sc).iter().filter(|n| n.starts_with("✉ ")).count() == 3
     });
     let names = sidebar(&screen);
-    for want in ["design", "dev", "general", "ops", "random"] {
+    for want in ["#design", "#dev", "#general", "#ops", "#random"] {
         assert!(names.iter().any(|n| n == want), "the sidebar is missing {want:?}. It lists {names:?}");
     }
-    assert_eq!(names.len(), 8, "five channels and three DMs. The sidebar lists {names:?}");
+    assert_eq!(names.iter().filter(|n| n.starts_with('#')).count(), 5, "five channels. The sidebar lists {names:?}");
+    assert_eq!(names.iter().filter(|n| n.starts_with("✉ ")).count(), 3, "three DMs. The sidebar lists {names:?}");
     assert!(!names.iter().any(|n| n == "DM"), "every DM row is named after a member: {names:?}");
     let h = header(&s.screen());
     assert!(h.contains("#design"), "the first channel opens by itself; the header is {h:?}");
-    assert_eq!(bar_on(&s.screen()).as_deref(), Some("design"), "the cursor bar is on the open channel");
+    assert_eq!(bar_on(&s.screen()).as_deref(), Some("#design"), "the cursor bar is on the open channel");
 }
 
 #[test]
 fn the_arrow_keys_move_the_channel_cursor_and_enter_opens_that_channel() {
     let Some(relay) = relay_or_skip("the_arrow_keys_move_...") else { return };
     let s = session(&relay);
-    // The app starts on the messages pane, so the channel list is one Shift+Tab away.
-    s.press("backtab");
-    s.expect("the channel list to take focus", "Open channel");
+    // The app starts on the channel list, so the cursor is already live.
+    s.expect("the channel list to have focus", "Open channel");
     s.press_all(&["down", "down"]);
-    let screen = s.until("the bar to reach the third channel", |sc| bar_on(sc).as_deref() == Some("general"));
-    assert_eq!(bar_on(&screen).as_deref(), Some("general"), "the bar follows the cursor:\n{screen}");
+    let screen = s.until("the bar to reach the third channel", |sc| bar_on(sc).as_deref() == Some("#general"));
+    assert_eq!(bar_on(&screen).as_deref(), Some("#general"), "the bar follows the cursor:\n{screen}");
     s.press("enter");
-    let h = s.until("the header to name the channel that was opened", |sc| header(sc).contains("#general")).clone();
+    let screen = s.until("the header to name the channel that was opened", |sc| header(sc).contains("#general"));
+    let h = header(&screen);
     assert!(!h.contains("#design"), "the header left the old channel: {h:?}");
     s.expect("the opened channel's messages", "hello from c-general");
 }
@@ -348,30 +351,31 @@ fn the_arrow_keys_move_the_channel_cursor_and_enter_opens_that_channel() {
 fn tab_cycles_the_focus_between_the_channels_messages_and_input() {
     let Some(relay) = relay_or_skip("tab_cycles_the_focus_...") else { return };
     let s = session(&relay);
+    s.expect("the channel list", "Open channel");
+    s.press("tab");
     s.expect("the messages pane", "Open thread");
     s.press("tab");
     s.expect("the input box", "Send");
     s.press("tab");
-    s.expect("the channel list", "Open channel");
-    s.press("tab");
-    s.expect("the messages pane again", "Open thread");
+    s.expect("the channel list again", "Open channel");
 }
 
 #[test]
 fn enter_on_a_message_opens_its_thread_and_esc_goes_back_to_the_channel() {
     let Some(relay) = relay_or_skip("enter_on_a_message_...") else { return };
     let s = session(&relay);
-    // Open #general: design, dev, general is the third row.
-    s.press("backtab");
+    // Open #general: design, dev, general is the third row. The cursor is already on the channel list.
     s.press_all(&["down", "down", "enter"]);
     s.expect("the general channel", "hello from c-general");
     s.expect("its thread summary", "2 replies");
     s.press("enter"); // open the thread of the selected message
-    let h = s.until("the thread view", |sc| header(sc).contains("› thread")).clone();
+    let screen = s.until("the thread view", |sc| header(sc).contains("› thread"));
+    let h = header(&screen);
     assert!(h.contains("#general"), "the thread still names its channel: {h:?}");
     s.expect("the first reply, which is only in the thread", "the sidebar keeps a fixed order");
     s.press("esc");
-    let h = s.until("the header to go back to the channel", |sc| header(sc).contains("#general") && !header(sc).contains("› thread")).clone();
+    let screen = s.until("the header to go back to the channel", |sc| header(sc).contains("#general") && !header(sc).contains("› thread"));
+    let h = header(&screen);
     assert!(h.contains("#general"), "back in the channel: {h:?}");
     s.expect("the thread summary again", "2 replies");
 }
@@ -415,7 +419,7 @@ fn f2_shows_the_help_and_esc_closes_it() {
 fn typing_reaches_the_input_box() {
     let Some(relay) = relay_or_skip("typing_reaches_the_input_box") else { return };
     let s = session(&relay);
-    s.press("tab"); // messages -> input
+    s.press_all(&["tab", "tab"]); // channels -> messages -> input
     s.expect("the input box to take focus", "Send");
     s.type_text("a message for the fake relay");
     s.expect("the typed text in the input box", "a message for the fake relay");
