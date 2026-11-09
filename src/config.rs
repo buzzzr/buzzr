@@ -2,7 +2,7 @@
 //!
 //! Files (all in one directory, `$BUZZR_CONFIG_DIR`, else `$XDG_CONFIG_HOME/buzzr`, else `~/.config/buzzr`):
 //! - `config.json`: `{"relay": "wss://..."}`, written by the first-run setup
-//! - `read-state.json`: the last-read position per channel (see `load_read_state`)
+//! - `read-state.json`: the last-read position per channel and per thread (see `load_read_state`)
 //! - `key.enc`: the private key sealed with a password (see `keyfile.rs`)
 //! - `key`: the private key in plain text, for people who chose that (mode 600)
 
@@ -60,31 +60,44 @@ impl Paths {
     pub fn release_state(&self) -> PathBuf {
         self.dir.join("release-state.json")
     }
-    /// The last-read position per channel: `<channel id> ->` the `created_at` we have read through (`read-state.json`).
+    /// The last-read positions per channel and per thread (`read-state.json`).
     pub fn read_state(&self) -> PathBuf {
         self.dir.join("read-state.json")
     }
 }
 
-/// The last-read position per channel, as `channel id -> created_at of the newest message read`. A missing or unreadable file
-/// is simply no state at all, never an error: unread counts then start from zero, which is how they behaved before this file.
-pub fn load_read_state(path: &Path) -> HashMap<String, u64> {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return HashMap::new();
-    };
-    let Ok(doc) = serde_json::from_str::<serde_json::Value>(&text) else {
-        return HashMap::new();
-    };
-    doc.get("channels")
-        .and_then(|c| c.as_object())
-        .map(|o| o.iter().filter_map(|(id, at)| at.as_u64().map(|t| (id.clone(), t))).collect())
-        .unwrap_or_default()
+/// Where the reader left off: for each channel and each thread, the `created_at` read through. `channels` is keyed by channel
+/// id, `threads` by the id of the message a thread starts from (its root).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ReadState {
+    pub channels: HashMap<String, u64>,
+    pub threads: HashMap<String, u64>,
 }
 
-/// Write the last-read position per channel (mode 600, atomically). Sorted keys, so an unchanged state is an unchanged file.
-pub fn save_read_state(path: &Path, state: &HashMap<String, u64>) -> std::io::Result<()> {
-    let channels: BTreeMap<&str, u64> = state.iter().map(|(id, at)| (id.as_str(), *at)).collect();
-    let doc = serde_json::json!({ "channels": channels });
+/// The last-read positions, from `read-state.json`. A missing or unreadable file is simply no state at all, never an error:
+/// unread counts then start from zero, which is how they behaved before this file. A file written before threads were tracked
+/// has only `channels`, and loads with an empty `threads`.
+pub fn load_read_state(path: &Path) -> ReadState {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return ReadState::default();
+    };
+    let Ok(doc) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return ReadState::default();
+    };
+    let positions = |key: &str| {
+        doc.get(key)
+            .and_then(|c| c.as_object())
+            .map(|o| o.iter().filter_map(|(id, at)| at.as_u64().map(|t| (id.clone(), t))).collect())
+            .unwrap_or_default()
+    };
+    ReadState { channels: positions("channels"), threads: positions("threads") }
+}
+
+/// Write the last-read positions (mode 600, atomically). Sorted keys, so an unchanged state is an unchanged file.
+pub fn save_read_state(path: &Path, state: &ReadState) -> std::io::Result<()> {
+    let channels: BTreeMap<&str, u64> = state.channels.iter().map(|(id, at)| (id.as_str(), *at)).collect();
+    let threads: BTreeMap<&str, u64> = state.threads.iter().map(|(id, at)| (id.as_str(), *at)).collect();
+    let doc = serde_json::json!({ "channels": channels, "threads": threads });
     write_private(path, &(serde_json::to_string_pretty(&doc).expect("a json value serialises") + "\n"))
 }
 
@@ -160,17 +173,25 @@ mod tests {
     }
 
     #[test]
-    fn the_last_read_position_is_read_back_and_the_file_is_private() {
+    fn the_last_read_positions_are_read_back_and_the_file_is_private() {
         use std::os::unix::fs::PermissionsExt;
         let paths = Paths::new(std::env::temp_dir().join(format!("buzzr-test-{}", uuid::Uuid::new_v4())));
-        assert!(load_read_state(&paths.read_state()).is_empty(), "no file yet: no state, not an error");
-        let state: HashMap<String, u64> = [("c1".to_owned(), 1700), ("c2".to_owned(), 42)].into_iter().collect();
+        assert_eq!(load_read_state(&paths.read_state()), ReadState::default(), "no file yet: no state, not an error");
+        let mut state = ReadState::default();
+        state.channels.insert("c1".to_owned(), 1700);
+        state.channels.insert("c2".to_owned(), 42);
+        state.threads.insert("t1".to_owned(), 9);
         save_read_state(&paths.read_state(), &state).unwrap();
         assert_eq!(load_read_state(&paths.read_state()), state);
         assert_eq!(std::fs::metadata(paths.read_state()).unwrap().permissions().mode() & 0o777, 0o600);
+        // a file written before threads were tracked loads with an empty `threads`, rather than losing the channel positions
+        std::fs::write(paths.read_state(), "{\"channels\":{\"c1\":7}}").unwrap();
+        let old = load_read_state(&paths.read_state());
+        assert_eq!(old.channels.get("c1"), Some(&7));
+        assert!(old.threads.is_empty());
         // a damaged file is no state either, rather than a panic on the next start
         std::fs::write(paths.read_state(), "not json").unwrap();
-        assert!(load_read_state(&paths.read_state()).is_empty());
+        assert_eq!(load_read_state(&paths.read_state()), ReadState::default());
         std::fs::remove_dir_all(paths.dir()).unwrap();
     }
 }

@@ -80,6 +80,12 @@ fn free_port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0").expect("no free port").local_addr().unwrap().port()
 }
 
+/// A config directory no other run is using.
+fn fresh_config_dir() -> PathBuf {
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    std::env::temp_dir().join(format!("buzzr-e2e-{}-{nanos}", std::process::id()))
+}
+
 fn wait_for_port(port: u16) {
     let end = Instant::now() + Duration::from_secs(10);
     while Instant::now() < end {
@@ -102,6 +108,12 @@ struct Session {
 
 impl Session {
     fn start(relay: &Relay) -> Session {
+        Self::start_in(relay, fresh_config_dir())
+    }
+
+    /// Start the app against `relay` with `config` as its config directory, so a test can restart it on
+    /// the state (a read position) a previous run left behind.
+    fn start_in(relay: &Relay, config: PathBuf) -> Session {
         let pty = nix::pty::openpty(
             Some(&nix::pty::Winsize { ws_row: ROWS, ws_col: COLS, ws_xpixel: 0, ws_ypixel: 0 }),
             None,
@@ -112,7 +124,6 @@ impl Session {
             t.local_flags.remove(nix::sys::termios::LocalFlags::ECHO);
             let _ = nix::sys::termios::tcsetattr(&pty.slave, nix::sys::termios::SetArg::TCSANOW, &t);
         }
-        let config = std::env::temp_dir().join(format!("buzzr-e2e-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
         std::fs::create_dir_all(&config).expect("could not make a config directory");
 
         let out = std::fs::File::from(pty.master);
@@ -297,13 +308,25 @@ fn header(screen: &str) -> String {
 
 fn session(relay: &Relay) -> Session {
     let s = Session::start(relay);
-    // The app opens the first channel by itself; wait for it and for the live connection.
+    settle(&s);
+    s
+}
+
+/// A session started on an existing config directory (see `Session::start_in`).
+fn session_in(relay: &Relay, config: PathBuf) -> Session {
+    let s = Session::start_in(relay, config);
+    settle(&s);
+    s
+}
+
+/// Wait for the app's first screen: the channel it opens by itself, the live connection, and the
+/// keyboard on the channel list.
+fn settle(s: &Session) {
     s.expect("the app to draw the first channel", "#design");
     s.expect("the live WebSocket to connect", "● live");
     // Startup settles with the channel list focused: the first channel is opened so its messages are
     // on screen, but the keyboard stays on the channels, and Escape comes back here from the messages.
     s.expect("the channel list to have focus", "Open channel");
-    s
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -440,6 +463,59 @@ fn u_marks_the_selected_message_unread_and_the_sidebar_counts_it() {
         sidebar(sc).iter().any(|n| n.starts_with("#design (1)"))
     });
     assert!(screen.contains("new messages"), "the divider marks the message the channel was marked unread from:\n{screen}");
+}
+
+#[test]
+fn a_thread_with_replies_since_the_last_visit_is_marked_unread_on_its_message() {
+    let Some(relay) = relay_or_skip("a_thread_with_replies_...") else { return };
+    // #general carries a thread with two replies. Open it once so the app writes the thread's read
+    // position down, then start again with that position far in the past: both replies are unseen.
+    let first = session(&relay);
+    first.press_all(&["down", "down", "enter"]);
+    first.expect("the general channel", "hello from c-general");
+    first.expect("the thread summary", "2 replies");
+    first.press("enter"); // open the thread, which reads it
+    first.expect("the thread view", "the sidebar keeps a fixed order");
+    let root = wait_for_stored_thread(&first.config.join("read-state.json"));
+    let config = first.config.clone();
+    drop(first); // kills the app and clears the config directory
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(config.join("read-state.json"), format!("{{\"channels\":{{}},\"threads\":{{\"{root}\":1}}}}")).unwrap();
+
+    let s = session_in(&relay, config);
+    s.press_all(&["down", "down", "enter"]);
+    s.expect("the general channel", "hello from c-general");
+    s.expect("the thread to be marked unread", "● 2 new");
+    s.press("enter"); // open the thread: reading it clears the mark
+    s.expect("the thread view", "the sidebar keeps a fixed order");
+    s.press("esc");
+    s.expect("the thread summary again", "2 replies");
+    s.expect_gone("the unread mark once the thread has been read", "● 2 new");
+}
+
+/// The first thread root id the app has written into `read-state.json`, waiting for the file to appear.
+fn wait_for_stored_thread(path: &std::path::Path) -> String {
+    let end = Instant::now() + WAIT;
+    loop {
+        if let Ok(text) = std::fs::read_to_string(path) {
+            if let Some(root) = first_thread_id(&text) {
+                return root;
+            }
+        }
+        if Instant::now() > end {
+            panic!("read-state.json never recorded a thread position");
+        }
+        std::thread::sleep(Duration::from_millis(40));
+    }
+}
+
+/// The first key of the `threads` map in `read-state.json`, when it has one.
+fn first_thread_id(text: &str) -> Option<String> {
+    let i = text.find("\"threads\"")?;
+    let open = i + text[i..].find('{')? + 1;
+    let start = open + text[open..].find('"')? + 1;
+    let end = start + text[start..].find('"')?;
+    (end > start).then(|| text[start..end].to_owned())
 }
 
 #[test]

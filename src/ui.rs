@@ -382,7 +382,7 @@ pub const KEYS: &[(&str, &str)] = &[
     ("Messages", ""),
     ("Up / Down", "select a message (Up at the top loads older)"),
     ("PgUp / PgDn, Home / End", "scroll, first, last"),
-    ("Enter", "open the thread (in a thread: reply)"),
+    ("Enter", "open the thread and read it (in a thread: reply)"),
     ("r", "reply in the thread of the selected message"),
     ("c", "copy the selected message to the clipboard"),
     ("u", "mark the channel unread from the selected message"),
@@ -426,8 +426,9 @@ fn draw_keys(f: &mut Frame, body: Rect) {
 }
 
 pub const HELP: &[&str] = &[
-    "Channels list the top-level messages only; replies live in their thread (Enter or a click opens it).",
-    "A message with replies shows how many and when the last one was. Esc returns you to the same place.",
+    "Channels list the top-level messages only; replies live in their thread (Enter or a click opens it, and reads it).",
+    "A message with replies shows how many, when the last one was, and `● N new` for replies since you last opened it.",
+    "Esc returns you to the same place.",
     "",
     "Commands, typed in the input (N is the message number shown as #N):",
     "  /r N text   reply to message N        /t N   open the thread of message N",
@@ -441,8 +442,8 @@ pub const HELP: &[&str] = &[
     "  /update     how to upgrade this copy (brew, cargo or the release page)",
     "A newer release shows up in the status line (BUZZR_NO_UPDATE_CHECK=1 turns the once-a-day check off).",
     "  /read       mark this channel read     /read all   mark every channel read",
-    "Unread survives a restart: it comes from the last-read position in ~/.config/buzzr/read-state.json, and a",
-    "\"new messages\" line marks where new messages start.",
+    "Unread survives a restart: it comes from the last-read position per channel and per thread in",
+    "~/.config/buzzr/read-state.json, and a \"new messages\" line marks where new messages start.",
     "Search (Ctrl+F): channel names, people and full-text message search; Enter opens the result — a person starts a DM.",
     "A person is found by the name in their profile, or by their npub (hex or npub1…): /dm and /whois take either.",
     "Others see \"typing…\" while you write (start with --no-typing to turn that off).",
