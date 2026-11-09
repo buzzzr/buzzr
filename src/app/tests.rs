@@ -253,6 +253,22 @@ fn shift_enter_and_ctrl_j_add_lines_enter_sends_them() {
 }
 
 #[test]
+fn alt_backspace_deletes_the_word_before_the_cursor() {
+    let mut app = app_with(1);
+    press(&mut app, KeyCode::Tab);
+    type_text(&mut app, "one two three");
+    let alt_back = |app: &mut App| app.handle(AppEvent::Key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT)));
+    alt_back(&mut app);
+    assert_eq!(app.editor.text(), "one two ");
+    app.typing_sent = None; // the signal is rate-limited; a word delete announces it like a plain one
+    let cmds = alt_back(&mut app);
+    assert_eq!(app.editor.text(), "one ");
+    assert_eq!(cmds, vec![Cmd::Typing { channel: "c1".into(), root: None }], "deleting a word is typing too");
+    let cmds = press(&mut app, KeyCode::Enter);
+    assert!(matches!(&cmds[0], Cmd::Send { text, .. } if text == "one"));
+}
+
+#[test]
 fn replying_from_the_list_goes_into_the_thread_and_escape_cancels() {
     let mut app = app_with(5);
     app.handle(AppEvent::Live(Live::Event(reply("r1", 2000, "alice", "m004"))));

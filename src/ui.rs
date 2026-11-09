@@ -402,6 +402,7 @@ pub const KEYS: &[(&str, &str)] = &[
     ("Enter", "send"),
     ("Shift+Enter, Alt+Enter, Ctrl+J", "new line"),
     ("Ctrl+A / E, Ctrl+W / U / K", "line start / end, kill word / to start / to end"),
+    ("Alt+Backspace", "delete the word before the cursor"),
     ("Ctrl+← →, Alt+B / F", "move by word"),
 ];
 
