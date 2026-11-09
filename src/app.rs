@@ -1354,6 +1354,10 @@ impl App {
                     self.set_focus(Focus::Messages);
                 }
             }
+            KeyCode::Backspace if alt => {
+                self.editor.kill_word_back();
+                return self.maybe_typing();
+            }
             KeyCode::Backspace => {
                 self.editor.backspace();
                 return self.maybe_typing();

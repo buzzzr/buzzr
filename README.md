@@ -139,7 +139,8 @@ The full behaviour, for when the feature list above is not enough.
 - **Links:** a click on a link copies its URL to your clipboard (terminal clipboard sequence, see below). `c` copies the selected
   message.
 - **Writing:** a multi-line box that grows; Enter sends, Shift+Enter (terminals that report it), Alt+Enter or Ctrl+J add a line;
-  bracketed paste; `@name` mentions members. Word and line editing keys.
+  bracketed paste; `@name` mentions members. Word and line editing keys (Ctrl+W or Alt+Backspace deletes the word before the
+  cursor).
 - **Edit and delete your own messages:** select one and press `e` (it loads into the input; Enter saves, Esc cancels) or `d` (asks
   `y` to confirm). Others see edits and deletions live. `/edit N` and `/delete N` do the same by number.
 - **Search everything:** Ctrl+F (or `/search words`) searches channel names (instantly), people you have seen (from their profiles) and
