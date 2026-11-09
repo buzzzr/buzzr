@@ -509,6 +509,24 @@ fn u_marks_the_selected_message_unread_and_the_sidebar_counts_it() {
 }
 
 #[test]
+fn the_pane_flags_the_messages_below_the_selected_one() {
+    let Some(relay) = relay_or_skip("the_pane_flags_the_messages_below_...") else { return };
+    let s = session(&relay);
+    // The fake relay's channels hold a single message each, but #general carries a thread with two replies:
+    // inside the thread the selection can sit above other messages.
+    s.press_all(&["down", "down", "enter"]);
+    s.expect("the general channel", "hello from c-general");
+    s.expect("its thread summary", "2 replies");
+    s.press("enter"); // open the thread: it starts on the newest reply
+    s.expect("the thread view", "the sidebar keeps a fixed order");
+    s.expect_gone("any marker while the newest reply is selected", "more below");
+    s.press("up");
+    s.expect("a marker for the messages below the selection", "more below");
+    s.press("end");
+    s.expect_gone("the marker once the newest reply is selected again", "more below");
+}
+
+#[test]
 fn a_thread_with_replies_since_the_last_visit_is_marked_unread_on_its_message() {
     let Some(relay) = relay_or_skip("a_thread_with_replies_...") else { return };
     // #general carries a thread with two replies. Open it once so the app writes the thread's read

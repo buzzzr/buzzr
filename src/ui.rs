@@ -223,6 +223,37 @@ fn draw_messages(f: &mut Frame, app: &App, area: Rect) {
         let mut sb = ScrollbarState::new(layout.max_scroll(view_h)).position(app.state.scroll);
         f.render_stateful_widget(Scrollbar::new(ScrollbarOrientation::VerticalRight).track_symbol(Some("│")).thumb_symbol("█").style(faint()), area, &mut sb);
     }
+    // The list goes on past the selection: say so in the corner, or a view that happens to end on the selected message looks
+    // like the end of the channel. It is gone as soon as the newest message is selected.
+    if let Some(i) = selected {
+        if i + 1 < layout.items.len() {
+            draw_more_below(f, text_area);
+        }
+    }
+}
+
+/// A corner marker for the messages below the selection. It is written straight into the buffer so that whatever background the
+/// row already carries (the selection band) stays under it, and it is kept off the rightmost column, which the scrollbar owns.
+fn draw_more_below(f: &mut Frame, area: Rect) {
+    const HINT: &str = "↓ more below";
+    let width = HINT.width() as u16;
+    if area.height == 0 || area.width < width + 2 {
+        return;
+    }
+    let y = area.bottom() - 1;
+    let fg = crate::theme::get().dim;
+    let buf = f.buffer_mut();
+    let mut x = area.right().saturating_sub(width + 1); // one blank column against the right edge
+    // Starting on the second half of a wide character would break it apart; there is room to step over it.
+    if x > area.x && UnicodeWidthStr::width(buf[(x - 1, y)].symbol()) == 2 {
+        x += 1;
+    }
+    for (i, ch) in HINT.chars().enumerate() {
+        let cell = &mut buf[(x + i as u16, y)];
+        let under = cell.bg;
+        cell.set_symbol(&ch.to_string());
+        cell.set_style(Style::default().fg(fg).bg(under));
+    }
 }
 
 fn draw_typing(f: &mut Frame, app: &App, area: Rect) {
@@ -699,6 +730,24 @@ mod tests {
             }
         }
         assert!(bands > 0, "no row was drawn as selected");
+    }
+
+    #[test]
+    fn the_pane_flags_the_messages_below_the_selection() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        let mut app = app();
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(!s.contains("more below"), "the newest message is selected, so nothing is below it\n{s}");
+        app.handle(AppEvent::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)));
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(s.contains("↓ more below"), "the messages below the selection are flagged\n{s}");
+        app.handle(AppEvent::Key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE)));
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(!s.contains("more below"), "the flag goes away once the newest message is selected again\n{s}");
     }
 
     #[test]

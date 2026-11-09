@@ -139,7 +139,8 @@ The full behaviour, for when the feature list above is not enough.
 - **Reads like a chat:** Markdown (bold, italic, lists, code, quotes, headings), bare URLs become links, reactions are shown,
   edited messages say so. A blank line separates messages and the selected one has a grey tint and a bar on the left.
 - **Keeps your place:** new messages never move the view unless you were at the bottom; older messages load above without a jump
-  (Up at the top, Ctrl+O or `/more`).
+  (Up at the top, Ctrl+O or `/more`). While the selected message is not the newest one, a `↓ more below` marker sits in the
+  bottom corner of the message pane so it is clear the list goes on.
 - **Links:** a click on a link copies its URL to your clipboard (terminal clipboard sequence, see below). `c` copies the selected
   message.
 - **Writing:** a multi-line box that grows; Enter sends. Alt+Enter and Ctrl+J add a line in every terminal, Shift+Enter in the ones
