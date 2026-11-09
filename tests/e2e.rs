@@ -536,6 +536,49 @@ fn a_thread_with_replies_since_the_last_visit_is_marked_unread_on_its_message() 
     s.expect_gone("the unread mark once the thread has been read", "● 2 new");
 }
 
+#[test]
+fn a_thread_reply_is_not_counted_as_a_channel_unread() {
+    let Some(relay) = relay_or_skip("a_thread_reply_is_not_counted_...") else { return };
+    // #general carries a thread with two replies, both newer than its own message. Open the channel once,
+    // which reads its timeline and stores where the channel was left, then restart on that state.
+    let first = session(&relay);
+    first.press_all(&["down", "down", "enter"]);
+    first.expect("the general channel", "hello from c-general");
+    let stored = wait_for_stored_channel(&first.config.join("read-state.json"), "c-general");
+    let config = first.config.clone();
+    drop(first); // kills the app and clears the config directory
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(config.join("read-state.json"), stored).unwrap();
+
+    let s = session_in(&relay, config);
+    // #design opens on start, so #general is off screen and its count is asked from the relay. Nothing arrived
+    // on its timeline since it was read, so it carries no badge: the thread replies are not channel rows.
+    s.expect("the channel list", "#general");
+    std::thread::sleep(Duration::from_millis(800)); // long enough for a startup count to arrive if one were coming
+    let screen = s.screen();
+    assert!(
+        !sidebar(&screen).iter().any(|row| row.starts_with("#general (")),
+        "a thread reply must not count as a channel unread:\n{}\n{screen}",
+        ruler()
+    );
+}
+
+/// The whole `read-state.json` once it records a position for `channel`, waiting for the file to appear.
+fn wait_for_stored_channel(path: &std::path::Path, channel: &str) -> String {
+    let end = Instant::now() + WAIT;
+    loop {
+        if let Ok(text) = std::fs::read_to_string(path) {
+            if text.contains(&format!("\"{channel}\"")) {
+                return text;
+            }
+        }
+        if Instant::now() > end {
+            panic!("read-state.json never recorded a position for {channel}");
+        }
+        std::thread::sleep(Duration::from_millis(40));
+    }
+}
+
 /// The first thread root id the app has written into `read-state.json`, waiting for the file to appear.
 fn wait_for_stored_thread(path: &std::path::Path) -> String {
     let end = Instant::now() + WAIT;

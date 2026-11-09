@@ -372,6 +372,27 @@ fn unread_counts_other_channels_and_clear_when_opened() {
     assert!(!cmds.contains(&Cmd::LoadWindow { channel: "c2".into(), cursor: None }) || app.stores["c2"].head_loaded || true);
 }
 
+#[test]
+fn a_thread_reply_does_not_raise_another_channels_badge() {
+    let mut app = app_with(2); // c1 is on screen, c2 is not
+    // a top-level message in c2 is unread on the channel
+    app.handle(AppEvent::Live(Live::Event(msg("x1", 9000, "alice", "hey", &[&["h", "c2"]]))));
+    assert_eq!(app.unread.get("c2"), Some(&1));
+    // a reply in one of c2's threads is unread on that thread's row, not on the channel badge: the channel timeline never
+    // shows it, so opening the channel would not clear the badge, and it came back after every restart.
+    let thread_reply = msg("r1", 9001, "alice", "a reply", &[&["h", "c2"], &["e", "root", "", "reply"]]);
+    app.handle(AppEvent::Live(Live::Event(thread_reply)));
+    assert_eq!(app.unread.get("c2"), Some(&1), "a thread reply is not a channel-timeline row");
+    // a nested reply is not on the timeline either
+    let nested = msg("r2", 9002, "alice", "nested", &[&["h", "c2"], &["e", "root", "", "root"], &["e", "root", "", "reply"]]);
+    app.handle(AppEvent::Live(Live::Event(nested)));
+    assert_eq!(app.unread.get("c2"), Some(&1), "a nested reply does not count");
+    // a broadcast reply is listed on the timeline, so it does count
+    let broadcast = msg("b1", 9003, "alice", "to the channel", &[&["h", "c2"], &["e", "root", "", "reply"], &["broadcast", "1"]]);
+    app.handle(AppEvent::Live(Live::Event(broadcast)));
+    assert_eq!(app.unread.get("c2"), Some(&2), "a broadcast reply is a timeline row");
+}
+
 /// An app with "general" (c1) and "random" (c2), a stored read position for c2 and 10 lines of screen. The stored position
 /// makes the channel list ask the relay for c2's count, which the test then delivers by hand.
 fn app_with_stored_read() -> App {
