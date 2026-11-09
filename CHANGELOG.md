@@ -5,11 +5,23 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
 
 ## [Unreleased]
 
+## [0.2.0-rc.1] - 2026-11-09
+
+### Added
+
+- A `↓ more below` marker sits in the bottom corner of the message pane while the newest message is below the view, and goes
+  away as soon as the newest message is on screen.
+
 ### Changed
 
 - `u` forces *that* message unread instead of marking the channel unread from it: it works on your own message and on the
   newest one, the `new messages` line is drawn above the marked message, and reading on does not clear it — only `/read`
   (or `/read all`) does. The read position is left alone, and a mark never hides a higher unread count.
+
+### Fixed
+
+- A channel's unread badge counted thread replies, which the channel timeline never shows, so the count came back after every
+  restart even once the channel had been read. A badge now counts top-level rows only; a thread keeps its own unread mark.
 
 ## [0.2.0-rc.0] - 2026-11-09
 
@@ -68,7 +80,8 @@ First public version.
 - A notice in the UI when a newer version is published, with the upgrade command.
 - Release builds for Linux (musl, x86_64 and aarch64) and macOS (Apple silicon and Intel), published with `SHA256SUMS`.
 
-[Unreleased]: https://github.com/buzzzr/buzzr/compare/v0.2.0-rc.0...HEAD
+[Unreleased]: https://github.com/buzzzr/buzzr/compare/v0.2.0-rc.1...HEAD
+[0.2.0-rc.1]: https://github.com/buzzzr/buzzr/compare/v0.2.0-rc.0...v0.2.0-rc.1
 [0.2.0-rc.0]: https://github.com/buzzzr/buzzr/compare/v0.1.1...v0.2.0-rc.0
 [0.1.1]: https://github.com/buzzzr/buzzr/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/buzzzr/buzzr/releases/tag/v0.1.0
