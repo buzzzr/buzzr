@@ -399,7 +399,7 @@ fn app_with_stored_read() -> App {
     let mut app = App::new(ME.into(), false, chrono_tz::UTC);
     app.view_h = 10;
     app.areas = Areas { channels: Rect::new(0, 1, 20, 20), msgs: Rect::new(20, 1, 80, 10), input: Rect::new(20, 12, 80, 3) };
-    app.seed_read(ReadState { channels: [("c2".to_owned(), 500u64)].into_iter().collect(), threads: HashMap::new() });
+    app.seed_read(ReadState { channels: [("c2".to_owned(), 500u64)].into_iter().collect(), threads: HashMap::new(), marks: HashMap::new() });
     app
 }
 
@@ -477,33 +477,86 @@ fn reopening_a_channel_draws_the_new_messages_line_where_the_last_visit_stopped(
 }
 
 #[test]
-fn u_marks_the_channel_unread_from_the_selected_message_and_writes_the_earlier_position() {
+fn u_marks_the_selected_message_unread_and_writes_the_mark() {
     let mut app = app_with(3);
     // Reading the open channel has moved the position past every message.
     assert_eq!(app.read.get("c1"), Some(&1002));
     assert_eq!(app.unread.get("c1"), None);
-    // Select the middle message: it and the one after it become unread.
+    // Select the middle message: that message is what becomes unread, not everything after it.
     app.state.selected = Some("m001".into());
     let cmds = press(&mut app, KeyCode::Char('u'));
-    assert_eq!(app.unread.get("c1"), Some(&2), "the selected message and the newer one are unread");
-    assert_eq!(app.read.get("c1"), Some(&1000), "the position is just before the selected message");
-    let saved = cmds.iter().find_map(|c| match c { Cmd::SaveRead(m) => Some(m.clone()), _ => None }).expect("marking unread writes the earlier position");
-    assert_eq!(saved.channels.get("c1"), Some(&1000));
-    assert_eq!(app.flash_text(), Some("marked unread from #2"));
+    assert_eq!(app.unread.get("c1"), Some(&1), "only the marked message is unread");
+    assert_eq!(app.read.get("c1"), Some(&1002), "a mark is not a position: the read frontier does not move");
+    let saved = cmds.iter().find_map(|c| match c { Cmd::SaveRead(m) => Some(m.clone()), _ => None }).expect("marking unread writes the mark");
+    assert_eq!(saved.marks.get("c1").map(|s| s.iter().cloned().collect::<Vec<_>>()), Some(vec!["m001".to_owned()]));
+    assert_eq!(app.flash_text(), Some("marked #2 unread"));
     let l = app.layout(78);
     let i = l.index_of("m001").expect("the selected message is in the list");
     assert!(l.items[i].lines[0].spans.iter().any(|s| s.content.contains("new messages")), "the divider sits above the message it was marked from");
+    let after = l.index_of("m002").expect("the newer message is in the list");
+    assert!(!l.items[after].lines[0].spans.iter().any(|s| s.content.contains("new messages")), "and not above the one after it");
 }
 
 #[test]
-fn u_on_your_own_newest_message_has_nothing_to_mark() {
+fn u_on_your_own_newest_message_marks_it_unread() {
     let mut app = app_with(2);
-    // A live message of your own in the open channel is read as it arrives and points the position at itself.
+    // A live message of your own in the open channel is read as it arrives, and no frontier rule can make it unread again.
     app.handle(AppEvent::Live(Live::Event(msg("mine", 2000, ME, "mine", &[&["h", "c1"]]))));
     app.state.selected = Some("mine".into());
     let cmds = press(&mut app, KeyCode::Char('u'));
-    assert!(!cmds.iter().any(|c| matches!(c, Cmd::SaveRead(_))), "nothing newer and from someone else: no write");
-    assert_eq!(app.flash_text(), Some("nothing after that message to mark unread"));
+    assert!(cmds.iter().any(|c| matches!(c, Cmd::SaveRead(_))), "marking your own message writes the mark");
+    assert_eq!(app.unread.get("c1"), Some(&1), "a message you wrote is unread when you ask for it");
+    assert!(has_divider(&mut app), "the divider marks it");
+}
+
+#[test]
+fn a_mark_stands_while_reading_on_and_comes_back_after_a_restart() {
+    let mut app = app_with(3);
+    app.state.selected = Some("m001".into());
+    let saved = press(&mut app, KeyCode::Char('u')).iter().find_map(|c| match c { Cmd::SaveRead(m) => Some(m.clone()), _ => None }).expect("the mark is written");
+    // Reading on — a message arriving in the open channel reads the channel through — leaves the mark alone.
+    app.handle(AppEvent::Live(Live::Event(msg("later", 3000, "alice", "later", &[&["h", "c1"]]))));
+    assert_eq!(app.unread.get("c1"), Some(&1), "reading on does not clear what was marked");
+    // A fresh app seeded with what was written has the badge and the divider again. (The real restart seeds the state before
+    // the first draw; the fixture has already drawn once, so it redraws.)
+    let mut restarted = app_with(3);
+    restarted.seed_read(saved);
+    restarted.content_changed();
+    assert_eq!(restarted.unread.get("c1"), Some(&1), "the mark is a badge again on the next start");
+    assert!(has_divider(&mut restarted), "and the divider is above it");
+}
+
+#[test]
+fn read_clears_the_marks_of_a_channel_and_their_badge() {
+    let mut app = app_with(3);
+    app.state.selected = Some("m001".into());
+    press(&mut app, KeyCode::Char('u'));
+    assert_eq!(app.unread.get("c1"), Some(&1));
+    press(&mut app, KeyCode::Tab);
+    type_text(&mut app, "/read");
+    let cmds = press(&mut app, KeyCode::Enter);
+    assert!(app.marks.get("c1").is_none(), "the mark is cleared");
+    assert_eq!(app.unread.get("c1"), None, "the badge goes with it");
+    assert!(!has_divider(&mut app), "and so does the divider");
+    let saved = cmds.iter().find_map(|c| match c { Cmd::SaveRead(m) => Some(m.clone()), _ => None }).expect("clearing the mark writes the state");
+    assert!(saved.marks.is_empty(), "nothing is left marked: {saved:?}");
+}
+
+#[test]
+fn read_all_clears_marks_in_every_channel() {
+    let mut app = app_with(2);
+    let mut state = ReadState::default();
+    state.marks.insert("c1".to_owned(), ["m000".to_owned()].into_iter().collect());
+    state.marks.insert("c2".to_owned(), ["x9".to_owned()].into_iter().collect());
+    app.seed_read(state);
+    assert_eq!(app.unread.get("c1"), Some(&1));
+    assert_eq!(app.unread.get("c2"), Some(&1), "a channel that is not open carries its mark too");
+    press(&mut app, KeyCode::Tab);
+    type_text(&mut app, "/read all");
+    let cmds = press(&mut app, KeyCode::Enter);
+    assert!(app.unread.is_empty(), "every badge is gone: {:?}", app.unread);
+    let saved = cmds.iter().find_map(|c| match c { Cmd::SaveRead(m) => Some(m.clone()), _ => None }).expect("the state is written");
+    assert!(saved.marks.is_empty());
 }
 
 #[test]
@@ -547,7 +600,7 @@ fn live_reply(app: &mut App, id: &str, at: u64, who: &str, root: &str) {
 fn seed_threads(app: &mut App, threads: &[(&str, u64)]) {
     let channels = [("c1".to_owned(), app.read.get("c1").copied().unwrap_or(0))].into_iter().collect();
     let threads = threads.iter().map(|(id, at)| ((*id).to_owned(), *at)).collect();
-    app.seed_read(ReadState { channels, threads });
+    app.seed_read(ReadState { channels, threads, marks: HashMap::new() });
 }
 
 #[test]

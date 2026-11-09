@@ -5,6 +5,12 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
 
 ## [Unreleased]
 
+### Changed
+
+- `u` forces *that* message unread instead of marking the channel unread from it: it works on your own message and on the
+  newest one, the `new messages` line is drawn above the marked message, and reading on does not clear it — only `/read`
+  (or `/read all`) does. The read position is left alone, and a mark never hides a higher unread count.
+
 ## [0.2.0-rc.0] - 2026-11-09
 
 ### Added

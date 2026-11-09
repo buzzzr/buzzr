@@ -509,6 +509,30 @@ fn u_marks_the_selected_message_unread_and_the_sidebar_counts_it() {
 }
 
 #[test]
+fn a_mark_survives_leaving_the_channel_and_coming_back() {
+    let Some(relay) = relay_or_skip("a_mark_survives_leaving_...") else { return };
+    let s = session(&relay);
+    // #design is open with the keyboard on the channel list; Tab moves it into the messages, and `u` marks the
+    // message the cursor is on — a mark on that message, not a move of the read position.
+    s.press("tab");
+    s.expect("the messages pane", "Open thread");
+    s.press("u");
+    s.until("the open channel to show an unread count", |sc| sidebar(sc).iter().any(|n| n.starts_with("#design (1)")));
+    // Leave for #dev and come back: opening a channel reads it, but reading does not clear what was marked.
+    // Enter opens a channel and moves the keyboard into its messages, so Esc returns to the list before `Up`.
+    s.press("esc");
+    s.expect("the channel list", "Open channel");
+    s.press_all(&["down", "enter"]);
+    s.expect("the dev channel", "hello from c-dev");
+    s.press("esc");
+    s.expect("the channel list again", "Open channel");
+    s.press_all(&["up", "enter"]);
+    s.expect("the design channel again", "hello from c-design");
+    let screen = s.until("the mark to still be there", |sc| sidebar(sc).iter().any(|n| n.starts_with("#design (1)")));
+    assert!(screen.contains("new messages"), "the divider still sits above the marked message:\n{screen}");
+}
+
+#[test]
 fn a_thread_with_replies_since_the_last_visit_is_marked_unread_on_its_message() {
     let Some(relay) = relay_or_skip("a_thread_with_replies_...") else { return };
     // #general carries a thread with two replies. Open it once so the app writes the thread's read
