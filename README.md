@@ -142,7 +142,8 @@ The full behaviour, for when the feature list above is not enough.
   (Up at the top, Ctrl+O or `/more`).
 - **Links:** a click on a link copies its URL to your clipboard (terminal clipboard sequence, see below). `c` copies the selected
   message.
-- **Writing:** a multi-line box that grows; Enter sends, Shift+Enter (terminals that report it), Alt+Enter or Ctrl+J add a line;
+- **Writing:** a multi-line box that grows; Enter sends. Alt+Enter and Ctrl+J add a line in every terminal, Shift+Enter in the ones
+  that report it (`kitty`, `foot`, `WezTerm`, `Ghostty`, `iTerm2`) — the footer names the key that works where you are;
   bracketed paste; `@name` mentions members. Word and line editing keys (Ctrl+W or Alt+Backspace deletes the word before the
   cursor).
 - **Edit and delete your own messages:** select one and press `e` (it loads into the input; Enter saves, Esc cancels) or `d` (asks

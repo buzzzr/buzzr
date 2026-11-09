@@ -235,10 +235,12 @@ async fn run_tui(relay: Arc<Relay>, read_only: bool, send_typing: bool, mouse: b
         default_hook(info);
     }));
 
-    let _guard = TerminalGuard::enter(mouse)?;
+    let guard = TerminalGuard::enter(mouse)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
     let mut app = App::new(relay.me(), read_only, tz);
     app.send_typing = send_typing;
+    // Shift+Enter only reaches us where the terminal speaks the kitty keyboard protocol; the footer names the key that works here.
+    app.keyboard_enhanced = guard.enhanced;
     app.update_source = update::InstallSource::detect();
     // Where each channel was left last time; the badge counts come back over the relay (see `Cmd::LoadUnread`).
     app.seed_read(config::load_read_state(&paths.read_state()));

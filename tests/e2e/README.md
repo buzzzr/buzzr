@@ -39,3 +39,8 @@ and feeds the output through a `vt100` parser, so a test can wait for text and a
 (and a failure prints the whole screen with a column ruler). Keys are written as the bytes a
 terminal sends (`Esc`, arrows, Tab/Shift+Tab, Ctrl+Q, …); a lone `Esc` waits a moment so the
 program can tell it from the start of an escape sequence.
+
+A plain pty answers nothing, so `buzzr` treats it as a terminal that cannot report Shift+Enter.
+`Session::start_enhanced` answers the keyboard-enhancement probe (`CSI ? u` and `CSI c`) the way a
+kitty-protocol terminal does, so a test can drive the Shift+Enter that kitty, foot, WezTerm, Ghostty
+and iTerm2 send.
