@@ -1,0 +1,26 @@
+name: Feature request
+description: Suggest something buzzr could do
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        buzzr is small on purpose (see the principles in [AGENTS.md](../blob/main/AGENTS.md)): a request that can be a plugin
+        or that adds an option may be better as one. Say what you are trying to do, not only the key you would like.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do
+      description: The situation where buzzr gets in your way today.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like to happen
+      description: Keys, screens or behaviour you have in mind, if any.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+      description: Including doing it with another Buzz client or a plugin.

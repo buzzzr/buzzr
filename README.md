@@ -234,7 +234,7 @@ If something is missing that you need, please [open an issue](https://github.com
 
 Bug reports, ideas and pull requests are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) first, then [ARCHITECTURE.md](ARCHITECTURE.md) for
 how the code fits together. A change is done when `./build.sh test` is green and the build has no warnings. To report a security issue,
-please do not open a public issue; contact the maintainers privately.
+please do not open a public issue; see [SECURITY.md](SECURITY.md).
 
 ## Acknowledgements
 

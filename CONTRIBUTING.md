@@ -18,7 +18,7 @@ as much as to coding agents.
   control characters.
 - **Changing a key, command or overlay:** update the on-screen help (`KEYS`, `HELP`, footer in `ui.rs`) and the README in the same change.
 - **Commits and pull requests:** small, imperative subject line; say what changed and why. See "Opening a pull request" below.
-- **Security issues:** please do not open a public issue; contact the maintainers privately.
+- **Security issues:** please do not open a public issue; see [`SECURITY.md`](SECURITY.md).
 
 ## Opening a pull request
 
