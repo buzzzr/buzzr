@@ -38,3 +38,7 @@ iana-time-zone = "0.1"
 clap = { version = "4.6.7", features = ["derive"] }
 crossterm = { version = "0.29.0", features = ["event-stream", "bracketed-paste"] }
 anyhow = "1"
+
+[dev-dependencies]
+nix = { version = "0.31.3", features = ["term"] }
+vt100 = "0.18.1"

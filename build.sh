@@ -2,6 +2,7 @@
 # Build and test buzzr.
 #   ./build.sh check        cargo check
 #   ./build.sh test         cargo test
+#   ./build.sh e2e          end-to-end UI tests against buzz-fake-relay (tests/e2e/run.sh)
 #   ./build.sh release      optimised binary (a static musl binary when built in Docker) -> dist/buzzr
 #   ./build.sh <cargo args> anything else is passed to cargo
 #
@@ -13,6 +14,12 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 cd "$HERE"
+
+# The end-to-end suite is not `cargo test` on its own: it needs a running relay (see tests/e2e/README.md).
+if [ "${1:-}" = e2e ]; then
+  shift
+  exec "$HERE/tests/e2e/run.sh" "$@"
+fi
 
 case "${1:-check}" in
   check) args="check --all-targets" ;;

@@ -7,6 +7,11 @@ as much as to coding agents.
   the build has no warnings. Match the surrounding style (long lines, about 140 columns; there is no rustfmt config, so do not run `cargo fmt` over the whole tree), comments say why.
 - **Tests come with behaviour:** UI behaviour in `src/app/tests.rs` (synthetic events, no network or terminal), drawing in `ui.rs`
   tests, protocol builders in `relay.rs`, first-run questions in `setup.rs` (scripted answers).
+- **New navigation, drawing and keys also add a case to the end-to-end suite:** `tests/e2e/run.sh` (or `./build.sh e2e`) drives
+  the real binary against [`buzz-fake-relay`](https://github.com/buzzzr/buzz-fake-relay) in a pty and checks the screen it draws.
+  A change to what a key does, to what opens what, or to what a pane or an overlay shows is not finished until it is covered
+  there; if it needs new data, add it to the relay rather than faking it in the test. Plain `cargo test` skips those tests, so
+  they stay opt-in — see `tests/e2e/README.md`.
 - **Keys and secrets:** never log, print or put a private key on a command line, and keep it in `Zeroizing`. Do not commit real
   keys or relay addresses, not even in tests (use `chat.example.com` and obviously fake keys).
 - **Message text is hostile:** anything from the network that reaches the screen goes through the Markdown renderer, which strips
