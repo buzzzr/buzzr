@@ -1100,13 +1100,14 @@ impl App {
         }
     }
 
-    /// The channel an event belongs to: its `h` tag, else the channel whose store holds the message it points at.
+    /// The channel an event belongs to: its `h` tag, else the channel whose store holds the message or reaction it points at.
+    /// A reaction removal (`kind:5`) carries no `h` tag and points at the reaction event, so the reaction lookup matters here.
     fn route(&self, e: &Ev) -> Option<String> {
         if let Some(h) = e.channel() {
             return Some(h.to_owned());
         }
         let target = e.tag("e")?;
-        self.stores.iter().find(|(_, s)| s.msgs.contains_key(target)).map(|(id, _)| id.clone())
+        self.stores.iter().find(|(_, s)| s.msgs.contains_key(target) || s.reaction_ids.contains_key(target)).map(|(id, _)| id.clone())
     }
 
     fn live_event(&mut self, e: Ev) -> Vec<Cmd> {
