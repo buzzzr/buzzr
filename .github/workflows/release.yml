@@ -81,7 +81,7 @@ jobs:
       - name: Package
         run: .github/scripts/package.sh buzzr-bin "${{ matrix.target }}" "${{ needs.version.outputs.version }}" dist
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: buzzr-${{ matrix.target }}
           path: dist/*.tar.gz
