@@ -163,7 +163,8 @@ The full behaviour, for when the feature list above is not enough.
   `buzzr plugins list|enable|disable` works from the shell. `--no-plugins` (or `BUZZR_SAFE_MODE=1`) turns the whole system off. See
   [PLUGIN.md](PLUGIN.md); a tiny example is in `examples/plugins/hello`.
 - **Upgrading:** `/update` in the input says how to upgrade this copy, worked out from where the binary lives — `brew update &&
-  brew upgrade buzzr` for a Homebrew install, `cargo install --force buzzr` for a `cargo install`, or the release page otherwise.
+  brew upgrade buzzr` for a Homebrew install, `cargo install --force --git https://github.com/buzzzr/buzzr` for a
+  `cargo install`, or the release page otherwise.
   Nothing is downloaded or changed. Once a day buzzr also asks GitHub's release feed whether a newer release exists; when there is
   one the status line says so (`buzzr 0.2.0 available · /update`) and the same upgrade line is printed after you quit.
   `BUZZR_NO_UPDATE_CHECK=1` turns the check off.
