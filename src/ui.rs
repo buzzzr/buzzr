@@ -160,12 +160,19 @@ fn draw_channels(f: &mut Frame, app: &App, area: Rect) {
         while label.width() > room {
             label.pop();
         }
-        let mut spans = vec![Span::styled(marker, Style::default().fg(crate::theme::get().bar_on)), Span::styled(format!(" {glyph}{label}{badge}"), style)];
+        let bar_fg = if focused { crate::theme::get().bar_on } else { crate::theme::get().bar_off };
+        let mut spans = vec![Span::styled(marker, Style::default().fg(bar_fg)), Span::styled(format!(" {glyph}{label}{badge}"), style)];
         if let Some(m) = mark {
             spans.push(Span::styled(mark_text, m.tone.style()));
         }
         let mut line = Line::from(spans);
-        if bar && focused {
+        if bar {
+            // A ratatui `Line` only paints the cells its spans cover, so pad the row out to the pane width first: the
+            // background then runs from the left edge to the right edge of the channel list, over the bar glyph.
+            let used = line.width();
+            if used < inner.width as usize {
+                line.spans.push(Span::raw(" ".repeat(inner.width as usize - used)));
+            }
             line = line.style(Style::default().bg(crate::theme::get().sel_bg));
         }
         lines.push(line);
@@ -360,7 +367,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
 
 pub const KEYS: &[(&str, &str)] = &[
     ("Tab / Shift+Tab", "switch between channels, messages and the input"),
-    ("Esc", "close a panel, cancel a reply, leave a thread (in that order)"),
+    ("Esc", "close a panel, cancel a reply, leave a thread, then step back to the channels"),
     ("F1", "this list of keys"),
     ("F2", "help: commands and how things work"),
     ("Ctrl+R", "reload the open channel or thread"),
@@ -395,6 +402,7 @@ pub const KEYS: &[(&str, &str)] = &[
     ("Enter", "send"),
     ("Shift+Enter, Alt+Enter, Ctrl+J", "new line"),
     ("Ctrl+A / E, Ctrl+W / U / K", "line start / end, kill word / to start / to end"),
+    ("Alt+Backspace", "delete the word before the cursor"),
     ("Ctrl+← →, Alt+B / F", "move by word"),
 ];
 
@@ -576,6 +584,9 @@ mod tests {
         app.handle(AppEvent::Names(Ok([("bob".to_string(), "Bob".to_string())].into())));
         app.handle(AppEvent::Window { channel: "c1".into(), cursor: None, result: Ok(Window { events: vec![m1, m2, r], has_more: true, next_cursor: Some((1, "a".into())) }) });
         app.handle(AppEvent::Live(Live::Up));
+        // a fresh app starts with the keyboard on the channel list; these cases draw the message pane, so put the
+        // cursor there the way a user does (Tab) before handing the app over.
+        app.handle(AppEvent::Key(ratatui::crossterm::event::KeyEvent::new(ratatui::crossterm::event::KeyCode::Tab, ratatui::crossterm::event::KeyModifiers::NONE)));
         app
     }
 
@@ -771,6 +782,47 @@ mod tests {
         term.draw(|f| draw(f, &mut app)).unwrap();
         let s = screen(&term);
         assert!(s[2].starts_with("▌ #general") && s[3].starts_with("  #random"), "the bar came back\n{}", s.join("\n"));
+    }
+
+    #[test]
+    fn the_selected_channel_is_one_band_across_the_whole_sidebar() {
+        let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        let mut app = app();
+        let sel = crate::theme::get().sel_bg;
+        // the bar row keeps its full-width band whether or not the list has focus
+        for focused in [false, true] {
+            app.focus = if focused { Focus::Channels } else { Focus::Messages };
+            term.draw(|f| draw(f, &mut app)).unwrap();
+            // the pane ends at the right border, which is not part of the band
+            let (x0, x1) = (app.areas.channels.x, app.areas.channels.x + app.areas.channels.width - 1);
+            let buf = term.backend().buffer();
+            let mut bands = 0;
+            for y in 0..buf.area.height {
+                if !(x0..x1).any(|x| buf[(x, y)].bg == sel) {
+                    continue;
+                }
+                bands += 1;
+                for x in x0..x1 {
+                    assert_eq!(buf[(x, y)].bg, sel, "selected channel row {y} is not a full band (focused={focused}): gap at x={x}");
+                }
+            }
+            assert_eq!(bands, 1, "exactly the selected channel row is highlighted (focused={focused})");
+        }
+    }
+
+    #[test]
+    fn the_channel_bar_is_accent_with_focus_and_neutral_without() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        let mut app = app();
+        let th = crate::theme::get();
+        // the list has no focus: the bar on the open channel stays, but in the neutral colour
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        assert_eq!(term.backend().buffer()[(0, 2)].fg, th.bar_off, "the unfocused bar is neutral");
+        // focus the list: the accent colour marks where the focus is
+        app.handle(AppEvent::Key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE)));
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        assert_eq!(term.backend().buffer()[(0, 2)].fg, th.bar_on, "the focused bar uses the accent colour");
     }
 
     #[test]

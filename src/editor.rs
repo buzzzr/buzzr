@@ -107,7 +107,7 @@ impl Editor {
         }
     }
 
-    /// Ctrl+W: delete the word before the cursor.
+    /// Ctrl+W or Alt+Backspace: delete the word before the cursor.
     pub fn kill_word_back(&mut self) {
         let end = self.cur;
         self.word_left();

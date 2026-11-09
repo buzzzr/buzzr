@@ -44,6 +44,10 @@ fn app_with(n: usize) -> App {
     app.handle(AppEvent::Channels(Ok(vec![chan("dm1", "DM"), chan("c1", "general"), chan("c2", "random")])));
     let events: Vec<Ev> = (0..n).map(|i| msg(&format!("m{i:03}"), 1000 + i as u64, BOB, &format!("message {i}"), &[])).collect();
     app.handle(AppEvent::Window { channel: "c1".into(), cursor: None, result: Ok(Window { events, has_more: false, next_cursor: None }) });
+    // A fresh app starts with the keyboard on the channel list; nearly every case here is about the message list or the
+    // input, so the fixture moves the cursor into the message list the way a user does (Tab) before handing the app over.
+    // The startup focus itself is checked in `opening_the_first_real_channel_loads_it_and_the_dm_comes_last`.
+    app.handle(key(KeyCode::Tab));
     app.layout(78);
     app
 }
@@ -73,7 +77,8 @@ fn opening_the_first_real_channel_loads_it_and_the_dm_comes_last() {
     assert!(cmds.contains(&Cmd::LoadWindow { channel: "c1".into(), cursor: None }));
     assert!(cmds.contains(&Cmd::Subscribe(vec!["c1".into(), "c2".into(), "dm1".into()])));
     assert!(cmds.contains(&Cmd::LoadMembers { channel: "dm1".into() }), "DMs need their members to be labelled");
-    assert_eq!(app.focus, Focus::Messages);
+    assert_eq!(app.focus, Focus::Channels, "a fresh start has the keyboard on the channel list");
+    assert_eq!(app.channel_bar(), Some(0), "and the bar is on the channel that was opened");
 }
 
 #[test]
@@ -132,6 +137,31 @@ fn enter_opens_the_thread_and_escape_returns_to_the_same_place() {
     press(&mut app, KeyCode::Esc);
     assert_eq!(app.view, View::Channel);
     assert_eq!((selected(&app), app.state.scroll), (sel, scroll), "back where we were");
+}
+
+#[test]
+fn escape_walks_back_from_the_input_to_the_message_list_and_then_the_channels() {
+    let mut app = app_with(3);
+    press(&mut app, KeyCode::Tab); // (Messages -> Input)
+    assert_eq!(app.focus, Focus::Input);
+    press(&mut app, KeyCode::Esc);
+    assert_eq!(app.focus, Focus::Messages, "the input hands the keyboard back to the message list");
+    press(&mut app, KeyCode::Esc);
+    assert_eq!(app.focus, Focus::Channels, "with nothing left to close, the message list hands it to the channel list");
+    press(&mut app, KeyCode::Esc);
+    assert_eq!(app.focus, Focus::Channels, "the channel list is the end of the line");
+}
+
+#[test]
+fn escape_leaves_a_thread_before_the_message_list_releases_the_keyboard() {
+    let mut app = app_with(3);
+    press(&mut app, KeyCode::Enter); // into the thread of the selected message
+    assert!(app.in_thread());
+    press(&mut app, KeyCode::Esc);
+    assert!(!app.in_thread(), "the first Escape leaves the thread");
+    assert_eq!(app.focus, Focus::Messages, "and stays in the message list, so there is still something to back out of");
+    press(&mut app, KeyCode::Esc);
+    assert_eq!(app.focus, Focus::Channels, "the next Escape reaches the channel list");
 }
 
 #[test]
@@ -220,6 +250,22 @@ fn shift_enter_and_ctrl_j_add_lines_enter_sends_them() {
     assert_eq!(app.editor.text(), "one\ntwo\nthree");
     let cmds = press(&mut app, KeyCode::Enter);
     assert!(matches!(&cmds[0], Cmd::Send { text, .. } if text == "one\ntwo\nthree"));
+}
+
+#[test]
+fn alt_backspace_deletes_the_word_before_the_cursor() {
+    let mut app = app_with(1);
+    press(&mut app, KeyCode::Tab);
+    type_text(&mut app, "one two three");
+    let alt_back = |app: &mut App| app.handle(AppEvent::Key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT)));
+    alt_back(&mut app);
+    assert_eq!(app.editor.text(), "one two ");
+    app.typing_sent = None; // the signal is rate-limited; a word delete announces it like a plain one
+    let cmds = alt_back(&mut app);
+    assert_eq!(app.editor.text(), "one ");
+    assert_eq!(cmds, vec![Cmd::Typing { channel: "c1".into(), root: None }], "deleting a word is typing too");
+    let cmds = press(&mut app, KeyCode::Enter);
+    assert!(matches!(&cmds[0], Cmd::Send { text, .. } if text == "one"));
 }
 
 #[test]

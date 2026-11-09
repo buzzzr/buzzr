@@ -958,7 +958,9 @@ impl App {
         if self.cur.is_none() && !self.channels.is_empty() {
             let first = self.channels.iter().position(|c| !c.is_dm()).unwrap_or(0);
             cmds.extend(self.open_channel(first));
-            self.set_focus(Focus::Messages);
+            // the first channel is opened so its messages are on screen, but the keyboard stays on the channel list:
+            // that is where a fresh start is expected to be, and Escape comes back here from the message list.
+            self.set_focus(Focus::Channels);
         }
         // The stored read position says where each channel was left; ask the relay how much arrived since, once per run. The
         // open channel's own position was advanced by opening it, so only the others are asked: its count would be thrown away.
@@ -1279,7 +1281,13 @@ impl App {
                 Vec::new()
             }
             KeyCode::Esc => {
-                self.back_to_channel();
+                // Escape backs out one level: leave a thread first, otherwise there is nothing left to close, so
+                // the keyboard goes back to the channel list.
+                if self.in_thread() {
+                    self.back_to_channel();
+                } else {
+                    self.set_focus(Focus::Channels);
+                }
                 Vec::new()
             }
             _ => Vec::new(),
@@ -1345,6 +1353,10 @@ impl App {
                 } else {
                     self.set_focus(Focus::Messages);
                 }
+            }
+            KeyCode::Backspace if alt => {
+                self.editor.kill_word_back();
+                return self.maybe_typing();
             }
             KeyCode::Backspace => {
                 self.editor.backspace();

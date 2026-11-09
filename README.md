@@ -120,8 +120,10 @@ values and skip the questions (for scripts and containers; the key is never acce
 The full behaviour, for when the feature list above is not enough.
 
 - **Channels and DMs** on the left (DMs are labelled with the other person, `✉ name`), with unread counts. An open channel is
-  marked `#` and a private (restricted) one `*`; DMs get no marker. The bar marks the
-  channel on screen; while the list has focus it follows the cursor, and leaving the list without opening a channel puts it back.
+  marked `#` and a private (restricted) one `*`; DMs get no marker. The selected channel has a full-width grey tint and a bar on
+  the left, like the selected message; the bar is the accent colour while the list has focus and grey when it does not, so the accent
+  marks where the focus is. The bar sits on the channel on screen; while the list has focus it follows the cursor, and leaving the
+  list without opening a channel puts it back. The keyboard starts on the channel list, so Up/Down and Enter work as soon as buzzr opens.
   `/dm name` opens the DM you already have with someone, or starts a new one; a name from a channel or an npub both work.
 - **Unread that survives a restart:** the last-read position per channel lives in `~/.config/buzzr/read-state.json`, so the
   counts are there again next time (each one asked of the relay on startup) and a `new messages` line marks where the unseen
@@ -138,7 +140,8 @@ The full behaviour, for when the feature list above is not enough.
 - **Links:** a click on a link copies its URL to your clipboard (terminal clipboard sequence, see below). `c` copies the selected
   message.
 - **Writing:** a multi-line box that grows; Enter sends, Shift+Enter (terminals that report it), Alt+Enter or Ctrl+J add a line;
-  bracketed paste; `@name` mentions members. Word and line editing keys.
+  bracketed paste; `@name` mentions members. Word and line editing keys (Ctrl+W or Alt+Backspace deletes the word before the
+  cursor).
 - **Edit and delete your own messages:** select one and press `e` (it loads into the input; Enter saves, Esc cancels) or `d` (asks
   `y` to confirm). Others see edits and deletions live. `/edit N` and `/delete N` do the same by number.
 - **Search everything:** Ctrl+F (or `/search words`) searches channel names (instantly), people you have seen (from their profiles) and
@@ -150,7 +153,8 @@ The full behaviour, for when the feature list above is not enough.
   reported rather than guessed.
 - **Your typing shows:** others see `<your name> is typing…` while you write (once every three seconds; not for `/commands` or
   edits). `--no-typing` turns it off.
-- **Help on screen:** F1 lists the keys, F2 the commands. Esc closes a panel first, then cancels a reply, then leaves a thread.
+- **Help on screen:** F1 lists the keys, F2 the commands. Esc closes a panel first, then cancels a reply, then leaves a thread;
+  after that it steps back a pane at a time — from the input to the message list, and from the message list to the channel list.
 - **Plugins:** a plugin is a separate process (in any language) that adds `/commands`, a status item, header badges, per-channel and
   per-message marks, and panels; buzzr hot-reloads it when its files change. Put a folder with a `plugin.json` in
   `~/.config/buzzr/plugins` (or point `--plugins-dir`/`BUZZR_PLUGINS_DIR` elsewhere). `/plugins` lists what loaded, and
@@ -171,7 +175,7 @@ The full behaviour, for when the feature list above is not enough.
 | Enter | open the channel / open the thread / send |
 | r, c, e, d | reply in the thread, copy, edit, delete the selected message (e and d: yours only) |
 | Ctrl+F | search channels, people and messages |
-| Esc | close a panel, cancel a reply, leave a thread |
+| Esc | close a panel, cancel a reply, leave a thread, then step back to the channel list |
 | F1, F2 | keys, help |
 | Ctrl+R, Ctrl+O | reload, load older |
 | Ctrl+Q, Ctrl+C | quit |
