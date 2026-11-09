@@ -197,6 +197,9 @@ pub struct Store {
     pub summaries: HashMap<String, Summary>,
     /// target message -> emoji -> reactor pubkeys
     pub reactions: HashMap<String, BTreeMap<String, HashSet<String>>>,
+    /// reaction event id -> (target message, emoji, reactor). A `kind:5` deletion names the reaction event, not the message,
+    /// so this is how the removal finds the reaction to undo.
+    pub reaction_ids: HashMap<String, (String, String, String)>,
     /// The next page of older top-level messages, from the relay's window bounds (`None` once exhausted).
     pub next_cursor: Option<(u64, String)>,
     pub has_more: bool,
@@ -232,16 +235,31 @@ impl Store {
             KIND_DELETION | KIND_DELETE_MESSAGE => {
                 let mut changed = false;
                 for t in e.tags.iter().filter(|t| t.first().map(String::as_str) == Some("e")) {
-                    if let Some(target) = t.get(1) {
-                        self.deleted.insert(target.clone());
-                        changed |= self.msgs.remove(target).is_some();
+                    let Some(target) = t.get(1) else { continue };
+                    // A deletion naming a reaction event undoes that reaction (NIP-09 over a kind:7); the target is a reaction,
+                    // not a message, so it is not in `msgs` and must be pruned from `reactions` instead.
+                    if let Some((msg, emoji, reactor)) = self.reaction_ids.remove(target) {
+                        if let Some(bucket) = self.reactions.get_mut(&msg).and_then(|m| m.get_mut(&emoji)) {
+                            bucket.remove(&reactor);
+                            if bucket.is_empty() {
+                                if let Some(m) = self.reactions.get_mut(&msg) {
+                                    m.remove(&emoji);
+                                }
+                            }
+                        }
+                        changed = true;
+                        continue;
                     }
+                    self.deleted.insert(target.clone());
+                    changed |= self.msgs.remove(target).is_some();
                 }
                 changed
             }
             KIND_REACTION => {
                 let Some(target) = e.tag("e") else { return false };
-                self.reactions.entry(target.to_owned()).or_default().entry(e.content.clone()).or_default().insert(e.pubkey.clone())
+                let added = self.reactions.entry(target.to_owned()).or_default().entry(e.content.clone()).or_default().insert(e.pubkey.clone());
+                self.reaction_ids.insert(e.id.clone(), (target.to_owned(), e.content.clone(), e.pubkey.clone()));
+                added
             }
             KIND_THREAD_SUMMARY => match Summary::from_event(e) {
                 Some((root, s)) => {
@@ -407,6 +425,27 @@ pub mod tests {
         assert!(s.apply(&del));
         assert!(s.timeline().is_empty());
         assert!(!s.apply(&ev("a", 1, "typo", &[])), "a deleted message does not come back");
+    }
+
+    #[test]
+    fn a_deletion_naming_a_reaction_removes_it() {
+        let mut s = Store::default();
+        s.apply(&ev("a", 1, "one", &[]));
+        let react = |id: &str, who: &str, emoji: &str| Ev { kind: 7, pubkey: who.into(), content: emoji.into(), tags: vec![vec!["e".into(), "a".into()]], ..ev(id, 6, "", &[]) };
+        assert!(s.apply(&react("r1", "alice", "👍")));
+        assert!(s.apply(&react("r2", "bob", "👍")));
+        assert!(s.apply(&react("r3", "bob", "🎉")));
+        assert_eq!(s.reaction_summary("a"), vec![("🎉".to_string(), 1), ("👍".to_string(), 2)]);
+        // A removal (kind:5) names the reaction event, not the message: only that reactor's reaction goes.
+        let remove = |id: &str, target: &str| Ev { kind: 5, pubkey: "bob".into(), tags: vec![vec!["e".into(), target.into()]], ..ev(id, 7, "", &[]) };
+        assert!(s.apply(&remove("d1", "r3")), "removing a reaction is a visible change");
+        assert_eq!(s.reaction_summary("a"), vec![("👍".to_string(), 2)]);
+        assert_eq!(s.timeline().len(), 1, "the message itself is untouched");
+        assert!(!s.apply(&remove("d2", "r3")), "the same removal again changes nothing");
+        // Emptying an emoji's bucket drops it from the summary entirely.
+        s.apply(&remove("d3", "r1"));
+        s.apply(&remove("d4", "r2"));
+        assert!(s.reaction_summary("a").is_empty(), "no reactions left to show");
     }
 
     #[test]
