@@ -3,6 +3,7 @@
 //! `App::handle` takes an event and returns the requests (`Cmd`) the caller should run; it never touches the network or the
 //! terminal itself, so the whole behaviour is unit tested with synthetic events.
 
+use crate::config::ReadState;
 use crate::contrib::{self, PanelRow, PluginCmd, PluginEvent, PluginMeta, PluginState, Projection, Registry};
 use crate::editor::Editor;
 use crate::list::{self, Layout, ListState, Rendered};
@@ -140,8 +141,8 @@ pub enum Cmd {
     /// One person's profile card (`kind:0`).
     LoadProfile(String),
     Search { query: String, seq: u64 },
-    /// Write the last-read position per channel to disk (the loop owns the file).
-    SaveRead(HashMap<String, u64>),
+    /// Write the last-read positions (channels and threads) to disk (the loop owns the file).
+    SaveRead(ReadState),
     /// Work for the plugin runtime (start, reload, or send a command to a plugin process).
     Plugin(PluginCmd),
 }
@@ -202,6 +203,10 @@ pub struct App {
     pub unread: HashMap<String, u32>,
     /// The last-read position per channel: the `created_at` we have read through, loaded from disk at startup.
     pub read: HashMap<String, u64>,
+    /// The last-read position per thread, keyed by the id of the message the thread starts from: the `created_at` of the newest
+    /// reply we have seen in it. A thread with replies newer than this is marked unread in the message list. A thread never
+    /// opened has no entry, and is not marked (unread starts at zero, as it does for a channel).
+    pub thread_read: HashMap<String, u64>,
     /// Where each channel's last visit stopped, for the "new messages" line: taken from `read` as a channel is opened and kept
     /// while we stay in it, so reading on does not move the line under the reader.
     new_since: HashMap<String, u64>,
@@ -282,6 +287,7 @@ impl App {
             conn: Conn::Connecting,
             unread: HashMap::new(),
             read: HashMap::new(),
+            thread_read: HashMap::new(),
             new_since: HashMap::new(),
             typing: HashMap::new(),
             flash: None,
@@ -408,9 +414,15 @@ impl App {
 
     // ---- read state ------------------------------------------------------------------------------------------------------
 
-    /// Take the last-read position loaded from disk; the loop fills this in before the first event, tests set it directly.
-    pub fn seed_read(&mut self, read: HashMap<String, u64>) {
-        self.read = read;
+    /// Take the last-read positions loaded from disk; the loop fills this in before the first event, tests set it directly.
+    pub fn seed_read(&mut self, state: ReadState) {
+        self.read = state.channels;
+        self.thread_read = state.threads;
+    }
+
+    /// The whole read state (channels and threads), for `Cmd::SaveRead`.
+    fn read_state(&self) -> ReadState {
+        ReadState { channels: self.read.clone(), threads: self.thread_read.clone() }
     }
 
     /// Record that a channel has been read through its newest loaded message, and return the command that writes the new
@@ -422,7 +434,23 @@ impl App {
             return None;
         }
         self.read.insert(channel.to_owned(), newest);
-        Some(Cmd::SaveRead(self.read.clone()))
+        Some(Cmd::SaveRead(self.read_state()))
+    }
+
+    /// Record that a thread has been read through its newest reply, and return the command that writes the new position to disk
+    /// when it moved. The newest reply is the newest one loaded, or what the relay's summary says when the replies are not
+    /// loaded; a thread with no replies yet has nothing to record.
+    fn read_through_thread(&mut self, channel: &str, root: &str) -> Option<Cmd> {
+        let newest = {
+            let store = self.stores.get(channel)?;
+            let loaded = store.thread(root).iter().filter(|m| m.id != root).map(|m| m.created_at).max();
+            loaded.max(store.summaries.get(root).and_then(|s| s.last_reply_at))
+        }?;
+        if newest <= self.thread_read.get(root).copied().unwrap_or(0) {
+            return None;
+        }
+        self.thread_read.insert(root.to_owned(), newest);
+        Some(Cmd::SaveRead(self.read_state()))
     }
 
     /// The first message on screen that arrived after the last visit stopped, so the view can draw the divider above it.
@@ -432,6 +460,39 @@ impl App {
         }
         let frontier = *self.new_since.get(&self.channel()?.id)?;
         self.shown().iter().position(|m| m.pubkey != self.me && m.created_at > frontier)
+    }
+
+    /// Every thread root a channel's store knows about: what the relay told us about in a summary, plus any reply we have
+    /// loaded. Used to mark them all read at once.
+    fn thread_roots(store: &Store) -> HashSet<String> {
+        let mut roots: HashSet<String> = store.summaries.keys().cloned().collect();
+        for m in store.msgs.values() {
+            if m.parent().is_some() {
+                roots.insert(store.thread_root(m).to_owned());
+            }
+        }
+        roots
+    }
+
+    /// Mark every thread in a channel (or in every channel, when `channel` is `None`) read as of `at`: `/read` clears the thread
+    /// marks too, so the message list and the channel badge agree. Returns whether anything moved.
+    fn mark_threads_read(&mut self, channel: Option<&str>, at: u64) -> bool {
+        let ids: Vec<String> = match channel {
+            Some(id) => vec![id.to_owned()],
+            None => self.stores.keys().cloned().collect(),
+        };
+        let mut changed = false;
+        for id in ids {
+            let roots: Vec<String> = self.stores.get(&id).map(|s| Self::thread_roots(s).into_iter().collect()).unwrap_or_default();
+            for root in roots {
+                let entry = self.thread_read.entry(root).or_insert(0);
+                if *entry < at {
+                    *entry = at;
+                    changed = true;
+                }
+            }
+        }
+        changed
     }
 
     /// `/read` marks the channel on screen read; `/read all` marks every channel read as of now.
@@ -444,17 +505,20 @@ impl App {
                 let at = self.read.get(&id).copied().unwrap_or(0).max(now);
                 self.read.insert(id, at);
             }
+            self.mark_threads_read(None, now);
             self.unread.clear();
             self.new_since.clear();
             self.content_changed();
             self.flash("all channels marked read");
-            cmds.push(Cmd::SaveRead(self.read.clone()));
+            cmds.push(Cmd::SaveRead(self.read_state()));
             return cmds;
         }
         let Some(id) = self.channel().map(|c| c.id.clone()) else {
             self.flash("no channel is open");
             return cmds;
         };
+        // The threads in this channel are read too: the marks in the message list go with the badge.
+        let threads_moved = self.mark_threads_read(Some(&id), now_secs());
         match self.read_through(&id) {
             Some(cmd) => {
                 self.new_since.remove(&id);
@@ -466,7 +530,12 @@ impl App {
                 self.unread.remove(&id);
                 self.new_since.remove(&id);
                 self.content_changed();
-                self.flash("already read");
+                if threads_moved {
+                    self.flash("marked read");
+                    cmds.push(Cmd::SaveRead(self.read_state()));
+                } else {
+                    self.flash("already read");
+                }
             }
         }
         cmds
@@ -498,7 +567,7 @@ impl App {
         self.content_changed();
         let n = self.selected_number().unwrap_or(0);
         self.flash(format!("marked unread from #{n}"));
-        vec![Cmd::SaveRead(self.read.clone())]
+        vec![Cmd::SaveRead(self.read_state())]
     }
 
     // ---- layout ----------------------------------------------------------------------------------------------------------
@@ -528,6 +597,21 @@ impl App {
         }
     }
 
+    /// The badge the message list puts on a thread row when replies arrived after the last visit to that thread: `● 2 new`
+    /// when the replies are loaded and can be counted, `● new` when only the relay's summary says so (they are not loaded yet).
+    /// `None` when the thread is read, or has never been opened: with no stored position nothing is marked, as for a channel.
+    fn thread_unread_badge(&self, store: &Store, root: &str) -> Option<Span<'static>> {
+        let at = *self.thread_read.get(root)?;
+        let loaded = store.thread(root).iter().filter(|m| m.id != root && m.pubkey != self.me && m.created_at > at).count();
+        let newer = store.summaries.get(root).and_then(|s| s.last_reply_at).map(|t| t > at).unwrap_or(false);
+        let text = match (loaded, newer) {
+            (0, false) => return None,
+            (0, true) => "  ● new".to_owned(),
+            (n, _) => format!("  ● {n} new"),
+        };
+        Some(Span::styled(text, Style::default().fg(crate::theme::get().warn).add_modifier(Modifier::BOLD)))
+    }
+
     fn render_message(&self, store: &Store, m: &Ev, number: usize, width: usize) -> Rendered {
         let th = crate::theme::get();
         let dim = Style::default().fg(th.dim);
@@ -554,6 +638,9 @@ impl App {
                 head.push(Span::styled(format!("  💬 {} {}", count, if count == 1 { "reply" } else { "replies" }), Style::default().fg(crate::theme::get().warn)));
                 if let Some(at) = last {
                     head.push(Span::styled(format!(" · last {}", self.fmt_time(at)), dim));
+                }
+                if let Some(badge) = self.thread_unread_badge(store, &m.id) {
+                    head.push(badge);
                 }
             }
         }
@@ -743,7 +830,13 @@ impl App {
         let channel = c.id.clone();
         self.enter_view(View::Thread(root.clone()));
         self.set_focus(Focus::Messages);
-        vec![Cmd::LoadThread { channel, root }]
+        let mut cmds = Vec::new();
+        // opening a thread reads it: the replies are on screen, so its row in the channel stops being marked unread
+        if let Some(cmd) = self.read_through_thread(&channel, &root) {
+            cmds.push(cmd);
+        }
+        cmds.push(Cmd::LoadThread { channel, root });
+        cmds
     }
 
     fn back_to_channel(&mut self) {
@@ -1067,11 +1160,16 @@ impl App {
         };
         let visible = self.channel().map(|c| c.id == channel).unwrap_or(false);
         let mut cmds = Vec::new();
-        let _ = root;
         if visible {
             self.relayout(self.msg_width(), |app| cmds.extend(app.apply_events(&channel, &evs)));
         } else {
             cmds.extend(self.apply_events(&channel, &evs));
+        }
+        // the thread we have open is read as far as what just arrived, so going back does not mark it unread
+        if visible && matches!(&self.view, View::Thread(r) if r == &root) {
+            if let Some(cmd) = self.read_through_thread(&channel, &root) {
+                cmds.push(cmd);
+            }
         }
         cmds
     }
@@ -1136,6 +1234,13 @@ impl App {
                     cmds.push(cmd);
                 }
             });
+            // a reply in the thread we have open is read as it appears too; one in another thread stays marked unread
+            if let View::Thread(root) = &self.view {
+                let root = root.clone();
+                if let Some(cmd) = self.read_through_thread(&channel, &root) {
+                    cmds.push(cmd);
+                }
+            }
         } else {
             cmds.extend(self.apply_events(&channel, std::slice::from_ref(&e)));
         }

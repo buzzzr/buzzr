@@ -375,7 +375,7 @@ fn app_with_stored_read() -> App {
     let mut app = App::new(ME.into(), false, chrono_tz::UTC);
     app.view_h = 10;
     app.areas = Areas { channels: Rect::new(0, 1, 20, 20), msgs: Rect::new(20, 1, 80, 10), input: Rect::new(20, 12, 80, 3) };
-    app.seed_read([("c2".to_owned(), 500u64)].into_iter().collect());
+    app.seed_read(ReadState { channels: [("c2".to_owned(), 500u64)].into_iter().collect(), threads: HashMap::new() });
     app
 }
 
@@ -388,6 +388,13 @@ fn channels_are(app: &mut App) -> Vec<Cmd> {
 fn has_divider(app: &mut App) -> bool {
     let l = app.layout(78);
     l.items.iter().any(|r| r.lines.iter().any(|line| line.spans.iter().any(|s| s.content.contains("new messages"))))
+}
+
+/// The head line of a message row, where the reply count and the unread mark are drawn.
+fn row_text(app: &mut App, id: &str) -> String {
+    let l = app.layout(78);
+    let i = l.index_of(id).unwrap_or_else(|| panic!("{id} is not in the list"));
+    l.items[i].lines[0].text()
 }
 
 /// Open "random" the way a person does and feed it its first page, `n` messages newer than the stored position.
@@ -457,7 +464,7 @@ fn u_marks_the_channel_unread_from_the_selected_message_and_writes_the_earlier_p
     assert_eq!(app.unread.get("c1"), Some(&2), "the selected message and the newer one are unread");
     assert_eq!(app.read.get("c1"), Some(&1000), "the position is just before the selected message");
     let saved = cmds.iter().find_map(|c| match c { Cmd::SaveRead(m) => Some(m.clone()), _ => None }).expect("marking unread writes the earlier position");
-    assert_eq!(saved.get("c1"), Some(&1000));
+    assert_eq!(saved.channels.get("c1"), Some(&1000));
     assert_eq!(app.flash_text(), Some("marked unread from #2"));
     let l = app.layout(78);
     let i = l.index_of("m001").expect("the selected message is in the list");
@@ -481,7 +488,7 @@ fn read_marks_the_channel_and_writes_the_position() {
     // a message in the open channel is read as it arrives
     let cmds = app.handle(AppEvent::Live(Live::Event(msg("y1", 9500, "alice", "hey", &[&["h", "c1"]]))));
     let saved = cmds.iter().find_map(|c| match c { Cmd::SaveRead(m) => Some(m.clone()), _ => None }).expect("reading the open channel writes the position");
-    assert_eq!(saved.get("c1"), Some(&9500));
+    assert_eq!(saved.channels.get("c1"), Some(&9500));
     // a second /read with nothing new says so instead of writing the same file again
     press(&mut app, KeyCode::Tab);
     type_text(&mut app, "/read");
@@ -501,8 +508,144 @@ fn read_all_clears_every_badge_and_writes_every_position() {
     assert!(app.unread.is_empty());
     let saved = cmds.iter().find_map(|c| match c { Cmd::SaveRead(m) => Some(m.clone()), _ => None }).expect("the positions are written");
     for id in ["c1", "c2", "dm1"] {
-        assert!(saved.get(id).map(|at| *at > 9000).unwrap_or(false), "{id} is marked read: {saved:?}");
+        assert!(saved.channels.get(id).map(|at| *at > 9000).unwrap_or(false), "{id} is marked read: {saved:?}");
     }
+}
+
+// ---- thread unread ----------------------------------------------------------------------------------------------------
+
+/// A reply delivered live while we are looking at the channel: it lands in the store without reading any thread through.
+fn live_reply(app: &mut App, id: &str, at: u64, who: &str, root: &str) {
+    app.handle(AppEvent::Live(Live::Event(reply(id, at, who, root))));
+}
+
+/// A channel with a stored read position, so that both the channel and the threads in it have somewhere to count from.
+fn seed_threads(app: &mut App, threads: &[(&str, u64)]) {
+    let channels = [("c1".to_owned(), app.read.get("c1").copied().unwrap_or(0))].into_iter().collect();
+    let threads = threads.iter().map(|(id, at)| ((*id).to_owned(), *at)).collect();
+    app.seed_read(ReadState { channels, threads });
+}
+
+#[test]
+fn a_thread_with_replies_newer_than_its_read_position_is_marked_unread() {
+    let mut app = app_with(2);
+    seed_threads(&mut app, &[("m000", 1500)]);
+    live_reply(&mut app, "r1", 2000, "alice", "m000");
+    live_reply(&mut app, "r2", 3000, BOB, "m000");
+    let text = row_text(&mut app, "m000");
+    assert!(text.contains("💬 2 replies"), "{text}");
+    assert!(text.contains("● 2 new"), "the replies are counted in the mark: {text}");
+    assert!(!row_text(&mut app, "m001").contains("new"), "a message with no replies is not marked");
+}
+
+#[test]
+fn a_thread_that_was_never_read_is_not_marked() {
+    let mut app = app_with(2);
+    // no stored thread position: unread starts at zero, so a reply on its own does not mark the thread
+    live_reply(&mut app, "r1", 2000, "alice", "m000");
+    let text = row_text(&mut app, "m000");
+    assert!(text.contains("💬 1 reply"), "{text}");
+    assert!(!text.contains("new"), "a thread with no stored position is not marked: {text}");
+}
+
+#[test]
+fn a_thread_only_the_relay_knows_about_is_marked_new_rather_than_counted() {
+    let mut app = app_with(2);
+    seed_threads(&mut app, &[("m000", 1000)]);
+    let summary = Ev {
+        kind: crate::model::KIND_THREAD_SUMMARY,
+        content: r#"{"reply_count":3,"descendant_count":3,"last_reply_at":5000,"participants":["alice"]}"#.into(),
+        tags: vec![vec!["e".into(), "m000".into()], vec!["d".into(), "m000".into()]],
+        ..msg("s1", 5001, "alice", "", &[])
+    };
+    app.handle(AppEvent::Live(Live::Event(summary)));
+    let text = row_text(&mut app, "m000");
+    assert!(text.contains("💬 3 replies"), "the relay's count is shown: {text}");
+    assert!(text.contains("● new"), "with the replies not loaded the mark cannot count them: {text}");
+    assert!(!text.contains("● 3 new"), "{text}");
+}
+
+#[test]
+fn opening_a_thread_reads_it_and_clears_its_mark() {
+    let mut app = app_with(2);
+    seed_threads(&mut app, &[("m000", 1500)]);
+    live_reply(&mut app, "r1", 2000, "alice", "m000");
+    assert!(row_text(&mut app, "m000").contains("● 1 new"));
+    app.state.selected = Some("m000".into());
+    let cmds = press(&mut app, KeyCode::Enter);
+    assert_eq!(app.view, View::Thread("m000".into()));
+    let saved = cmds.iter().find_map(|c| match c { Cmd::SaveRead(m) => Some(m.clone()), _ => None }).expect("opening the thread writes the new position");
+    assert_eq!(saved.threads.get("m000"), Some(&2000), "read through the newest reply");
+    press(&mut app, KeyCode::Esc);
+    assert_eq!(app.view, View::Channel);
+    assert!(!row_text(&mut app, "m000").contains("new"), "the mark is gone once the thread has been opened");
+}
+
+#[test]
+fn reading_one_thread_leaves_the_others_marked() {
+    let mut app = app_with(3);
+    seed_threads(&mut app, &[("m000", 1000), ("m001", 1000)]);
+    // a reply in each thread while we are looking at the channel: both are marked
+    live_reply(&mut app, "a1", 2000, "alice", "m000");
+    live_reply(&mut app, "b1", 2100, BOB, "m001");
+    assert!(row_text(&mut app, "m000").contains("● 1 new"));
+    assert!(row_text(&mut app, "m001").contains("● 1 new"));
+    // reading m000 clears m000 and nothing else
+    app.state.selected = Some("m000".into());
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Esc);
+    assert!(!row_text(&mut app, "m000").contains("new"), "the thread we opened is read");
+    assert!(row_text(&mut app, "m001").contains("● 1 new"), "the thread we did not open stays marked");
+    // a reply that arrives in the thread on screen is read as it appears
+    app.state.selected = Some("m001".into());
+    press(&mut app, KeyCode::Enter);
+    live_reply(&mut app, "b2", 4000, "alice", "m001");
+    assert_eq!(app.thread_read.get("m001"), Some(&4000), "the open thread reads through the live reply");
+    press(&mut app, KeyCode::Esc);
+    assert!(!row_text(&mut app, "m001").contains("new"), "and it is not marked when we come back");
+}
+
+#[test]
+fn read_clears_thread_marks_along_with_the_channel() {
+    let mut app = app_with(2);
+    seed_threads(&mut app, &[("m000", 1000)]);
+    live_reply(&mut app, "r1", 2000, "alice", "m000");
+    assert!(row_text(&mut app, "m000").contains("● 1 new"));
+    press(&mut app, KeyCode::Tab);
+    type_text(&mut app, "/read");
+    let cmds = press(&mut app, KeyCode::Enter);
+    let saved = cmds.iter().find_map(|c| match c { Cmd::SaveRead(m) => Some(m.clone()), _ => None }).expect("marking read writes the positions");
+    assert!(saved.threads.get("m000").map(|at| *at > 2000).unwrap_or(false), "the thread position moved past its replies: {saved:?}");
+    assert!(!row_text(&mut app, "m000").contains("new"), "the thread mark goes with the channel badge");
+}
+
+#[test]
+fn read_all_clears_thread_marks_too() {
+    let mut app = app_with(2);
+    seed_threads(&mut app, &[("m000", 1000)]);
+    live_reply(&mut app, "r1", 2000, "alice", "m000");
+    press(&mut app, KeyCode::Tab);
+    type_text(&mut app, "/read all");
+    let cmds = press(&mut app, KeyCode::Enter);
+    let saved = cmds.iter().find_map(|c| match c { Cmd::SaveRead(m) => Some(m.clone()), _ => None }).expect("the positions are written");
+    assert!(saved.threads.get("m000").map(|at| *at > 9000).unwrap_or(false), "every thread is marked read: {saved:?}");
+    assert!(!row_text(&mut app, "m000").contains("new"));
+}
+
+#[test]
+fn thread_read_positions_round_trip_through_save_and_seed() {
+    let mut app = app_with(2);
+    seed_threads(&mut app, &[("m000", 1500)]);
+    live_reply(&mut app, "r1", 2000, "alice", "m000");
+    app.state.selected = Some("m000".into());
+    let cmds = press(&mut app, KeyCode::Enter);
+    let saved = cmds.iter().find_map(|c| match c { Cmd::SaveRead(m) => Some(m.clone()), _ => None }).expect("opening the thread writes the position");
+    assert_eq!(saved.threads.get("m000"), Some(&2000));
+    // what was written is what a later start reads back
+    let mut restarted = app_with(2);
+    restarted.seed_read(saved.clone());
+    assert_eq!(restarted.thread_read.get("m000"), Some(&2000), "the thread position comes back");
+    assert_eq!(restarted.read.get("c1"), saved.channels.get("c1"), "the channel position comes back with it");
 }
 
 #[test]
