@@ -239,17 +239,20 @@ fn typing_a_message_sends_it_to_the_channel_with_mentions_resolved() {
 }
 
 #[test]
-fn shift_enter_and_ctrl_j_add_lines_enter_sends_them() {
+fn shift_alt_enter_and_ctrl_j_add_lines_enter_sends_them() {
     let mut app = app_with(1);
     press(&mut app, KeyCode::Tab);
     type_text(&mut app, "one");
     app.handle(AppEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT)));
     type_text(&mut app, "two");
-    app.handle(AppEvent::Key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL)));
+    // Alt+Enter is what the footer offers where the terminal cannot report Shift+Enter.
+    app.handle(AppEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT)));
     type_text(&mut app, "three");
-    assert_eq!(app.editor.text(), "one\ntwo\nthree");
+    app.handle(AppEvent::Key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL)));
+    type_text(&mut app, "four");
+    assert_eq!(app.editor.text(), "one\ntwo\nthree\nfour");
     let cmds = press(&mut app, KeyCode::Enter);
-    assert!(matches!(&cmds[0], Cmd::Send { text, .. } if text == "one\ntwo\nthree"));
+    assert!(matches!(&cmds[0], Cmd::Send { text, .. } if text == "one\ntwo\nthree\nfour"));
 }
 
 #[test]

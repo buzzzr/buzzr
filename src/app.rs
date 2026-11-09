@@ -229,6 +229,11 @@ pub struct App {
     pub last_live: Option<Instant>,
     /// Tell others when we are typing.
     pub send_typing: bool,
+    /// Whether the terminal confirmed it reports Shift+Enter separately from Enter (the kitty keyboard
+    /// protocol): the loop asks the terminal once at startup and fills this in, tests set it directly.
+    /// Terminals without it send the same bytes for Shift+Enter and Enter, so there is nothing to bind;
+    /// the footer then names Alt+Enter, which every terminal reports. See `README.md`, "Writing".
+    pub keyboard_enhanced: bool,
     typing_sent: Option<(Instant, (String, Option<String>))>,
     /// The message being edited in the input box, and a message waiting for a yes/no before it is deleted.
     pub editing: Option<String>,
@@ -306,6 +311,7 @@ impl App {
             tick_count: 0,
             last_live: None,
             send_typing: true,
+            keyboard_enhanced: false,
             typing_sent: None,
             editing: None,
             confirm_delete: None,
