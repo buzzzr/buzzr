@@ -90,7 +90,7 @@ buzzr
 ```
 
 The first time, buzzr asks for your relay address and private key, and how to keep the key. After that it opens straight into your channels.
-Press **F1** for the keys and **F2** for the commands. Press **Tab** to move between the channel list, the messages and the input.
+Press **F1** for the keys and **F2** for the commands. Press **Tab** to move between the channel list, the messages and the input; the arrow keys get between the messages and the input too — `Up` from an empty input lands on the newest message, `Down` on the newest message goes back to the input.
 
 The default colour scheme is `buzz-dark`; set `BUZZR_THEME=buzz-light` for the light one:
 
@@ -179,6 +179,7 @@ The full behaviour, for when the feature list above is not enough.
 |---|---|
 | Tab / Shift+Tab | switch between channels, messages and the input |
 | Up / Down | select a channel or message (Up at the top of a channel loads older messages) |
+| Up / Down, at the edges | nothing typed in the input, Up goes to the messages on the newest one; on the newest message, Down goes back to the input |
 | Enter | open the channel / open the thread (which reads it) / send |
 | r, c, u, e, d | reply in the thread, copy, mark unread, edit, delete the selected message (e and d: yours only) |
 | Ctrl+F | search channels, people and messages |

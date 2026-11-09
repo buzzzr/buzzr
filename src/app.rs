@@ -397,6 +397,17 @@ impl App {
         self.focus = f;
     }
 
+    /// Put the message-list selection on the newest message and follow the bottom, where End leaves it. Used when the
+    /// keyboard arrives in the list from the input, so the arrow keys land on what you were just about to reply to.
+    fn select_newest(&mut self) {
+        let Some((w, layout)) = self.layout.take() else { return };
+        if !layout.items.is_empty() {
+            list::select(&layout, &mut self.state, self.view_h, layout.items.len() - 1);
+            self.state.scroll = layout.max_scroll(self.view_h);
+        }
+        self.layout = Some((w, layout));
+    }
+
     pub fn flash_text(&self) -> Option<&str> {
         self.flash.as_ref().filter(|(_, t)| t.elapsed() < FLASH).map(|(s, _)| s.as_str())
     }
@@ -1392,7 +1403,17 @@ impl App {
                 }
                 list::move_selection(&layout, &mut self.state, view_h, -1);
             }
-            KeyCode::Down => list::move_selection(&layout, &mut self.state, view_h, 1),
+            KeyCode::Down => {
+                // Down on the newest message leaves the list for the input: the arrow keys go between the two panes
+                // without a Tab cycle, the mirror of Up in an empty input (see `key_input`).
+                let at_bottom = list::selected_index(&layout, &self.state).map(|i| i + 1 == layout.items.len()).unwrap_or(true);
+                if at_bottom {
+                    self.layout = Some((w, layout));
+                    self.set_focus(Focus::Input);
+                    return Vec::new();
+                }
+                list::move_selection(&layout, &mut self.state, view_h, 1);
+            }
             KeyCode::PageUp => {
                 list::scroll_by(&layout, &mut self.state, view_h, -(view_h as isize - 2));
                 list::select_visible(&layout, &mut self.state, view_h);
@@ -1551,6 +1572,12 @@ impl App {
             KeyCode::Right => self.editor.right(),
             KeyCode::Home => self.editor.home(),
             KeyCode::End => self.editor.end(),
+            KeyCode::Up if self.editor.is_empty() => {
+                // Nothing typed: Up leaves the input for the message list, on the newest message, so the arrow keys
+                // get from the composer to the messages without a Tab cycle (see the Down arm in `key_messages`).
+                self.set_focus(Focus::Messages);
+                self.select_newest();
+            }
             KeyCode::Up => {
                 self.editor.up(width);
             }
