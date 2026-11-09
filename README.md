@@ -122,6 +122,7 @@ The full behaviour, for when the feature list above is not enough.
 - **Channels and DMs** on the left (DMs are labelled with the other person, `✉ name`), with unread counts. An open channel is
   marked `#` and a private (restricted) one `*`; DMs get no marker. The bar marks the
   channel on screen; while the list has focus it follows the cursor, and leaving the list without opening a channel puts it back.
+  The keyboard starts on the channel list, so Up/Down and Enter work as soon as buzzr opens.
   `/dm name` opens the DM you already have with someone, or starts a new one; a name from a channel or an npub both work.
 - **Unread that survives a restart:** the last-read position per channel lives in `~/.config/buzzr/read-state.json`, so the
   counts are there again next time (each one asked of the relay on startup) and a `new messages` line marks where the unseen
@@ -150,7 +151,8 @@ The full behaviour, for when the feature list above is not enough.
   reported rather than guessed.
 - **Your typing shows:** others see `<your name> is typing…` while you write (once every three seconds; not for `/commands` or
   edits). `--no-typing` turns it off.
-- **Help on screen:** F1 lists the keys, F2 the commands. Esc closes a panel first, then cancels a reply, then leaves a thread.
+- **Help on screen:** F1 lists the keys, F2 the commands. Esc closes a panel first, then cancels a reply, then leaves a thread;
+  after that it steps back a pane at a time — from the input to the message list, and from the message list to the channel list.
 - **Plugins:** a plugin is a separate process (in any language) that adds `/commands`, a status item, header badges, per-channel and
   per-message marks, and panels; buzzr hot-reloads it when its files change. Put a folder with a `plugin.json` in
   `~/.config/buzzr/plugins` (or point `--plugins-dir`/`BUZZR_PLUGINS_DIR` elsewhere). `/plugins` lists what loaded, and
@@ -171,7 +173,7 @@ The full behaviour, for when the feature list above is not enough.
 | Enter | open the channel / open the thread / send |
 | r, c, e, d | reply in the thread, copy, edit, delete the selected message (e and d: yours only) |
 | Ctrl+F | search channels, people and messages |
-| Esc | close a panel, cancel a reply, leave a thread |
+| Esc | close a panel, cancel a reply, leave a thread, then step back to the channel list |
 | F1, F2 | keys, help |
 | Ctrl+R, Ctrl+O | reload, load older |
 | Ctrl+Q, Ctrl+C | quit |

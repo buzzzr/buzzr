@@ -360,7 +360,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
 
 pub const KEYS: &[(&str, &str)] = &[
     ("Tab / Shift+Tab", "switch between channels, messages and the input"),
-    ("Esc", "close a panel, cancel a reply, leave a thread (in that order)"),
+    ("Esc", "close a panel, cancel a reply, leave a thread, then step back to the channels"),
     ("F1", "this list of keys"),
     ("F2", "help: commands and how things work"),
     ("Ctrl+R", "reload the open channel or thread"),
@@ -576,6 +576,9 @@ mod tests {
         app.handle(AppEvent::Names(Ok([("bob".to_string(), "Bob".to_string())].into())));
         app.handle(AppEvent::Window { channel: "c1".into(), cursor: None, result: Ok(Window { events: vec![m1, m2, r], has_more: true, next_cursor: Some((1, "a".into())) }) });
         app.handle(AppEvent::Live(Live::Up));
+        // a fresh app starts with the keyboard on the channel list; these cases draw the message pane, so put the
+        // cursor there the way a user does (Tab) before handing the app over.
+        app.handle(AppEvent::Key(ratatui::crossterm::event::KeyEvent::new(ratatui::crossterm::event::KeyCode::Tab, ratatui::crossterm::event::KeyModifiers::NONE)));
         app
     }
 
