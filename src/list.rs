@@ -63,6 +63,15 @@ impl Layout {
     pub fn max_scroll(&self, view_h: usize) -> usize {
         self.total.saturating_sub(view_h)
     }
+
+    /// The bottom of the last message as a line number, not counting its trailing separator: where the channel ends.
+    /// It is what has to be on screen for the reader to have reached the end.
+    pub fn last_bottom(&self) -> usize {
+        match self.items.len() {
+            0 => 0,
+            n => self.offsets[n - 1] + self.items[n - 1].lines.len(),
+        }
+    }
 }
 
 /// Where the reader is, in terms that survive a change of content.
@@ -178,6 +187,14 @@ mod tests {
         assert_eq!(l.at_line(9), Some((3, Some(0))));
         assert_eq!(l.at_line(30), None);
         assert_eq!(l.index_of("m4"), Some(4));
+    }
+
+    #[test]
+    fn the_last_bottom_is_the_end_of_the_newest_message() {
+        let l = ten();
+        assert_eq!(l.last_bottom(), 29, "m9's body ends at line 29; line 29 is its separator");
+        assert_eq!(l.last_bottom(), l.total - 1);
+        assert_eq!(Layout::default().last_bottom(), 0, "an empty list has nothing below it");
     }
 
     #[test]

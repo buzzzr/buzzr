@@ -21,6 +21,9 @@ use std::time::{Duration, Instant};
 /// The pane the app thinks it is drawing into, and the size the screenshots use.
 const ROWS: u16 = 36;
 const COLS: u16 = 110;
+/// A pane short enough that a channel's history is taller than the message pane. The fake relay gives every
+/// channel a single message, so only in a short pane can the newest one fall out of view.
+const SHORT_ROWS: u16 = 14;
 /// Any fixed key: the fake relay accepts AUTH without checking it.
 const KEY: &str = "0505050505050505050505050505050505050505050505050505050505050505";
 /// How long to wait for the screen to show something. Generous: a loaded machine must not flake.
@@ -117,11 +120,20 @@ impl Session {
         Session::start_in(relay, fresh_config_dir(), true)
     }
 
+    /// A session on a pty short enough that the newest message can leave the view (see `SHORT_ROWS`).
+    fn start_short(relay: &Relay) -> Session {
+        Session::start_sized(relay, fresh_config_dir(), false, SHORT_ROWS)
+    }
+
     /// Start the app against `relay` with `config` as its config directory, so a test can restart it on
     /// the state (a read position) a previous run left behind.
     fn start_in(relay: &Relay, config: PathBuf, keyboard_enhanced: bool) -> Session {
+        Session::start_sized(relay, config, keyboard_enhanced, ROWS)
+    }
+
+    fn start_sized(relay: &Relay, config: PathBuf, keyboard_enhanced: bool, rows: u16) -> Session {
         let pty = nix::pty::openpty(
-            Some(&nix::pty::Winsize { ws_row: ROWS, ws_col: COLS, ws_xpixel: 0, ws_ypixel: 0 }),
+            Some(&nix::pty::Winsize { ws_row: rows, ws_col: COLS, ws_xpixel: 0, ws_ypixel: 0 }),
             None,
         )
         .expect("could not open a pty");
@@ -160,7 +172,7 @@ impl Session {
         }
         let child = cmd.spawn().expect("could not start buzzr");
 
-        let rows = std::num::NonZeroU16::new(ROWS).unwrap();
+        let rows = std::num::NonZeroU16::new(rows).unwrap();
         let cols = std::num::NonZeroU16::new(COLS).unwrap();
         let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 0)));
         let sink = parser.clone();
@@ -506,6 +518,26 @@ fn u_marks_the_selected_message_unread_and_the_sidebar_counts_it() {
         sidebar(sc).iter().any(|n| n.starts_with("#design (1)"))
     });
     assert!(screen.contains("new messages"), "the divider marks the message the channel was marked unread from:\n{screen}");
+}
+
+#[test]
+fn the_pane_flags_the_newest_message_only_while_it_is_off_screen() {
+    let Some(relay) = relay_or_skip("the_pane_flags_the_newest_...") else { return };
+    // In a pane short enough to be taller than the thread, the marker follows what is on screen rather than
+    // where the cursor is. #general carries the relay's only multi-message list: a message and two replies.
+    let s = Session::start_short(&relay);
+    s.press_all(&["down", "down", "enter"]);
+    s.expect("the general channel", "hello from c-general");
+    s.expect("its thread summary", "2 replies");
+    s.press("enter"); // open the thread: it starts at the bottom, on the newest reply
+    s.expect("the thread view", "› thread");
+    s.expect_gone("any marker: the newest reply is on screen", "more below");
+    s.press("up"); // the cursor moves up, but the newest reply is still on screen
+    s.expect_gone("no marker while the newest reply is visible", "more below");
+    s.press("home"); // the newest reply is now far below the view
+    s.expect("a marker once the newest reply is off screen", "more below");
+    s.press("end");
+    s.expect_gone("the marker again once the newest reply is back on screen", "more below");
 }
 
 #[test]
