@@ -1261,7 +1261,9 @@ impl App {
         if is_message {
             self.typing.remove(&(channel.clone(), e.pubkey.clone()));
             let current = self.channel().map(|c| c.id == channel).unwrap_or(false);
-            if !current && e.pubkey != self.me {
+            // Only rows the channel timeline lists raise its badge; a thread reply is unread per thread (`thread_read`), not
+            // per channel, and there is no channel position it could ever move to clear the badge.
+            if !current && e.pubkey != self.me && e.is_top_level() {
                 *self.unread.entry(channel.clone()).or_default() += 1;
             }
         }
