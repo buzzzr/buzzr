@@ -120,9 +120,10 @@ values and skip the questions (for scripts and containers; the key is never acce
 The full behaviour, for when the feature list above is not enough.
 
 - **Channels and DMs** on the left (DMs are labelled with the other person, `✉ name`), with unread counts. An open channel is
-  marked `#` and a private (restricted) one `*`; DMs get no marker. The bar marks the
-  channel on screen; while the list has focus it follows the cursor, and leaving the list without opening a channel puts it back.
-  The keyboard starts on the channel list, so Up/Down and Enter work as soon as buzzr opens.
+  marked `#` and a private (restricted) one `*`; DMs get no marker. The selected channel has a full-width grey tint and a bar on
+  the left, like the selected message; the bar is the accent colour while the list has focus and grey when it does not, so the accent
+  marks where the focus is. The bar sits on the channel on screen; while the list has focus it follows the cursor, and leaving the
+  list without opening a channel puts it back. The keyboard starts on the channel list, so Up/Down and Enter work as soon as buzzr opens.
   `/dm name` opens the DM you already have with someone, or starts a new one; a name from a channel or an npub both work.
 - **Unread that survives a restart:** the last-read position per channel lives in `~/.config/buzzr/read-state.json`, so the
   counts are there again next time (each one asked of the relay on startup) and a `new messages` line marks where the unseen
