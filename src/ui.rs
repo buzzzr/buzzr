@@ -223,16 +223,14 @@ fn draw_messages(f: &mut Frame, app: &App, area: Rect) {
         let mut sb = ScrollbarState::new(layout.max_scroll(view_h)).position(app.state.scroll);
         f.render_stateful_widget(Scrollbar::new(ScrollbarOrientation::VerticalRight).track_symbol(Some("│")).thumb_symbol("█").style(faint()), area, &mut sb);
     }
-    // The list goes on past the selection: say so in the corner, or a view that happens to end on the selected message looks
-    // like the end of the channel. It is gone as soon as the newest message is selected.
-    if let Some(i) = selected {
-        if i + 1 < layout.items.len() {
-            draw_more_below(f, text_area);
-        }
+    // The newest message is past the bottom of the pane, so the channel does not end here. Once the newest message is
+    // on screen the marker is gone: it tracks what is visible, not where the cursor sits.
+    if layout.last_bottom() > app.state.scroll + view_h {
+        draw_more_below(f, text_area);
     }
 }
 
-/// A corner marker for the messages below the selection. It is written straight into the buffer so that whatever background the
+/// A corner marker for the messages that are past the bottom of the view. It is written straight into the buffer so that whatever background the
 /// row already carries (the selection band) stays under it, and it is kept off the rightmost column, which the scrollbar owns.
 fn draw_more_below(f: &mut Frame, area: Rect) {
     const HINT: &str = "↓ more below";
@@ -629,6 +627,26 @@ mod tests {
         app
     }
 
+    /// #general with more messages than the pane can hold, opened on it with the cursor in the message list.
+    /// Unlike `app()`, the newest message can fall outside the view, which is what the marker is about.
+    fn busy() -> App {
+        let mut app = App::new("me".into(), false, chrono_tz::UTC);
+        let chan = Channel { id: "c1".into(), name: "general".into(), about: String::new(), created_at: 1, section: crate::model::Section::Channels, label: "general".into(), is_private: false };
+        let _: Vec<Cmd> = app.handle(AppEvent::Channels(Ok(vec![chan])));
+        let events = (1..=20)
+            .map(|n| {
+                let mut e = ev(&format!("m{n:02}"), 1000 + n, &format!("message number {n}"), &[]);
+                e.pubkey = "bob".into();
+                e
+            })
+            .collect();
+        app.handle(AppEvent::Names(Ok([("bob".to_string(), "Bob".to_string())].into())));
+        app.handle(AppEvent::Window { channel: "c1".into(), cursor: None, result: Ok(Window { events, has_more: false, next_cursor: None }) });
+        app.handle(AppEvent::Live(Live::Up));
+        app.handle(AppEvent::Key(ratatui::crossterm::event::KeyEvent::new(ratatui::crossterm::event::KeyCode::Tab, ratatui::crossterm::event::KeyModifiers::NONE)));
+        app
+    }
+
     #[test]
     fn a_person_in_the_search_and_a_profile_card_are_drawn() {
         let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
@@ -733,21 +751,34 @@ mod tests {
     }
 
     #[test]
-    fn the_pane_flags_the_messages_below_the_selection() {
+    fn the_pane_flags_that_the_newest_message_is_below() {
         use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
-        let mut app = app();
+        let mut app = busy();
         term.draw(|f| draw(f, &mut app)).unwrap();
-        let s = screen(&term).join("\n");
-        assert!(!s.contains("more below"), "the newest message is selected, so nothing is below it\n{s}");
-        app.handle(AppEvent::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)));
-        term.draw(|f| draw(f, &mut app)).unwrap();
-        let s = screen(&term).join("\n");
-        assert!(s.contains("↓ more below"), "the messages below the selection are flagged\n{s}");
+        // End jumps to the newest message, which is then on screen: the pane says nothing.
         app.handle(AppEvent::Key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE)));
         term.draw(|f| draw(f, &mut app)).unwrap();
         let s = screen(&term).join("\n");
-        assert!(!s.contains("more below"), "the flag goes away once the newest message is selected again\n{s}");
+        assert!(!s.contains("more below"), "the newest message is on screen at the bottom\n{s}");
+
+        // The cursor moves onto an older message, but the newest one is still on screen: no marker. The marker
+        // answers "is the end of the channel visible", not "is the newest message selected".
+        app.handle(AppEvent::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)));
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(!s.contains("more below"), "the newest message is still visible, so nothing is flagged\n{s}");
+
+        // Jump to the top: the newest message is far below the view.
+        app.handle(AppEvent::Key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE)));
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(s.contains("↓ more below"), "the newest message is off screen, so the pane says so\n{s}");
+
+        app.handle(AppEvent::Key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE)));
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(!s.contains("more below"), "back at the bottom the marker is gone\n{s}");
     }
 
     #[test]
