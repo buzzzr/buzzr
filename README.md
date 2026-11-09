@@ -32,7 +32,7 @@
 - **Channels and DMs** with unread counts, in sections: Solo chats, Channels (private and open) and DMs. DMs are labelled with the other
   person; start one with `/dm name`, or from search. An open channel is marked `#` and a private one `*`.
 - **Unread that survives a restart.** The last-read position is saved per channel and per thread, so the badges are right again
-  next time and a `new messages` line shows where you left off.
+  next time and a `new messages` line shows where you left off. `u` marks a message unread until you `/read` the channel.
 - **Threads.** A channel shows top-level messages only, as the Buzz app does, each with its reply count and the time of the last reply;
   a thread with replies since you last opened it shows `● 2 new`. Enter opens a thread (and reads it), Esc returns to the same place.
 - **Live.** New messages, edits, deletions, reactions, reply counts and `Bob is typing…` arrive as they happen. If the connection
@@ -128,8 +128,9 @@ The full behaviour, for when the feature list above is not enough.
 - **Unread that survives a restart:** the last-read position per channel and per thread lives in
   `~/.config/buzzr/read-state.json`, so it is there again next time (each channel's count is asked of the relay on startup)
   and a `new messages` line marks where the unseen ones begin. Opening a channel marks it read; `/read` does it again and
-  `/read all` clears every channel and its threads. `u` on a message goes the other way: it marks the channel unread from
-  that message, so the badge and the `new messages` line come back and the position is written down.
+  `/read all` clears every channel and its threads. `u` on a message goes the other way: it forces *that* message unread on
+  this device, so the badge and the `new messages` line come back above it. Unlike the position, a mark is not moved on by
+  reading: it works on a message of your own too, and only `/read` clears it.
 - **A channel shows only its top-level messages**, as the Buzz app does, each with `💬 3 replies · last Thu 13:33` when it has a
   thread. The relay supplies the counts and says whether older messages exist.
 - **Threads:** Enter or a click opens one, Esc returns to the same place. Opening a thread reads its replies, so a thread with
