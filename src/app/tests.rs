@@ -68,6 +68,38 @@ fn selected(app: &App) -> String {
 }
 
 #[test]
+fn the_arrow_keys_move_the_focus_between_the_message_list_and_the_input() {
+    let mut app = app_with(30);
+    // scroll away from the bottom first, so landing on the newest message has to move the view too
+    for _ in 0..12 {
+        press(&mut app, KeyCode::Up);
+    }
+    press(&mut app, KeyCode::Tab); // messages -> input
+    assert_eq!(app.focus, Focus::Input);
+    press(&mut app, KeyCode::Up);
+    assert_eq!(app.focus, Focus::Messages, "Up in an empty input leaves it");
+    assert_eq!(selected(&app), "m029", "landing on the newest message");
+    let max = max_scroll(&mut app);
+    assert_eq!(app.state.scroll, max, "with the bottom in view");
+    press(&mut app, KeyCode::Down);
+    assert_eq!(app.focus, Focus::Input, "Down on the newest message goes back to the input");
+}
+
+#[test]
+fn down_above_the_newest_message_still_selects_and_up_keeps_a_draft() {
+    let mut app = app_with(3);
+    press(&mut app, KeyCode::Up);
+    assert_eq!(selected(&app), "m001");
+    press(&mut app, KeyCode::Down);
+    assert_eq!((app.focus, selected(&app)), (Focus::Messages, "m002".to_string()), "Down selects the next message, not the input");
+    press(&mut app, KeyCode::Tab); // messages -> input
+    type_text(&mut app, "a draft");
+    press(&mut app, KeyCode::Up);
+    assert_eq!(app.focus, Focus::Input, "Up still belongs to the input while something is typed");
+    assert_eq!(app.editor.text(), "a draft");
+}
+
+#[test]
 fn opening_the_first_real_channel_loads_it_and_the_dm_comes_last() {
     let mut app = App::new(ME.into(), false, chrono_tz::UTC);
     let cmds = app.handle(AppEvent::Channels(Ok(vec![chan("dm1", "DM"), chan("c2", "random"), chan("c1", "general")])));

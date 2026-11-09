@@ -439,6 +439,23 @@ fn tab_cycles_the_focus_between_the_channels_messages_and_input() {
 }
 
 #[test]
+fn the_arrow_keys_move_the_focus_between_the_messages_and_the_input() {
+    let Some(relay) = relay_or_skip("the_arrow_keys_move_the_focus_...") else { return };
+    let s = session(&relay);
+    // Startup leaves the keyboard on the channel list; two Tabs reach the input.
+    s.press("tab");
+    s.expect("the messages pane", "Open thread");
+    s.press("tab");
+    s.expect("the input box", "Send");
+    s.press("up"); // nothing typed: back to the messages, on the newest one
+    s.expect("the messages pane to take focus again", "Open thread");
+    s.expect_gone("the input hint to go", "Send");
+    s.press("down"); // the newest message: back to the input
+    s.expect("the input box to take focus again", "Send");
+    s.expect_gone("the messages hint to go", "Open thread");
+}
+
+#[test]
 fn enter_on_a_message_opens_its_thread_and_esc_goes_back_to_the_channel() {
     let Some(relay) = relay_or_skip("enter_on_a_message_...") else { return };
     let s = session(&relay);
