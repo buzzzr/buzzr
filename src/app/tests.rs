@@ -542,6 +542,21 @@ fn edits_and_deletes_arrive_live() {
 }
 
 #[test]
+fn a_reaction_and_its_removal_arrive_live() {
+    let mut app = app_with(3);
+    let mut react = msg("r1", 5000, BOB, "👍", &[&["e", "m001"]]);
+    react.kind = 7;
+    app.handle(AppEvent::Live(Live::Event(react)));
+    let shown = |app: &mut App| app.layout(78).items[1].lines.iter().map(Line::text).collect::<Vec<_>>().join("\n");
+    assert!(shown(&mut app).contains("👍"), "the new reaction is drawn under the message");
+    // A removal has no h tag and points at the reaction event, not the message: it still reaches the right channel.
+    let mut remove = msg("d1", 5001, BOB, "", &[&["e", "r1"]]);
+    remove.kind = 5;
+    app.handle(AppEvent::Live(Live::Event(remove)));
+    assert!(!shown(&mut app).contains("👍"), "the removed reaction is gone");
+}
+
+#[test]
 fn clicking_selects_opens_threads_and_follows_links() {
     let mut app = App::new(ME.into(), false, chrono_tz::UTC);
     app.view_h = 10;
