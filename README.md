@@ -127,7 +127,9 @@ The full behaviour, for when the feature list above is not enough.
   `/dm name` opens the DM you already have with someone, or starts a new one; a name from a channel or an npub both work.
 - **Unread that survives a restart:** the last-read position per channel lives in `~/.config/buzzr/read-state.json`, so the
   counts are there again next time (each one asked of the relay on startup) and a `new messages` line marks where the unseen
-  ones begin. Opening a channel marks it read; `/read` does it again and `/read all` clears every channel.
+  ones begin. Opening a channel marks it read; `/read` does it again and `/read all` clears every channel. `u` on a message goes
+  the other way: it marks the channel unread from that message, so the badge and the `new messages` line come back and the
+  position is written down.
 - **A channel shows only its top-level messages**, as the Buzz app does, each with `💬 3 replies · last Thu 13:33` when it has a
   thread. The relay supplies the counts and says whether older messages exist.
 - **Threads:** Enter or a click opens one, Esc returns to the same place. `r` replies in the thread of the selected message.
@@ -161,7 +163,8 @@ The full behaviour, for when the feature list above is not enough.
   `buzzr plugins list|enable|disable` works from the shell. `--no-plugins` (or `BUZZR_SAFE_MODE=1`) turns the whole system off. See
   [PLUGIN.md](PLUGIN.md); a tiny example is in `examples/plugins/hello`.
 - **Upgrading:** `/update` in the input says how to upgrade this copy, worked out from where the binary lives — `brew update &&
-  brew upgrade buzzr` for a Homebrew install, `cargo install --force buzzr` for a `cargo install`, or the release page otherwise.
+  brew upgrade buzzr` for a Homebrew install, `cargo install --force --git https://github.com/buzzzr/buzzr` for a
+  `cargo install`, or the release page otherwise.
   Nothing is downloaded or changed. Once a day buzzr also asks GitHub's release feed whether a newer release exists; when there is
   one the status line says so (`buzzr 0.2.0 available · /update`) and the same upgrade line is printed after you quit.
   `BUZZR_NO_UPDATE_CHECK=1` turns the check off.
@@ -173,7 +176,7 @@ The full behaviour, for when the feature list above is not enough.
 | Tab / Shift+Tab | switch between channels, messages and the input |
 | Up / Down | select a channel or message (Up at the top of a channel loads older messages) |
 | Enter | open the channel / open the thread / send |
-| r, c, e, d | reply in the thread, copy, edit, delete the selected message (e and d: yours only) |
+| r, c, u, e, d | reply in the thread, copy, mark unread, edit, delete the selected message (e and d: yours only) |
 | Ctrl+F | search channels, people and messages |
 | Esc | close a panel, cancel a reply, leave a thread, then step back to the channel list |
 | F1, F2 | keys, help |

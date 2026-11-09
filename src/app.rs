@@ -472,6 +472,35 @@ impl App {
         cmds
     }
 
+    /// `u` on the message list marks the channel unread from the selected message: the badge comes back and the `new messages`
+    /// line is drawn above it. The earlier position is written, so the mark survives a restart.
+    fn mark_unread_from_selected(&mut self) -> Vec<Cmd> {
+        let Some(m) = self.selected_msg() else {
+            self.flash("select a message first (Up/Down)");
+            return Vec::new();
+        };
+        let Some(id) = self.channel().map(|c| c.id.clone()) else { return Vec::new() };
+        // The position just before the message, so the message itself and everything after it count as unread. The relay's
+        // resolution is seconds, so a message sharing this timestamp with an earlier one takes that one with it.
+        let at = m.created_at.saturating_sub(1);
+        let count = self
+            .stores
+            .get(&id)
+            .map(|s| s.timeline().iter().filter(|e| e.pubkey != self.me && e.created_at > at).count() as u32)
+            .unwrap_or(0);
+        if count == 0 {
+            self.flash("nothing after that message to mark unread");
+            return Vec::new();
+        }
+        self.read.insert(id.clone(), at);
+        self.new_since.insert(id.clone(), at);
+        self.unread.insert(id, count);
+        self.content_changed();
+        let n = self.selected_number().unwrap_or(0);
+        self.flash(format!("marked unread from #{n}"));
+        vec![Cmd::SaveRead(self.read.clone())]
+    }
+
     // ---- layout ----------------------------------------------------------------------------------------------------------
 
     /// The messages the list shows, oldest first.
@@ -1071,13 +1100,14 @@ impl App {
         }
     }
 
-    /// The channel an event belongs to: its `h` tag, else the channel whose store holds the message it points at.
+    /// The channel an event belongs to: its `h` tag, else the channel whose store holds the message or reaction it points at.
+    /// A reaction removal (`kind:5`) carries no `h` tag and points at the reaction event, so the reaction lookup matters here.
     fn route(&self, e: &Ev) -> Option<String> {
         if let Some(h) = e.channel() {
             return Some(h.to_owned());
         }
         let target = e.tag("e")?;
-        self.stores.iter().find(|(_, s)| s.msgs.contains_key(target)).map(|(id, _)| id.clone())
+        self.stores.iter().find(|(_, s)| s.msgs.contains_key(target) || s.reaction_ids.contains_key(target)).map(|(id, _)| id.clone())
     }
 
     fn live_event(&mut self, e: Ev) -> Vec<Cmd> {
@@ -1280,6 +1310,7 @@ impl App {
                 }
                 Vec::new()
             }
+            KeyCode::Char('u') => self.mark_unread_from_selected(),
             KeyCode::Esc => {
                 // Escape backs out one level: leave a thread first, otherwise there is nothing left to close, so
                 // the keyboard goes back to the channel list.
