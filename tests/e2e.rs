@@ -428,6 +428,21 @@ fn typing_reaches_the_input_box() {
 }
 
 #[test]
+fn u_marks_the_selected_message_unread_and_the_sidebar_counts_it() {
+    let Some(relay) = relay_or_skip("u_marks_the_selected_message_...") else { return };
+    let s = session(&relay);
+    // #design is open but the keyboard starts on the channels; Tab moves it to the message list.
+    s.press("tab");
+    s.expect("the messages pane", "Open thread");
+    s.expect("the design message", "hello from c-design");
+    s.press("u");
+    let screen = s.until("the open channel to show an unread count", |sc| {
+        sidebar(sc).iter().any(|n| n.starts_with("#design (1)"))
+    });
+    assert!(screen.contains("new messages"), "the divider marks the message the channel was marked unread from:\n{screen}");
+}
+
+#[test]
 fn ctrl_q_quits() {
     let Some(relay) = relay_or_skip("ctrl_q_quits") else { return };
     let mut s = session(&relay);

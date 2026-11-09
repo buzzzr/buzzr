@@ -446,6 +446,36 @@ fn reopening_a_channel_draws_the_new_messages_line_where_the_last_visit_stopped(
 }
 
 #[test]
+fn u_marks_the_channel_unread_from_the_selected_message_and_writes_the_earlier_position() {
+    let mut app = app_with(3);
+    // Reading the open channel has moved the position past every message.
+    assert_eq!(app.read.get("c1"), Some(&1002));
+    assert_eq!(app.unread.get("c1"), None);
+    // Select the middle message: it and the one after it become unread.
+    app.state.selected = Some("m001".into());
+    let cmds = press(&mut app, KeyCode::Char('u'));
+    assert_eq!(app.unread.get("c1"), Some(&2), "the selected message and the newer one are unread");
+    assert_eq!(app.read.get("c1"), Some(&1000), "the position is just before the selected message");
+    let saved = cmds.iter().find_map(|c| match c { Cmd::SaveRead(m) => Some(m.clone()), _ => None }).expect("marking unread writes the earlier position");
+    assert_eq!(saved.get("c1"), Some(&1000));
+    assert_eq!(app.flash_text(), Some("marked unread from #2"));
+    let l = app.layout(78);
+    let i = l.index_of("m001").expect("the selected message is in the list");
+    assert!(l.items[i].lines[0].spans.iter().any(|s| s.content.contains("new messages")), "the divider sits above the message it was marked from");
+}
+
+#[test]
+fn u_on_your_own_newest_message_has_nothing_to_mark() {
+    let mut app = app_with(2);
+    // A live message of your own in the open channel is read as it arrives and points the position at itself.
+    app.handle(AppEvent::Live(Live::Event(msg("mine", 2000, ME, "mine", &[&["h", "c1"]]))));
+    app.state.selected = Some("mine".into());
+    let cmds = press(&mut app, KeyCode::Char('u'));
+    assert!(!cmds.iter().any(|c| matches!(c, Cmd::SaveRead(_))), "nothing newer and from someone else: no write");
+    assert_eq!(app.flash_text(), Some("nothing after that message to mark unread"));
+}
+
+#[test]
 fn read_marks_the_channel_and_writes_the_position() {
     let mut app = app_with(2);
     // a message in the open channel is read as it arrives

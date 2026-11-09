@@ -340,6 +340,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
             spans.extend(key_hint("⏎", if app.in_thread() { "Reply" } else { "Open thread" }));
             spans.extend(key_hint("r", "Reply"));
             spans.extend(key_hint("c", "Copy"));
+            spans.extend(key_hint("u", "Mark unread"));
             if app.selected_is_own() {
                 spans.extend(key_hint("e", "Edit"));
                 spans.extend(key_hint("d", "Delete"));
@@ -384,6 +385,7 @@ pub const KEYS: &[(&str, &str)] = &[
     ("Enter", "open the thread (in a thread: reply)"),
     ("r", "reply in the thread of the selected message"),
     ("c", "copy the selected message to the clipboard"),
+    ("u", "mark the channel unread from the selected message"),
     ("e", "edit the selected message (yours only)"),
     ("d", "delete the selected message (yours only; asks first)"),
     ("Ctrl+F", "search channels, people and every message"),
@@ -624,6 +626,7 @@ mod tests {
         assert!(!s.contains("a reply") && !s.contains("\nreply"), "the reply itself is not listed\n{s}");
         assert!(s.contains("● live"), "connection state\n{s}");
         assert!(s.contains("Open thread") && s.contains("Switch pane"), "footer hints\n{s}");
+        assert!(s.contains("Mark unread"), "the message pane advertises the unread key\n{s}");
         assert!(!s.contains("**"), "markdown is rendered, not shown");
     }
 
