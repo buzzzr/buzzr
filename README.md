@@ -13,10 +13,10 @@
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/channel.png" alt="buzzr in the buzz-dark colour scheme, showing a channel with threads and reactions" width="900">
+  <img src="docs/demo.gif" alt="A recording of buzzr: opening a channel, reading a thread, replying in it and searching" width="900">
 </p>
 
-> The screenshots in this README show a scripted demo community, not real conversations.
+> The screenshots and the recording in this README show a scripted demo community, not real conversations.
 
 ## Why buzzr
 
