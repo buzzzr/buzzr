@@ -5,6 +5,8 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
 
 ## [Unreleased]
 
+## [0.2.0-rc.0] - 2026-11-09
+
 ### Added
 
 - Repository health files: issue templates, `SECURITY.md`, `CODE_OF_CONDUCT.md`, this changelog, Dependabot, and a scheduled
@@ -14,6 +16,9 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
 - `NO_COLOR`, `TERM=dumb` and `BUZZR_THEME=high-contrast` turn colour off or up.
 - An end-to-end suite (`./build.sh e2e`) drives the real binary in a pty against
   [`buzz-fake-relay`](https://github.com/buzzzr/buzz-fake-relay) and checks the screen it draws.
+- `u` marks the selected message unread: the channel's badge, the header count and the `new messages` divider come back, and
+  the position survives a restart.
+- A thread whose replies are newer than your last visit is marked unread on its message, and opening it clears the mark.
 
 ### Changed
 
@@ -21,10 +26,17 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
   input, then messages, then channels.
 - The selected channel row is tinted across the whole pane, and the accent bar marks which pane has focus, as in the message list.
 - Alt+Backspace deletes the word before the cursor.
+- The input footer names the new-line key the terminal can actually report: Shift+Enter where the terminal speaks the kitty
+  keyboard protocol, Alt+Enter everywhere else.
 
 ### Fixed
 
 - `/update` named a `cargo install` command that cannot work; it names the repository install instead.
+- A removed reaction now disappears from the message: a `kind:5` that names a reaction event undoes that reaction.
+
+### Documentation
+
+- A demo recording at the top of the README.
 
 ## [0.1.1] - 2026-11-08
 
@@ -50,6 +62,7 @@ First public version.
 - A notice in the UI when a newer version is published, with the upgrade command.
 - Release builds for Linux (musl, x86_64 and aarch64) and macOS (Apple silicon and Intel), published with `SHA256SUMS`.
 
-[Unreleased]: https://github.com/buzzzr/buzzr/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/buzzzr/buzzr/compare/v0.2.0-rc.0...HEAD
+[0.2.0-rc.0]: https://github.com/buzzzr/buzzr/compare/v0.1.1...v0.2.0-rc.0
 [0.1.1]: https://github.com/buzzzr/buzzr/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/buzzzr/buzzr/releases/tag/v0.1.0

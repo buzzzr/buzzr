@@ -351,6 +351,8 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         }
         Focus::Input => {
             spans.extend(key_hint("⏎", "Send"));
+            // Only name Shift+Enter where the terminal confirmed it reports it; Alt+Enter works in every terminal.
+            spans.extend(key_hint(if app.keyboard_enhanced { "Shift+⏎" } else { "Alt+⏎" }, "New line"));
             if app.editing.is_some() {
                 spans.extend(key_hint("esc", "Cancel edit"));
             } else if app.reply_target.is_some() {
@@ -382,7 +384,7 @@ pub const KEYS: &[(&str, &str)] = &[
     ("Messages", ""),
     ("Up / Down", "select a message (Up at the top loads older)"),
     ("PgUp / PgDn, Home / End", "scroll, first, last"),
-    ("Enter", "open the thread (in a thread: reply)"),
+    ("Enter", "open the thread and read it (in a thread: reply)"),
     ("r", "reply in the thread of the selected message"),
     ("c", "copy the selected message to the clipboard"),
     ("u", "mark the channel unread from the selected message"),
@@ -402,7 +404,8 @@ pub const KEYS: &[(&str, &str)] = &[
     ("", ""),
     ("Writing", ""),
     ("Enter", "send"),
-    ("Shift+Enter, Alt+Enter, Ctrl+J", "new line"),
+    ("Alt+Enter, Ctrl+J", "new line, in any terminal"),
+    ("Shift+Enter", "new line, where the terminal reports it"),
     ("Ctrl+A / E, Ctrl+W / U / K", "line start / end, kill word / to start / to end"),
     ("Alt+Backspace", "delete the word before the cursor"),
     ("Ctrl+← →, Alt+B / F", "move by word"),
@@ -426,8 +429,9 @@ fn draw_keys(f: &mut Frame, body: Rect) {
 }
 
 pub const HELP: &[&str] = &[
-    "Channels list the top-level messages only; replies live in their thread (Enter or a click opens it).",
-    "A message with replies shows how many and when the last one was. Esc returns you to the same place.",
+    "Channels list the top-level messages only; replies live in their thread (Enter or a click opens it, and reads it).",
+    "A message with replies shows how many, when the last one was, and `● N new` for replies since you last opened it.",
+    "Esc returns you to the same place.",
     "",
     "Commands, typed in the input (N is the message number shown as #N):",
     "  /r N text   reply to message N        /t N   open the thread of message N",
@@ -441,11 +445,13 @@ pub const HELP: &[&str] = &[
     "  /update     how to upgrade this copy (brew, cargo or the release page)",
     "A newer release shows up in the status line (BUZZR_NO_UPDATE_CHECK=1 turns the once-a-day check off).",
     "  /read       mark this channel read     /read all   mark every channel read",
-    "Unread survives a restart: it comes from the last-read position in ~/.config/buzzr/read-state.json, and a",
-    "\"new messages\" line marks where new messages start.",
+    "Unread survives a restart: it comes from the last-read position per channel and per thread in",
+    "~/.config/buzzr/read-state.json, and a \"new messages\" line marks where new messages start.",
     "Search (Ctrl+F): channel names, people and full-text message search; Enter opens the result — a person starts a DM.",
     "A person is found by the name in their profile, or by their npub (hex or npub1…): /dm and /whois take either.",
     "Others see \"typing…\" while you write (start with --no-typing to turn that off).",
+    "Enter sends. Alt+Enter and Ctrl+J add a line in any terminal; the footer names the one that works here.",
+    "Shift+Enter adds a line only where the terminal reports it: kitty, foot, WezTerm, Ghostty, iTerm2.",
     "",
     "New messages, edits, deletions, reactions and typing indicators arrive live; there is no polling.",
     "Links: clicking one copies its URL to your clipboard (your terminal must allow OSC 52; in tmux:",
@@ -628,6 +634,34 @@ mod tests {
         assert!(s.contains("Open thread") && s.contains("Switch pane"), "footer hints\n{s}");
         assert!(s.contains("Mark unread"), "the message pane advertises the unread key\n{s}");
         assert!(!s.contains("**"), "markdown is rendered, not shown");
+    }
+
+    #[test]
+    fn the_footer_offers_the_new_line_key_this_terminal_can_report() {
+        let mut term = Terminal::new(TestBackend::new(110, 30)).unwrap();
+        let mut app = app();
+        app.focus = Focus::Input;
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(s.contains("Alt+⏎") && s.contains("New line"), "Shift+Enter cannot be seen here, so the footer offers Alt+Enter\n{s}");
+        assert!(!s.contains("Shift+⏎"), "and does not offer a key this terminal would never send\n{s}");
+        // The loop sets this from the terminal's answer to the keyboard-enhancement probe.
+        app.keyboard_enhanced = true;
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(s.contains("Shift+⏎") && s.contains("New line"), "a terminal that reports Shift+Enter is offered it\n{s}");
+        assert!(!s.contains("Alt+⏎"), "and the footer no longer falls back to Alt+Enter\n{s}");
+    }
+
+    #[test]
+    fn the_keys_overlay_names_both_new_line_keys_and_which_of_them_always_works() {
+        let mut term = Terminal::new(TestBackend::new(110, 60)).unwrap();
+        let mut app = app();
+        app.overlay = Overlay::Keys;
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(s.contains("Alt+Enter, Ctrl+J") && s.contains("new line, in any terminal"), "Alt+Enter and Ctrl+J are the keys that work anywhere\n{s}");
+        assert!(s.contains("Shift+Enter") && s.contains("where the terminal reports it"), "Shift+Enter is named as the terminal-dependent one\n{s}");
     }
 
     #[test]

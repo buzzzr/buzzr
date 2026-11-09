@@ -31,10 +31,10 @@
 
 - **Channels and DMs** with unread counts, in sections: Solo chats, Channels (private and open) and DMs. DMs are labelled with the other
   person; start one with `/dm name`, or from search. An open channel is marked `#` and a private one `*`.
-- **Unread that survives a restart.** The last-read position is saved per channel, so the badges are right again next time and a
-  `new messages` line shows where you left off.
-- **Threads.** A channel shows top-level messages only, as the Buzz app does, each with its reply count and the time of the last reply.
-  Enter opens a thread, Esc returns to the same place.
+- **Unread that survives a restart.** The last-read position is saved per channel and per thread, so the badges are right again
+  next time and a `new messages` line shows where you left off.
+- **Threads.** A channel shows top-level messages only, as the Buzz app does, each with its reply count and the time of the last reply;
+  a thread with replies since you last opened it shows `● 2 new`. Enter opens a thread (and reads it), Esc returns to the same place.
 - **Live.** New messages, edits, deletions, reactions, reply counts and `Bob is typing…` arrive as they happen. If the connection
   drops, buzzr reconnects and reloads.
 - **Reads like a chat.** Markdown (bold, italic, lists, code, quotes, headings), clickable links, reactions, and edited messages say so.
@@ -125,14 +125,15 @@ The full behaviour, for when the feature list above is not enough.
   marks where the focus is. The bar sits on the channel on screen; while the list has focus it follows the cursor, and leaving the
   list without opening a channel puts it back. The keyboard starts on the channel list, so Up/Down and Enter work as soon as buzzr opens.
   `/dm name` opens the DM you already have with someone, or starts a new one; a name from a channel or an npub both work.
-- **Unread that survives a restart:** the last-read position per channel lives in `~/.config/buzzr/read-state.json`, so the
-  counts are there again next time (each one asked of the relay on startup) and a `new messages` line marks where the unseen
-  ones begin. Opening a channel marks it read; `/read` does it again and `/read all` clears every channel. `u` on a message goes
-  the other way: it marks the channel unread from that message, so the badge and the `new messages` line come back and the
-  position is written down.
+- **Unread that survives a restart:** the last-read position per channel and per thread lives in
+  `~/.config/buzzr/read-state.json`, so it is there again next time (each channel's count is asked of the relay on startup)
+  and a `new messages` line marks where the unseen ones begin. Opening a channel marks it read; `/read` does it again and
+  `/read all` clears every channel and its threads. `u` on a message goes the other way: it marks the channel unread from
+  that message, so the badge and the `new messages` line come back and the position is written down.
 - **A channel shows only its top-level messages**, as the Buzz app does, each with `💬 3 replies · last Thu 13:33` when it has a
   thread. The relay supplies the counts and says whether older messages exist.
-- **Threads:** Enter or a click opens one, Esc returns to the same place. `r` replies in the thread of the selected message.
+- **Threads:** Enter or a click opens one, Esc returns to the same place. Opening a thread reads its replies, so a thread with
+  replies since you last looked at it shows `● 2 new` after its reply count. `r` replies in the thread of the selected message.
 - **Live:** new messages, edits, deletions, reactions, reply counts and typing indicators arrive over a WebSocket as they happen
   (`Bob is typing…`), and the header shows the connection state. If the connection drops it reconnects and reloads.
 - **Reads like a chat:** Markdown (bold, italic, lists, code, quotes, headings), bare URLs become links, reactions are shown,
@@ -141,7 +142,8 @@ The full behaviour, for when the feature list above is not enough.
   (Up at the top, Ctrl+O or `/more`).
 - **Links:** a click on a link copies its URL to your clipboard (terminal clipboard sequence, see below). `c` copies the selected
   message.
-- **Writing:** a multi-line box that grows; Enter sends, Shift+Enter (terminals that report it), Alt+Enter or Ctrl+J add a line;
+- **Writing:** a multi-line box that grows; Enter sends. Alt+Enter and Ctrl+J add a line in every terminal, Shift+Enter in the ones
+  that report it (`kitty`, `foot`, `WezTerm`, `Ghostty`, `iTerm2`) — the footer names the key that works where you are;
   bracketed paste; `@name` mentions members. Word and line editing keys (Ctrl+W or Alt+Backspace deletes the word before the
   cursor).
 - **Edit and delete your own messages:** select one and press `e` (it loads into the input; Enter saves, Esc cancels) or `d` (asks
@@ -175,7 +177,7 @@ The full behaviour, for when the feature list above is not enough.
 |---|---|
 | Tab / Shift+Tab | switch between channels, messages and the input |
 | Up / Down | select a channel or message (Up at the top of a channel loads older messages) |
-| Enter | open the channel / open the thread / send |
+| Enter | open the channel / open the thread (which reads it) / send |
 | r, c, u, e, d | reply in the thread, copy, mark unread, edit, delete the selected message (e and d: yours only) |
 | Ctrl+F | search channels, people and messages |
 | Esc | close a panel, cancel a reply, leave a thread, then step back to the channel list |
