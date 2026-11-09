@@ -1,0 +1,51 @@
+name: Bug report
+description: Something in buzzr does not work as it should
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. **Do not paste private keys, relay addresses you want kept private, or message content you
+        cannot share.** For a security problem, do not use this form: see [SECURITY.md](../blob/main/SECURITY.md).
+  - type: input
+    id: version
+    attributes:
+      label: buzzr version
+      description: Output of `buzzr --version`.
+      placeholder: buzzr 0.1.0
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system and architecture
+      placeholder: macOS 15 (Apple silicon), Ubuntu 24.04 (x86_64), ...
+    validations:
+      required: true
+  - type: input
+    id: terminal
+    attributes:
+      label: Terminal and multiplexer
+      description: The terminal emulator, and tmux/screen if you use one. Include `$TERM` if the problem is about colours or keys.
+      placeholder: iTerm2 3.5 in tmux 3.4, TERM=tmux-256color
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected and what you saw instead. A screenshot or a copy of the screen helps.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open channel ...
+        2. Press ...
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: How you installed buzzr, whether `--no-plugins` changes it, whether it happens with `--read-only`.
