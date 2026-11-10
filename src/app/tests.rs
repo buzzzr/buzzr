@@ -1076,6 +1076,90 @@ fn edit_and_delete_by_number_and_not_in_read_only_mode() {
     assert!(ro.editing.is_none() && ro.confirm_delete.is_none());
 }
 
+// ---- reactions --------------------------------------------------------------------------------------------------------------
+
+#[test]
+fn a_reacts_to_the_selected_message_and_enter_sends_the_emoji() {
+    let mut app = app_with(3);
+    press(&mut app, KeyCode::End); // the newest message
+    let target = selected(&app);
+    assert!(press(&mut app, KeyCode::Char('a')).is_empty());
+    assert_eq!((app.focus, app.reacting.as_deref()), (Focus::Input, Some(target.as_str())));
+    assert_eq!(app.editor.text(), "", "nothing is pre-filled when we have not reacted yet");
+    type_text(&mut app, "👍");
+    let cmds = press(&mut app, KeyCode::Enter);
+    assert_eq!(cmds, vec![Cmd::React { target, emoji: "👍".into(), remove: None }]);
+    assert!(app.reacting.is_none() && app.editor.is_empty(), "the prompt is closed and emptied");
+    assert_eq!(app.flash_text(), Some("reacted 👍"));
+}
+
+#[test]
+fn a_reaction_is_one_emoji_so_the_rest_of_the_line_is_ignored() {
+    let mut app = app_with(3);
+    press(&mut app, KeyCode::End);
+    let target = selected(&app);
+    press(&mut app, KeyCode::Char('a'));
+    type_text(&mut app, "👍 thanks");
+    assert_eq!(press(&mut app, KeyCode::Enter), vec![Cmd::React { target, emoji: "👍".into(), remove: None }]);
+}
+
+#[test]
+fn the_prompt_opens_on_your_own_reaction_and_changing_it_undoes_the_old_one() {
+    let mut app = app_with(3);
+    press(&mut app, KeyCode::End);
+    let target = selected(&app);
+    let mut mine = msg("reaction1", 6000, ME, "👍", &[&["e", &target]]);
+    mine.kind = 7;
+    app.handle(AppEvent::Live(Live::Event(mine)));
+    press(&mut app, KeyCode::Char('a'));
+    assert_eq!(app.editor.text(), "👍", "the prompt opens on the reaction we already have");
+    assert!(press(&mut app, KeyCode::Enter).is_empty(), "the same emoji is already there");
+    assert_eq!(app.flash_text(), Some("already reacted 👍"));
+    // Enter closed the prompt and left the cursor in the input, so Esc goes back to the messages before `a` opens it again.
+    press(&mut app, KeyCode::Esc);
+    assert_eq!(app.focus, Focus::Messages);
+    press(&mut app, KeyCode::Char('a'));
+    assert_eq!(app.editor.text(), "👍", "the prompt opens on our reaction again");
+    app.editor.clear();
+    type_text(&mut app, "🎉");
+    let cmds = press(&mut app, KeyCode::Enter);
+    assert_eq!(cmds, vec![Cmd::React { target, emoji: "🎉".into(), remove: Some("reaction1".into()) }]);
+}
+
+#[test]
+fn an_empty_reaction_prompt_removes_your_reaction() {
+    let mut app = app_with(3);
+    press(&mut app, KeyCode::End);
+    let target = selected(&app);
+    let mut mine = msg("reaction1", 6000, ME, "👍", &[&["e", &target]]);
+    mine.kind = 7;
+    app.handle(AppEvent::Live(Live::Event(mine)));
+    press(&mut app, KeyCode::Char('a'));
+    app.editor.clear();
+    let cmds = press(&mut app, KeyCode::Enter);
+    assert_eq!(cmds, vec![Cmd::React { target, emoji: String::new(), remove: Some("reaction1".into()) }]);
+    assert_eq!(app.flash_text(), Some("reaction removed"));
+}
+
+#[test]
+fn a_cancelled_or_read_only_reaction_sends_nothing() {
+    let mut app = app_with(3);
+    press(&mut app, KeyCode::End);
+    press(&mut app, KeyCode::Char('a'));
+    type_text(&mut app, "👍");
+    app.typing_sent = None;
+    assert!(app.handle(key(KeyCode::Char('x'))).is_empty(), "a reaction prompt is not typing a message");
+    assert!(press(&mut app, KeyCode::Esc).is_empty());
+    assert!(app.reacting.is_none() && app.editor.is_empty());
+    assert_eq!(app.flash_text(), Some("reaction cancelled"));
+    let mut ro = app_with(3);
+    ro.read_only = true;
+    press(&mut ro, KeyCode::End);
+    press(&mut ro, KeyCode::Char('a'));
+    assert!(ro.reacting.is_none());
+    assert_eq!(ro.flash_text(), Some("read-only mode: nothing is sent"));
+}
+
 #[test]
 fn new_channels_are_created_from_a_command_and_opened_when_they_appear() {
     let mut app = app_with(1);

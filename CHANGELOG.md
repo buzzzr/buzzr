@@ -5,6 +5,12 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
 
 ## [Unreleased]
 
+### Added
+
+- `a` reacts to the selected message: the input turns into a reaction prompt (it opens on the reaction you already have there), Enter
+  sends the emoji as a NIP-25 `kind:7`, Esc cancels, and Enter on an empty prompt removes your reaction. Changing an emoji undoes the
+  one it replaces first, so a message keeps one reaction from you.
+
 ### Fixed
 
 - A `… is typing` indicator was shown for the whole channel it arrived in: typing sent inside a thread was drawn in the channel

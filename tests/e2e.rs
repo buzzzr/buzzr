@@ -538,6 +538,36 @@ fn u_marks_the_selected_message_unread_and_the_sidebar_counts_it() {
 }
 
 #[test]
+fn a_reacts_to_the_selected_message_from_the_keyboard() {
+    let Some(relay) = relay_or_skip("a_reacts_to_the_selected_...") else { return };
+    let s = session(&relay);
+    // #design is open with the keyboard on the channel list; Tab moves it to the message list.
+    s.press("tab");
+    s.expect("the messages pane", "Open thread");
+    s.expect("the footer to name the reaction key", "React");
+    s.press("a");
+    s.expect("the composer to become a reaction prompt", " react ");
+    s.expect("the status line", "reacting · Enter sends the emoji, Esc cancels");
+    s.expect("the footer to follow the prompt", "Send reaction");
+    s.expect("the empty prompt to say what to type", "Type an emoji");
+    s.type_text("👍");
+    s.expect("the emoji in the composer", "👍");
+    s.press("enter");
+    // The relay accepts a kind:7 like any other event; what the screen shows is that it went out and that the
+    // composer went back to writing messages rather than staying in the prompt.
+    let scr = s.until("the status line to confirm the reaction", |sc| sc.contains("reacted 👍"));
+    assert!(!scr.contains("failed"), "the relay accepted the reaction:\n{scr}");
+    s.expect_gone("the reaction prompt to close", " react ");
+    s.expect("the composer back to a message", "Type a message");
+    std::thread::sleep(Duration::from_millis(500)); // a rejection would replace the status line
+    let scr = s.screen();
+    assert!(!scr.contains("failed"), "the reaction was not rejected:\n{scr}");
+    // Esc from the empty composer goes back to the messages, as it does outside the prompt.
+    s.press("esc");
+    s.expect("the messages pane again", "Open thread");
+}
+
+#[test]
 fn the_pane_flags_the_newest_message_only_while_it_is_off_screen() {
     let Some(relay) = relay_or_skip("the_pane_flags_the_newest_...") else { return };
     // In a pane short enough to be taller than the thread, the marker follows what is on screen rather than

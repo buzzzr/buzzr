@@ -135,6 +135,9 @@ pub enum Cmd {
     Typing { channel: String, root: Option<String> },
     Edit { channel: String, id: String, text: String },
     Delete { channel: String, id: String },
+    /// React to a message (`kind:7`). `remove` names your current reaction on it, undone first so a change keeps one emoji;
+    /// an empty `emoji` with `remove` set is the reaction going away.
+    React { target: String, emoji: String, remove: Option<String> },
     CreateChannel { name: String, private: bool, about: Option<String> },
     /// Ask the relay for the direct message with this person (`kind:41010`); it creates it when it does not exist yet.
     OpenDm { peer: String },
@@ -243,6 +246,8 @@ pub struct App {
     /// The message being edited in the input box, and a message waiting for a yes/no before it is deleted.
     pub editing: Option<String>,
     pub confirm_delete: Option<String>,
+    /// The message being reacted to in the input box: the prompt is up until Enter sends the reaction or Esc drops it.
+    pub reacting: Option<String>,
     pub search: Search,
     /// Somebody's profile card, while `Overlay::Whois` is up.
     pub whois: Option<Whois>,
@@ -321,6 +326,7 @@ impl App {
             typing_sent: None,
             editing: None,
             confirm_delete: None,
+            reacting: None,
             search: Search { query: Editor::default(), messages: Vec::new(), cursor: 0, seq: 0, asked: String::new(), edited_at: Instant::now(), loading: false },
             whois: None,
             pending_dm: None,
@@ -1462,6 +1468,14 @@ impl App {
                 self.start_reply();
                 Vec::new()
             }
+            KeyCode::Char('a') => {
+                if let Some(m) = self.selected_msg() {
+                    self.start_reaction(&m);
+                } else {
+                    self.flash("select a message first (Up/Down)");
+                }
+                Vec::new()
+            }
             KeyCode::Char('e') => {
                 if let Some(m) = self.selected_msg() {
                     self.start_edit(&m);
@@ -1555,6 +1569,9 @@ impl App {
                 if self.editing.take().is_some() {
                     self.editor.clear();
                     self.flash("edit cancelled");
+                } else if self.reacting.take().is_some() {
+                    self.editor.clear();
+                    self.flash("reaction cancelled");
                 } else if self.reply_target.take().is_some() {
                     self.flash("reply cancelled");
                 } else {
@@ -1579,7 +1596,7 @@ impl App {
             KeyCode::Right => self.editor.right(),
             KeyCode::Home => self.editor.home(),
             KeyCode::End => self.editor.end(),
-            KeyCode::Up if self.editor.is_empty() => {
+            KeyCode::Up if self.editor.is_empty() && self.reacting.is_none() => {
                 // Nothing typed: Up leaves the input for the message list, on the newest message, so the arrow keys
                 // get from the composer to the messages without a Tab cycle (see the Down arm in `key_messages`).
                 self.set_focus(Focus::Messages);
@@ -1614,6 +1631,9 @@ impl App {
         let text = self.editor.text().trim().to_owned();
         if let Some(id) = self.editing.clone() {
             return self.finish_edit(id, text);
+        }
+        if let Some(id) = self.reacting.clone() {
+            return self.finish_reaction(id, text);
         }
         if text.is_empty() {
             return Vec::new();
@@ -1857,10 +1877,10 @@ impl App {
 // ---- typing, editing, deleting, creating channels, search ------------------------------------------------------------------------
 
 impl App {
-    /// Tell the others we are typing: at most once every three seconds per channel/thread, never for commands, edits or in
-    /// read-only mode.
+    /// Tell the others we are typing: at most once every three seconds per channel/thread, never for commands, edits,
+    /// reactions or in read-only mode.
     fn maybe_typing(&mut self) -> Vec<Cmd> {
-        if !self.send_typing || self.read_only || self.editing.is_some() || self.editor.is_empty() || self.editor.text().starts_with('/') {
+        if !self.send_typing || self.read_only || self.editing.is_some() || self.reacting.is_some() || self.editor.is_empty() || self.editor.text().starts_with('/') {
             return Vec::new();
         }
         let Some(c) = self.channel() else { return Vec::new() };
@@ -1918,6 +1938,63 @@ impl App {
         }
         let Some(c) = self.channel() else { return Vec::new() };
         vec![Cmd::Edit { channel: c.id.clone(), id, text }]
+    }
+
+    /// `a`: react to the selected message. The prompt opens on the reaction you already have, so the same key changes it —
+    /// or removes it, with Enter on an empty prompt (see `finish_reaction`).
+    fn start_reaction(&mut self, m: &Ev) {
+        if self.read_only {
+            self.flash("read-only mode: nothing is sent");
+            return;
+        }
+        self.editor.clear();
+        if let Some((_, emoji)) = self.my_reaction(&m.id) {
+            self.editor.insert_str(&emoji);
+        }
+        self.editing = None;
+        self.reply_target = None;
+        self.reacting = Some(m.id.clone());
+        self.set_focus(Focus::Input);
+    }
+
+    /// Your own reaction on a message: the reaction event id (so it can be undone) and the emoji, when you reacted to it.
+    fn my_reaction(&self, target: &str) -> Option<(String, String)> {
+        let store = self.store()?;
+        store
+            .reaction_ids
+            .iter()
+            .find(|(_, (msg, _, who))| msg == target && who == &self.me)
+            .map(|(id, (_, emoji, _))| (id.clone(), emoji.clone()))
+    }
+
+    /// Enter on the reaction prompt: send the reaction, undo the one it replaces, or take yours away when the prompt is empty.
+    fn finish_reaction(&mut self, target: String, prompt: String) -> Vec<Cmd> {
+        self.reacting = None;
+        self.editor.clear();
+        // A reaction is one emoji: take the first word of what was typed, and stay inside NIP-25's 64 characters.
+        let emoji: String = prompt.split_whitespace().next().unwrap_or("").chars().take(64).collect();
+        match self.my_reaction(&target) {
+            None if emoji.is_empty() => {
+                self.flash("type an emoji to react (Esc cancels)");
+                Vec::new()
+            }
+            None => {
+                self.flash(format!("reacted {emoji}"));
+                vec![Cmd::React { target, emoji, remove: None }]
+            }
+            Some((_, old)) if old == emoji => {
+                self.flash(format!("already reacted {emoji}"));
+                Vec::new()
+            }
+            Some((id, _)) if emoji.is_empty() => {
+                self.flash("reaction removed");
+                vec![Cmd::React { target, emoji: String::new(), remove: Some(id) }]
+            }
+            Some((id, _)) => {
+                self.flash(format!("reacted {emoji}"));
+                vec![Cmd::React { target, emoji, remove: Some(id) }]
+            }
+        }
     }
 
     fn ask_delete(&mut self, m: &Ev) {

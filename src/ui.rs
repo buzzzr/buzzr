@@ -21,7 +21,9 @@ fn faint() -> Style {
 }
 
 fn key_hint(key: &str, what: &str) -> Vec<Span<'static>> {
-    vec![Span::styled(format!(" {key} "), Style::default().add_modifier(Modifier::REVERSED)), Span::styled(format!(" {what}  "), dim())]
+    // One space either side of the label: the footer carries a key per action, and the reaction key only fits at 100 columns with
+    // the tighter gap.
+    vec![Span::styled(format!(" {key} "), Style::default().add_modifier(Modifier::REVERSED)), Span::styled(format!(" {what} "), dim())]
 }
 
 /// The scheme's own background and text colour; a scheme that leaves both to the terminal gives the default style.
@@ -272,6 +274,8 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     }
     let text = if let Some(t) = app.flash_text() {
         t.to_owned()
+    } else if app.reacting.is_some() {
+        "reacting · Enter sends the emoji, Esc cancels".to_owned()
     } else if app.reply_target.is_some() {
         "replying in a thread · Esc cancels".to_owned()
     } else if app.in_thread() {
@@ -337,6 +341,8 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect, inner_w: usize) {
     let focused = app.focus == Focus::Input;
     let title = if app.editing.is_some() {
         " edit message "
+    } else if app.reacting.is_some() {
+        " react "
     } else if app.reply_target.is_some() || app.in_thread() {
         " reply in thread "
     } else {
@@ -346,7 +352,13 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect, inner_w: usize) {
     let inner = block.inner(area);
     f.render_widget(block, area);
     if app.editor.is_empty() {
-        let hint = if app.read_only { "read-only: nothing will be sent" } else { "Type a message · /help for commands · F1 for keys" };
+        let hint = if app.read_only {
+            "read-only: nothing will be sent"
+        } else if app.reacting.is_some() {
+            "Type an emoji · Enter sends · Esc cancels · an empty prompt removes yours"
+        } else {
+            "Type a message · /help for commands · F1 for keys"
+        };
         f.render_widget(Paragraph::new(Span::styled(hint, dim())), inner);
     } else {
         let lines: Vec<Line> = app.editor.rows(inner_w).iter().map(|r| Line::raw(app.editor.row_text(r))).collect();
@@ -368,6 +380,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         Focus::Messages => {
             spans.extend(key_hint("⏎", if app.in_thread() { "Reply" } else { "Open thread" }));
             spans.extend(key_hint("r", "Reply"));
+            spans.extend(key_hint("a", "React"));
             spans.extend(key_hint("c", "Copy"));
             spans.extend(key_hint("u", "Mark unread"));
             if app.selected_is_own() {
@@ -379,13 +392,18 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
             }
         }
         Focus::Input => {
-            spans.extend(key_hint("⏎", "Send"));
-            // Only name Shift+Enter where the terminal confirmed it reports it; Alt+Enter works in every terminal.
-            spans.extend(key_hint(if app.keyboard_enhanced { "Shift+⏎" } else { "Alt+⏎" }, "New line"));
-            if app.editing.is_some() {
-                spans.extend(key_hint("esc", "Cancel edit"));
-            } else if app.reply_target.is_some() {
-                spans.extend(key_hint("esc", "Cancel reply"));
+            if app.reacting.is_some() {
+                spans.extend(key_hint("⏎", "Send reaction"));
+                spans.extend(key_hint("esc", "Cancel"));
+            } else {
+                spans.extend(key_hint("⏎", "Send"));
+                // Only name Shift+Enter where the terminal confirmed it reports it; Alt+Enter works in every terminal.
+                spans.extend(key_hint(if app.keyboard_enhanced { "Shift+⏎" } else { "Alt+⏎" }, "New line"));
+                if app.editing.is_some() {
+                    spans.extend(key_hint("esc", "Cancel edit"));
+                } else if app.reply_target.is_some() {
+                    spans.extend(key_hint("esc", "Cancel reply"));
+                }
             }
         }
     }
@@ -416,6 +434,7 @@ pub const KEYS: &[(&str, &str)] = &[
     ("PgUp / PgDn, Home / End", "scroll, first, last"),
     ("Enter", "open the thread and read it (in a thread: reply)"),
     ("r", "reply in the thread of the selected message"),
+    ("a", "react to the selected message (you type the emoji; Enter sends it, Esc cancels, an empty prompt removes yours)"),
     ("c", "copy the selected message to the clipboard"),
     ("u", "mark the selected message unread (until /read)"),
     ("e", "edit the selected message (yours only)"),
@@ -481,6 +500,8 @@ pub const HELP: &[&str] = &[
     "Search (Ctrl+F): channel names, people and full-text message search; Enter opens the result — a person starts a DM.",
     "A person is found by the name in their profile, or by their npub (hex or npub1…): /dm and /whois take either.",
     "Others see \"typing…\" while you write (start with --no-typing to turn that off).",
+    "`a` reacts to the selected message: type an emoji and Enter, Esc cancels. The prompt opens on your own reaction, so the",
+    "same key changes it; an empty prompt removes it.",
     "Enter sends. Alt+Enter and Ctrl+J add a line in any terminal; the footer names the one that works here.",
     "Shift+Enter adds a line only where the terminal reports it: kitty, foot, WezTerm, Ghostty, iTerm2.",
     "",
@@ -685,6 +706,25 @@ mod tests {
         assert!(s.contains("Open thread") && s.contains("Switch pane"), "footer hints\n{s}");
         assert!(s.contains("Mark unread"), "the message pane advertises the unread key\n{s}");
         assert!(!s.contains("**"), "markdown is rendered, not shown");
+    }
+
+    #[test]
+    fn the_footer_names_the_reaction_key_and_the_prompt_says_what_it_does() {
+        let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        let mut app = app();
+        app.focus = Focus::Messages;
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(s.contains("React"), "the message pane advertises the reaction key\n{s}");
+        assert!(s.contains("Switch pane") && s.contains("Delete"), "and the key does not push the navigation hints out\n{s}");
+
+        app.handle(AppEvent::Key(ratatui::crossterm::event::KeyEvent::new(ratatui::crossterm::event::KeyCode::Char('a'), ratatui::crossterm::event::KeyModifiers::NONE)));
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(s.contains(" react "), "the composer switches to a reaction prompt\n{s}");
+        assert!(s.contains("reacting · Enter sends the emoji, Esc cancels"), "the status line says what Enter and Esc do\n{s}");
+        assert!(s.contains("Type an emoji"), "an empty prompt says what to type\n{s}");
+        assert!(s.contains("Send reaction") && s.contains("Cancel"), "the footer follows the prompt\n{s}");
     }
 
     #[test]
