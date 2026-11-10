@@ -826,9 +826,15 @@ mod tests {
         assert!(screen(&term).join("\n").contains("/r N text"));
         assert!(screen(&term).join("\n").contains("/update"), "the help screen lists /update");
         app.overlay = Overlay::None;
-        app.typing.insert(("c1".into(), "bob".into()), std::time::Instant::now());
+        app.typing.insert(("c1".into(), None, "bob".into()), std::time::Instant::now());
         term.draw(|f| draw(f, &mut app)).unwrap();
         assert!(screen(&term).join("\n").contains("Bob is typing"));
+
+        // an indicator sent in a thread stays out of the channel
+        app.typing.clear();
+        app.typing.insert(("c1".into(), Some("a".into()), "bob".into()), std::time::Instant::now());
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        assert!(!screen(&term).join("\n").contains("is typing"), "a thread's typist is not drawn in the channel");
     }
 
     #[test]

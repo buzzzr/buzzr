@@ -213,7 +213,9 @@ pub struct App {
     /// Where each channel's last visit stopped, for the "new messages" line: taken from `read` as a channel is opened and kept
     /// while we stay in it, so reading on does not move the line under the reader.
     new_since: HashMap<String, u64>,
-    pub typing: HashMap<(String, String), Instant>,
+    /// Who is typing right now: `(channel id, thread root or None, author)` -> when we last heard from them. The root is
+    /// part of the key so an indicator is shown in the channel or the thread it was sent in, not everywhere in the channel.
+    pub typing: HashMap<(String, Option<String>, String), Instant>,
     flash: Option<(String, Instant)>,
     pub areas: Areas,
     pub view_h: usize,
@@ -421,10 +423,15 @@ impl App {
         self.latest.as_ref().map(|v| format!("{} {v} available · /update", env!("CARGO_PKG_NAME")))
     }
 
-    /// Names of people typing in the open channel right now.
+    /// Names of people typing in the open view right now: those in the channel, or those in the one thread on screen.
     pub fn typing_now(&self) -> Vec<String> {
-        let Some(c) = self.channel() else { return Vec::new() };
-        let mut v: Vec<(&String, &Instant)> = self.typing.iter().filter(|((ch, _), t)| ch == &c.id && t.elapsed() < TYPING_FOR).map(|((_, pk), t)| (pk, t)).collect();
+        let Some((channel, root)) = self.view_key() else { return Vec::new() };
+        let mut v: Vec<(&String, &Instant)> = self
+            .typing
+            .iter()
+            .filter(|((ch, r, _), t)| ch == &channel && r == &root && t.elapsed() < TYPING_FOR)
+            .map(|((_, _, pk), t)| (pk, t))
+            .collect();
         v.sort_by_key(|(pk, _)| pk.to_string());
         v.into_iter().map(|(pk, _)| self.name_of(pk)).collect()
     }
@@ -1264,13 +1271,13 @@ impl App {
         let Some(channel) = self.route(&e) else { return Vec::new() };
         if e.kind == crate::model::KIND_TYPING {
             if e.pubkey != self.me {
-                self.typing.insert((channel, e.pubkey.clone()), Instant::now());
+                self.typing.insert((channel, e.root_hint().map(str::to_owned), e.pubkey.clone()), Instant::now());
             }
             return Vec::new();
         }
         let is_message = MESSAGE_KINDS.contains(&e.kind);
         if is_message {
-            self.typing.remove(&(channel.clone(), e.pubkey.clone()));
+            self.typing.remove(&(channel.clone(), e.root_hint().map(str::to_owned), e.pubkey.clone()));
             let current = self.channel().map(|c| c.id == channel).unwrap_or(false);
             // Only rows the channel timeline lists raise its badge; a thread reply is unread per thread (`thread_read`), not
             // per channel, and there is no channel position it could ever move to clear the badge.
