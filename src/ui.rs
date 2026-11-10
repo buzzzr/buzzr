@@ -73,6 +73,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     draw_status(f, app, status);
     draw_input(f, app, input, input_inner_w);
     draw_footer(f, app, footer);
+    if app.palette_up() {
+        draw_command_palette(f, app, input);
+    }
     if app.react.is_some() {
         draw_react(f, app, area);
     }
@@ -338,6 +341,55 @@ fn spans_of(text: String, tone: crate::contrib::Tone, width: usize) -> Vec<Span<
     spans(&[crate::contrib::Segment { text, tone }], width)
 }
 
+/// The slash-command palette: while the input holds a `/command`, the commands whose name starts with what has been typed,
+/// drawn just above the input box. Enter runs the command on the cursor line, Tab fills its name in, and the arrows move the
+/// highlight. `app.palette_up()` decides when it is shown; here we only draw it.
+fn draw_command_palette(f: &mut Frame, app: &App, input: Rect) {
+    let rows = app.command_rows();
+    let want = if rows.is_empty() { 3 } else { rows.len() as u16 + 2 };
+    let w = input.width;
+    let h = want.min(input.y).min(12);
+    if h < 3 || w < 16 {
+        return;
+    }
+    let r = Rect::new(input.x, input.y - h, w, h);
+    clear_popup(f, r);
+    let block = Block::default().borders(Borders::ALL).border_style(Style::default().fg(crate::theme::get().accent)).title(" Commands · Enter runs · Tab completes ");
+    let inner = block.inner(r);
+    f.render_widget(block, r);
+    if inner.height == 0 {
+        return;
+    }
+    // Line the descriptions up in a column, measured in cells (a plugin may register a name with wide characters).
+    let name_w = rows.iter().map(|row| row.name.width()).max().unwrap_or(0).min((inner.width as usize).saturating_sub(6));
+    let vis = inner.height as usize;
+    let start = app.cmd_cursor.saturating_sub(vis.saturating_sub(1) / 2).min(rows.len().saturating_sub(vis));
+    let mut lines: Vec<Line> = Vec::new();
+    for (i, row) in rows.iter().enumerate().skip(start).take(vis) {
+        let label = format!("/{:<width$}", row.name, width = name_w);
+        let room = (inner.width as usize).saturating_sub(label.width() + 3); // marker + label + a space, and one to spare
+        let mut desc = row.desc.clone();
+        while desc.width() > room {
+            desc.pop();
+        }
+        let spans = vec![
+            Span::raw(if i == app.cmd_cursor { "▌" } else { " " }),
+            Span::styled(label, Style::default().fg(crate::theme::get().accent)),
+            Span::raw(" "),
+            Span::styled(desc, dim()),
+        ];
+        let mut line = Line::from(spans);
+        if i == app.cmd_cursor {
+            line = line.style(Style::default().bg(crate::theme::get().sel_bg));
+        }
+        lines.push(line);
+    }
+    if rows.is_empty() {
+        lines.push(Line::from(Span::styled(" no matching command", dim())));
+    }
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
 fn draw_input(f: &mut Frame, app: &App, area: Rect, inner_w: usize) {
     let focused = app.focus == Focus::Input;
     let title = if app.editing.is_some() {
@@ -372,7 +424,11 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect, inner_w: usize) {
 
 fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
     let mut spans: Vec<Span> = Vec::new();
-    if app.react.is_some() {
+    if app.palette_up() {
+        spans.extend(key_hint("↑↓", "Move"));
+        spans.extend(key_hint("⏎", "Run"));
+        spans.extend(key_hint("tab", "Complete"));
+    } else if app.react.is_some() {
         spans.extend(key_hint("type", "Search"));
         spans.extend(key_hint("⏎", "Send"));
         spans.extend(key_hint("esc", "Close"));
@@ -441,6 +497,12 @@ pub const KEYS: &[(&str, &str)] = &[
     ("click", "select; open the thread; on a link: copy it"),
     ("mouse wheel", "scroll"),
     ("", ""),
+    ("Command palette (while a `/command` is typed)", ""),
+    ("type", "narrow the commands whose name starts with it"),
+    ("Up / Down", "move the highlight"),
+    ("Enter", "run the command on the cursor line"),
+    ("Tab", "complete its name into the input, ready for an argument"),
+    ("", ""),
     ("Reaction picker (from `a` on a message)", ""),
     ("type", "search the emoji by name, or type an emoji to send it as-is"),
     ("Up / Down", "move the cursor"),
@@ -457,6 +519,7 @@ pub const KEYS: &[(&str, &str)] = &[
     ("", ""),
     ("Writing", ""),
     ("Enter", "send"),
+    ("/", "start a `/command`: a palette lists the commands and narrows as you type"),
     ("Up, nothing typed", "back to the messages, on the newest one"),
     ("Alt+Enter, Ctrl+J", "new line, in any terminal"),
     ("Shift+Enter", "new line, where the terminal reports it"),
@@ -499,6 +562,8 @@ pub const HELP: &[&str] = &[
     "  /update     how to upgrade this copy (brew, cargo or the release page)",
     "A newer release shows up in the status line (BUZZR_NO_UPDATE_CHECK=1 turns the once-a-day check off).",
     "  /read       mark this channel read     /read all   mark every channel read",
+    "Typing `/` lists the commands above the input: keep typing to narrow them, Enter runs the one on the cursor, and Tab",
+    "fills its name in for a command that takes an argument (the list holds anything plugins added too).",
     "Unread survives a restart: it comes from the last-read position per channel and per thread in",
     "~/.config/buzzr/read-state.json, and a \"new messages\" line marks where new messages start.",
     "Search (Ctrl+F): channel names, people and full-text message search; Enter opens the result — a person starts a DM.",
@@ -1145,5 +1210,29 @@ mod tests {
         let s = screen(&term).join("\n");
         assert!(s.contains("Pull requests") && s.contains("#42 fix the anchor"), "{s}");
         assert!(s.contains("Esc closes"), "the panel title bar says how to leave\n{s}");
+    }
+
+    #[test]
+    fn typing_a_slash_command_shows_the_palette_above_the_input() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        let mut app = app();
+        app.focus = Focus::Input;
+        let key = |c: char| AppEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        app.handle(key('/'));
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(s.contains("Commands · Enter runs · Tab completes"), "the palette opens with a title that names the keys\n{s}");
+        assert!(s.contains("/help") && s.contains("the commands and how things work"), "and lists a command with what it does\n{s}");
+        assert!(s.contains("/q") && s.contains("quit buzzr"), "the list is scrolled from the first row\n{s}");
+        assert!(s.contains("Run") && s.contains("Complete"), "the footer follows the palette\n{s}");
+
+        // typing narrows the list to the commands that still match
+        app.handle(key('h'));
+        app.handle(key('e'));
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(s.contains("/help") && s.contains("the commands and how things work"), "the command that still matches\n{s}");
+        assert!(!s.contains("/search") && !s.contains("load older messages"), "the ones that do not drop out\n{s}");
     }
 }

@@ -112,6 +112,36 @@ pub enum Row {
     Message(Ev),
 }
 
+/// The built-in commands, in the order the palette lists them, with the one line it shows beside each name. `command` is the
+/// source of truth for what a `/command` does; this table only names them, and `the_palette_names_every_command_that_is_handled`
+/// keeps the two from drifting apart.
+pub const COMMANDS: &[(&str, &str)] = &[
+    ("c", "back to the channel"),
+    ("copy", "copy message N to the clipboard"),
+    ("delete", "delete your own message N (asks first)"),
+    ("dm", "open your DM with NAME, or start one"),
+    ("edit", "edit your own message N"),
+    ("help", "the commands and how things work"),
+    ("more", "load older messages"),
+    ("new", "create a channel: /new [private] name [about]"),
+    ("plugins", "what is loaded, and the commands plugins added"),
+    ("q", "quit buzzr"),
+    ("r", "reply to message N: /r N text"),
+    ("read", "mark this channel read (/read all for every channel)"),
+    ("refresh", "reload the open channel or thread now"),
+    ("search", "search channels, people and messages: /search text"),
+    ("t", "open the thread of message N"),
+    ("update", "how to upgrade this copy"),
+    ("whois", "somebody's profile: /whois NAME"),
+];
+
+/// One row of the slash-command palette: a command name and the one line under it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommandRow {
+    pub name: String,
+    pub desc: String,
+}
+
 /// The reaction picker (`a` on a selected message): the message it reacts to, what has been typed to search the emoji table, and
 /// the row the cursor is on. It takes the keyboard while it is up; the message keeps its selection underneath.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -266,6 +296,9 @@ pub struct App {
     pub confirm_delete: Option<String>,
     /// The reaction picker, while it is up: the message it reacts to, what has been typed to search, and the row under the cursor.
     pub react: Option<ReactPicker>,
+    /// The slash-command palette's row under the cursor. The palette itself is derived from the editor text (`command_rows`);
+    /// this is only where the highlight sits, reset to the first row every time the command word changes.
+    pub cmd_cursor: usize,
     pub search: Search,
     /// Somebody's profile card, while `Overlay::Whois` is up.
     pub whois: Option<Whois>,
@@ -345,6 +378,7 @@ impl App {
             editing: None,
             confirm_delete: None,
             react: None,
+            cmd_cursor: 0,
             search: Search { query: Editor::default(), messages: Vec::new(), cursor: 0, seq: 0, asked: String::new(), edited_at: Instant::now(), loading: false },
             whois: None,
             pending_dm: None,
@@ -1374,6 +1408,11 @@ impl App {
             return Vec::new();
         }
         match k.code {
+            // Tab completes the highlighted command while the palette is up, rather than switching panes.
+            KeyCode::Tab if self.palette_up() => {
+                self.palette_complete();
+                return Vec::new();
+            }
             KeyCode::Tab => {
                 let next = match self.focus {
                     Focus::Channels => Focus::Messages,
@@ -1585,10 +1624,13 @@ impl App {
         match k.code {
             KeyCode::Enter if shift || alt => self.editor.insert_char('\n'),
             KeyCode::Char('j') if ctrl => self.editor.insert_char('\n'),
+            // With the palette up, Enter runs the command on the cursor line rather than submitting the half-typed word.
+            KeyCode::Enter if self.palette_up() => return self.palette_run(),
             KeyCode::Enter => return self.submit(),
             KeyCode::Esc => {
                 if self.editing.take().is_some() {
                     self.editor.clear();
+                    self.cmd_cursor = 0;
                     self.flash("edit cancelled");
                 } else if self.reply_target.take().is_some() {
                     self.flash("reply cancelled");
@@ -1598,14 +1640,17 @@ impl App {
             }
             KeyCode::Backspace if alt => {
                 self.editor.kill_word_back();
+                self.cmd_cursor = 0;
                 return self.maybe_typing();
             }
             KeyCode::Backspace => {
                 self.editor.backspace();
+                self.cmd_cursor = 0;
                 return self.maybe_typing();
             }
             KeyCode::Delete => {
                 self.editor.delete();
+                self.cmd_cursor = 0;
                 return self.maybe_typing();
             }
             KeyCode::Left if ctrl || alt => self.editor.word_left(),
@@ -1614,6 +1659,9 @@ impl App {
             KeyCode::Right => self.editor.right(),
             KeyCode::Home => self.editor.home(),
             KeyCode::End => self.editor.end(),
+            // While the palette is up the arrows move its highlight, not the editor cursor: the command word is one line.
+            KeyCode::Up if self.palette_up() => self.palette_move(-1),
+            KeyCode::Down if self.palette_up() => self.palette_move(1),
             KeyCode::Up if self.editor.is_empty() => {
                 // Nothing typed: Up leaves the input for the message list, on the newest message, so the arrow keys
                 // get from the composer to the messages without a Tab cycle (see the Down arm in `key_messages`).
@@ -1628,15 +1676,26 @@ impl App {
             }
             KeyCode::Char('a') if ctrl => self.editor.home(),
             KeyCode::Char('e') if ctrl => self.editor.end(),
-            KeyCode::Char('w') if ctrl => self.editor.kill_word_back(),
-            KeyCode::Char('u') if ctrl => self.editor.kill_to_start(),
-            KeyCode::Char('k') if ctrl => self.editor.kill_to_end(),
+            KeyCode::Char('w') if ctrl => {
+                self.editor.kill_word_back();
+                self.cmd_cursor = 0;
+            }
+            KeyCode::Char('u') if ctrl => {
+                self.editor.kill_to_start();
+                self.cmd_cursor = 0;
+            }
+            KeyCode::Char('k') if ctrl => {
+                self.editor.kill_to_end();
+                self.cmd_cursor = 0;
+            }
             KeyCode::Char('b') if alt => self.editor.word_left(),
             KeyCode::Char('f') if alt => self.editor.word_right(),
             KeyCode::Char(c) if !ctrl && !alt => {
                 self.editor.insert_char(c);
+                self.cmd_cursor = 0;
                 return self.maybe_typing();
             }
+            // Tab never reaches here while the palette is up: `handle` completes the command first.
             KeyCode::Tab => self.editor.insert_str("    "),
             _ => {}
         }
@@ -1656,6 +1715,7 @@ impl App {
         if let Some(rest) = text.strip_prefix('/') {
             let (cmd, arg) = rest.split_once(char::is_whitespace).map(|(c, a)| (c, a.trim())).unwrap_or((rest, ""));
             self.editor.clear();
+            self.cmd_cursor = 0;
             return self.command(cmd, arg);
         }
         let root = self.reply_target.take().or_else(|| match &self.view {
@@ -1663,6 +1723,7 @@ impl App {
             View::Channel => None,
         });
         self.editor.clear();
+        self.cmd_cursor = 0;
         self.typing_sent = None;
         self.send(text, root)
     }
@@ -1765,6 +1826,91 @@ impl App {
                 Vec::new()
             }
         }
+    }
+
+    // ---- slash-command palette -------------------------------------------------------------------------------------------
+
+    /// What has been typed of a `/command`, while it is still one unbroken word: `Some("he")` for `/he`, `Some("")` for a
+    /// lone `/`. `None` once an argument begins (a space or a newline) or when the input is not a command at all — including
+    /// while a message is being edited, where a leading `/` is message text rather than a command.
+    pub fn command_query(&self) -> Option<String> {
+        if self.editing.is_some() {
+            return None;
+        }
+        let text = self.editor.text();
+        let rest = text.strip_prefix('/')?;
+        if rest.chars().any(char::is_whitespace) {
+            return None;
+        }
+        Some(rest.to_owned())
+    }
+
+    /// The palette is up while the input holds `/command` (see `command_query`), nothing is covering the screen, and the
+    /// keyboard is in the input. It is derived from that state: it needs no open/close of its own.
+    pub fn palette_up(&self) -> bool {
+        self.focus == Focus::Input && self.overlay == Overlay::None && self.command_query().is_some()
+    }
+
+    /// The rows the palette shows: the built-ins whose name starts with what has been typed, then the commands loaded
+    /// plugins added. Empty when the input is not a command word (see `command_query`).
+    pub fn command_rows(&self) -> Vec<CommandRow> {
+        let Some(q) = self.command_query() else { return Vec::new() };
+        let q = q.to_lowercase();
+        let mut rows: Vec<CommandRow> = COMMANDS
+            .iter()
+            .filter(|(name, _)| name.starts_with(&q))
+            .map(|(name, desc)| CommandRow { name: (*name).to_owned(), desc: (*desc).to_owned() })
+            .collect();
+        // A plugin may register anything; sort its commands by name so the list does not depend on the registry's order.
+        let mut plugin_rows: Vec<CommandRow> = self
+            .plugins
+            .commands()
+            .into_iter()
+            .filter(|(_, c)| c.id.to_lowercase().starts_with(&q))
+            .map(|(plugin, c)| {
+                let desc = if !c.title.is_empty() {
+                    c.title.clone()
+                } else if !c.usage.is_empty() {
+                    c.usage.clone()
+                } else {
+                    format!("a command from {plugin}")
+                };
+                CommandRow { name: c.id.clone(), desc }
+            })
+            .collect();
+        plugin_rows.sort_by(|a, b| a.name.cmp(&b.name));
+        rows.extend(plugin_rows);
+        rows
+    }
+
+    /// Move the palette cursor by `delta` rows, staying in range.
+    fn palette_move(&mut self, delta: isize) {
+        let n = self.command_rows().len();
+        if n == 0 {
+            self.cmd_cursor = 0;
+            return;
+        }
+        self.cmd_cursor = (self.cmd_cursor as isize + delta).clamp(0, n as isize - 1) as usize;
+    }
+
+    /// Enter in the palette: run the command on the cursor line. With no match, submit as typed, so the usual
+    /// `unknown command` line still answers a typo.
+    fn palette_run(&mut self) -> Vec<Cmd> {
+        let rows = self.command_rows();
+        let Some(row) = rows.get(self.cmd_cursor).cloned() else { return self.submit() };
+        self.editor.clear();
+        self.cmd_cursor = 0;
+        self.command(&row.name, "")
+    }
+
+    /// Tab in the palette: put the command on the cursor line into the input, with a space, so an argument can follow.
+    /// The trailing space ends the command word, which closes the palette (see `command_query`).
+    fn palette_complete(&mut self) {
+        let rows = self.command_rows();
+        let Some(row) = rows.get(self.cmd_cursor).cloned() else { return };
+        self.editor.clear();
+        self.editor.insert_str(&format!("/{} ", row.name));
+        self.cmd_cursor = 0;
     }
 
     fn send(&mut self, text: String, root: Option<String>) -> Vec<Cmd> {

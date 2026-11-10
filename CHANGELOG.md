@@ -7,6 +7,9 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
 
 ### Added
 
+- Typing `/` in the input shows a slash-command palette above it: the list narrows to the commands whose name starts with
+  what has been typed, Enter runs the command on the cursor line, and Tab fills its name in for one that takes an argument.
+  The commands loaded plugins registered appear in the list too.
 - `a` opens a reaction picker on the selected message: choose an emoji from the list, or type a name to search it (or an emoji the
   list does not have). Enter sends it as a NIP-25 `kind:7` and Esc closes. The picker opens on the reaction you already have there,
   and its first row takes it back; changing an emoji undoes the one it replaces first, so a message keeps one reaction from you.

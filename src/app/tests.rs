@@ -1683,3 +1683,126 @@ fn a_refresh_in_another_relay_order_keeps_the_open_channel_and_the_cursor() {
     assert_eq!(app.channel().map(|c| c.id.clone()), open);
     assert!(!cmds.iter().any(|c| matches!(c, Cmd::Subscribe(_))), "same channels, no resubscribe");
 }
+
+// ---- slash-command palette ---------------------------------------------------------------------------------------------------
+
+/// The app with the keyboard in the input (channels -> messages -> input), where a `/command` is typed.
+fn at_input(n: usize) -> App {
+    let mut app = app_with(n);
+    press(&mut app, KeyCode::Tab);
+    assert_eq!(app.focus, Focus::Input);
+    app
+}
+
+#[test]
+fn the_palette_is_up_while_a_command_word_is_typed_and_narrows_as_it_grows() {
+    let mut app = at_input(3);
+    assert!(!app.palette_up(), "no palette before the slash");
+    assert!(app.command_rows().is_empty());
+    type_text(&mut app, "/");
+    assert!(app.palette_up(), "a lone slash lists the commands");
+    assert_eq!(app.command_rows().len(), COMMANDS.len(), "every built-in command is listed");
+    assert_eq!(app.command_rows().first().unwrap().name, COMMANDS[0].0, "in the table's order");
+    type_text(&mut app, "he");
+    assert_eq!(
+        app.command_rows(),
+        vec![CommandRow { name: "help".into(), desc: "the commands and how things work".into() }],
+        "typing narrows to the names that still match"
+    );
+    // a space ends the command word: what follows is an argument, so the palette closes
+    type_text(&mut app, " ");
+    assert!(!app.palette_up());
+    assert!(app.command_rows().is_empty());
+}
+
+#[test]
+fn enter_runs_the_command_on_the_cursor_line() {
+    let mut app = at_input(3);
+    type_text(&mut app, "/sea");
+    assert_eq!(app.command_rows().len(), 1, "only /search starts with \"sea\"");
+    assert!(press(&mut app, KeyCode::Enter).is_empty(), "opening the search overlay sends nothing");
+    assert_eq!(app.overlay, Overlay::Search);
+    assert!(app.editor.is_empty(), "the input is cleared, as a submitted command is");
+}
+
+#[test]
+fn the_arrows_move_the_palette_and_tab_fills_the_command_in() {
+    let mut app = at_input(3);
+    type_text(&mut app, "/");
+    assert_eq!(app.cmd_cursor, 0);
+    press(&mut app, KeyCode::Down);
+    assert_eq!(app.cmd_cursor, 1, "Down moves the highlight, not the editor");
+    press(&mut app, KeyCode::Up);
+    press(&mut app, KeyCode::Up);
+    assert_eq!(app.cmd_cursor, 0, "already at the top: the highlight stays");
+    // Tab fills the command on the cursor line into the input and lets an argument follow
+    press(&mut app, KeyCode::Tab);
+    assert_eq!(app.editor.text(), format!("/{} ", COMMANDS[0].0));
+    assert!(!app.palette_up(), "the trailing space ends the command word");
+}
+
+#[test]
+fn a_changed_command_word_drops_the_highlight_back_to_the_first_row() {
+    let mut app = at_input(3);
+    type_text(&mut app, "/");
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Down);
+    assert_eq!(app.cmd_cursor, 2);
+    type_text(&mut app, "c");
+    assert_eq!(app.cmd_cursor, 0, "a changed word drops the highlight back to the first row");
+    assert!(app.command_rows().iter().all(|r| r.name.starts_with('c')));
+}
+
+#[test]
+fn the_palette_belongs_to_the_input_and_not_to_an_edit() {
+    let mut app = at_input(3);
+    type_text(&mut app, "/he");
+    assert!(app.palette_up());
+    press(&mut app, KeyCode::Esc); // nothing to cancel: back to the messages
+    assert_eq!(app.focus, Focus::Messages);
+    assert!(!app.palette_up(), "the palette is shown only while the input has the keyboard");
+    press(&mut app, KeyCode::Tab);
+    assert_eq!(app.focus, Focus::Input);
+    assert!(app.palette_up(), "the draft is still a command word");
+
+    // while editing a message a leading slash is message text, not a command
+    let mut app = at_input(3);
+    app.editing = Some("m001".into());
+    type_text(&mut app, "/he");
+    assert!(!app.palette_up());
+    assert!(app.command_rows().is_empty());
+}
+
+#[test]
+fn a_plugin_command_is_offered_in_the_palette_and_run_from_it() {
+    let mut app = at_input(3);
+    app.handle(ready("github", "GitHub", "prs"));
+    type_text(&mut app, "/pr");
+    let rows = app.command_rows();
+    assert!(rows.iter().any(|r| r.name == "prs"), "a plugin command is listed: {rows:?}");
+    let cmds = press(&mut app, KeyCode::Enter);
+    assert_eq!(cmds, vec![Cmd::Plugin(PluginCmd::Invoke { plugin: "github".into(), command: "prs".into(), args: String::new() })]);
+}
+
+#[test]
+fn a_typo_still_reports_an_unknown_command() {
+    let mut app = at_input(3);
+    type_text(&mut app, "/zzz");
+    assert!(app.palette_up(), "the palette is up until the word is finished, even with no match");
+    assert!(app.command_rows().is_empty());
+    assert!(press(&mut app, KeyCode::Enter).is_empty());
+    assert_eq!(app.flash_text(), Some("unknown command /zzz (try /help)"));
+    assert!(app.editor.is_empty());
+}
+
+#[test]
+fn the_palette_names_every_command_that_is_handled() {
+    // If a command is added to `command` and the palette table is forgotten, its line here fails. Each name runs on its own
+    // app: `q` quits and `/help` opens an overlay.
+    for (name, _) in COMMANDS {
+        let mut app = at_input(1);
+        app.command(name, "");
+        let flash = app.flash_text().unwrap_or_default();
+        assert!(!flash.starts_with("unknown command"), "/{name} is in the palette but not handled: {flash:?}");
+    }
+}

@@ -523,6 +523,37 @@ fn typing_reaches_the_input_box() {
 }
 
 #[test]
+fn a_slash_opens_the_command_palette_and_enter_runs_the_command() {
+    let Some(relay) = relay_or_skip("a_slash_opens_the_command_palette_...") else { return };
+    let s = session(&relay);
+    s.press_all(&["tab", "tab"]); // channels -> messages -> input
+    s.expect("the input box to take focus", "Send");
+    // a lone slash lists the commands right away
+    s.type_text("/");
+    s.expect("the command palette", "Commands · Enter runs · Tab completes");
+    s.expect("a command with a line saying what it does", "the commands and how things work");
+    s.expect("the footer to follow the palette", "Run");
+    // typing narrows the list to the names that still match
+    s.type_text("help");
+    s.expect("the list narrowed to /help", "/help");
+    s.expect_gone("the other commands dropped out", "load older messages");
+    // Enter runs the command on the cursor line: /help opens the help overlay
+    s.press("enter");
+    s.expect("Enter to run the command", "/r N text");
+    s.press("esc");
+    s.expect_gone("the help overlay to close", "/r N text");
+
+    // Tab fills the highlighted command into the input (with a space) instead of running it, so an argument can follow
+    s.type_text("/sea");
+    s.expect("the palette for /sea", "Commands · Enter runs · Tab completes");
+    s.press("tab");
+    s.expect("the command filled into the input", "/search");
+    s.expect_gone("the palette closed once a space ends the word", "Commands · Enter runs · Tab completes");
+    s.press("enter"); // /search with no argument opens the search overlay
+    s.expect("the completed command to run", "Search · Enter opens");
+}
+
+#[test]
 fn u_marks_the_selected_message_unread_and_the_sidebar_counts_it() {
     let Some(relay) = relay_or_skip("u_marks_the_selected_message_...") else { return };
     let s = session(&relay);
