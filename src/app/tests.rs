@@ -20,6 +20,13 @@ fn reply(id: &str, at: u64, who: &str, parent: &str) -> Ev {
     msg(id, at, who, "a reply", &[&["e", parent, "", "reply"]])
 }
 
+/// A `kind:20002` typing indicator: `tags` carry the channel (`h`) and, in a thread, the root (`e`, marked `reply`).
+fn typing(id: &str, at: u64, who: &str, tags: &[&[&str]]) -> Ev {
+    let mut e = msg(id, at, who, "", tags);
+    e.kind = 20002;
+    e
+}
+
 fn key(code: KeyCode) -> AppEvent {
     AppEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
 }
@@ -785,16 +792,49 @@ fn the_channel_bar_follows_the_cursor_and_returns_to_the_open_channel() {
 fn typing_indicators_show_and_a_message_clears_them() {
     let mut app = app_with(2);
     app.names.insert("robot".into(), "robot".into());
-    let mut t = msg("t1", 1, "robot", "", &[&["h", "c1"]]);
-    t.kind = 20002;
-    app.handle(AppEvent::Live(Live::Event(t)));
+    app.handle(AppEvent::Live(Live::Event(typing("t1", 1, "robot", &[&["h", "c1"]]))));
     assert_eq!(app.typing_now(), ["robot"]);
     app.handle(AppEvent::Live(Live::Event(msg("a1", 9000, "robot", "done", &[&["h", "c1"]]))));
     assert!(app.typing_now().is_empty());
-    let mut mine = msg("t2", 2, ME, "", &[&["h", "c1"]]);
-    mine.kind = 20002;
-    app.handle(AppEvent::Live(Live::Event(mine)));
+    app.handle(AppEvent::Live(Live::Event(typing("t2", 2, ME, &[&["h", "c1"]]))));
     assert!(app.typing_now().is_empty(), "our own typing is not shown");
+}
+
+#[test]
+fn typing_is_shown_only_in_the_channel_or_thread_it_was_sent_in() {
+    let mut app = app_with(3);
+    app.names.insert(BOB.into(), "Bob".into());
+    app.names.insert("alice".into(), "Alice".into());
+    // Bob types in the channel; Alice types in the thread of the newest message (`m002`).
+    app.handle(AppEvent::Live(Live::Event(typing("t1", 10, BOB, &[&["h", "c1"]]))));
+    app.handle(AppEvent::Live(Live::Event(typing("t2", 11, "alice", &[&["h", "c1"], &["e", "m002", "", "reply"]]))));
+    assert_eq!(app.typing_now(), ["Bob"], "the channel names the channel typist only");
+
+    press(&mut app, KeyCode::Enter); // open the thread on the selected (newest) message
+    assert_eq!(app.typing_now(), ["Alice"], "the thread names its own typist only");
+}
+
+#[test]
+fn typing_in_one_thread_is_not_shown_in_another() {
+    let mut app = app_with(4);
+    app.names.insert("alice".into(), "Alice".into());
+    app.handle(AppEvent::Live(Live::Event(typing("t1", 10, "alice", &[&["h", "c1"], &["e", "m002", "", "reply"]]))));
+    press(&mut app, KeyCode::Enter); // the thread of `m003`, the selected (newest) message
+    assert!(app.typing_now().is_empty(), "another thread's typist is not shown here");
+}
+
+#[test]
+fn a_message_clears_the_indicator_of_its_own_place_only() {
+    let mut app = app_with(3);
+    app.names.insert(BOB.into(), "Bob".into());
+    app.names.insert("alice".into(), "Alice".into());
+    app.handle(AppEvent::Live(Live::Event(typing("t1", 10, BOB, &[&["h", "c1"]]))));
+    app.handle(AppEvent::Live(Live::Event(typing("t2", 11, "alice", &[&["h", "c1"], &["e", "m002", "", "reply"]]))));
+    // Alice's reply lands in the thread: that indicator goes, the channel's stays.
+    app.handle(AppEvent::Live(Live::Event(msg("r1", 12, "alice", "here it is", &[&["h", "c1"], &["e", "m002", "", "reply"]]))));
+    assert_eq!(app.typing_now(), ["Bob"], "the channel typist is untouched");
+    press(&mut app, KeyCode::Enter);
+    assert!(app.typing_now().is_empty(), "the thread's typist was cleared by the reply");
 }
 
 #[test]

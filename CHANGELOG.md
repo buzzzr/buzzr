@@ -5,6 +5,12 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
 
 ## [Unreleased]
 
+### Fixed
+
+- A `… is typing` indicator was shown for the whole channel it arrived in: typing sent inside a thread was drawn in the channel
+  timeline, and typing sent in the channel was drawn inside every thread. An indicator is now shown only in the channel or the
+  thread it was sent in.
+
 ## [0.2.0-rc.1] - 2026-11-09
 
 ### Added
