@@ -2,6 +2,7 @@ mod app;
 mod config;
 mod contrib;
 mod editor;
+mod emoji;
 mod keyfile;
 mod list;
 mod live;
@@ -388,6 +389,24 @@ fn run(cmd: Cmd, relay: &Arc<Relay>, tx: &UnboundedSender<AppEvent>, subscriptio
         Cmd::Delete { channel, id } => {
             tokio::spawn(async move {
                 let result = async { relay.submit(relay::delete_builder(&channel, &id)?).await }.await.map_err(e);
+                let _ = tx.send(AppEvent::Sent(result));
+            });
+        }
+        Cmd::React { target, emoji, remove } => {
+            tokio::spawn(async move {
+                // Undo the reaction this one replaces first, so a change never leaves two emoji from the same person.
+                let result = async {
+                    let mut sent = String::new();
+                    if let Some(reaction) = remove.as_deref() {
+                        sent = relay.submit(relay::remove_reaction_builder(reaction)?).await?;
+                    }
+                    if !emoji.is_empty() {
+                        sent = relay.submit(relay::reaction_builder(&target, &emoji)?).await?;
+                    }
+                    Ok::<String, anyhow::Error>(sent)
+                }
+                .await
+                .map_err(e);
                 let _ = tx.send(AppEvent::Sent(result));
             });
         }

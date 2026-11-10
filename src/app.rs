@@ -6,6 +6,7 @@
 use crate::config::ReadState;
 use crate::contrib::{self, PanelRow, PluginCmd, PluginEvent, PluginMeta, PluginState, Projection, Registry};
 use crate::editor::Editor;
+use crate::emoji::emoji_of;
 use crate::list::{self, Layout, ListState, Rendered};
 use crate::live::Live;
 use crate::markdown::{self, Line};
@@ -111,6 +112,23 @@ pub enum Row {
     Message(Ev),
 }
 
+/// The reaction picker (`a` on a selected message): the message it reacts to, what has been typed to search the emoji table, and
+/// the row the cursor is on. It takes the keyboard while it is up; the message keeps its selection underneath.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReactPicker {
+    pub target: String,
+    pub query: String,
+    pub cursor: usize,
+}
+
+/// One row of the reaction picker: taking your reaction back, an emoji from the table, or what you typed when no name matches.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReactRow {
+    Remove(String),
+    Emoji(String),
+    Typed(String),
+}
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Conn {
     Connecting,
@@ -135,6 +153,9 @@ pub enum Cmd {
     Typing { channel: String, root: Option<String> },
     Edit { channel: String, id: String, text: String },
     Delete { channel: String, id: String },
+    /// React to a message (`kind:7`). `remove` names your current reaction on it, undone first so a change keeps one emoji;
+    /// an empty `emoji` with `remove` set is the reaction going away.
+    React { target: String, emoji: String, remove: Option<String> },
     CreateChannel { name: String, private: bool, about: Option<String> },
     /// Ask the relay for the direct message with this person (`kind:41010`); it creates it when it does not exist yet.
     OpenDm { peer: String },
@@ -243,6 +264,8 @@ pub struct App {
     /// The message being edited in the input box, and a message waiting for a yes/no before it is deleted.
     pub editing: Option<String>,
     pub confirm_delete: Option<String>,
+    /// The reaction picker, while it is up: the message it reacts to, what has been typed to search, and the row under the cursor.
+    pub react: Option<ReactPicker>,
     pub search: Search,
     /// Somebody's profile card, while `Overlay::Whois` is up.
     pub whois: Option<Whois>,
@@ -321,6 +344,7 @@ impl App {
             typing_sent: None,
             editing: None,
             confirm_delete: None,
+            react: None,
             search: Search { query: Editor::default(), messages: Vec::new(), cursor: 0, seq: 0, asked: String::new(), edited_at: Instant::now(), loading: false },
             whois: None,
             pending_dm: None,
@@ -1333,6 +1357,9 @@ impl App {
         if self.confirm_delete.is_some() {
             return self.answer_delete(k);
         }
+        if self.react.is_some() {
+            return self.key_react(k);
+        }
         if self.overlay == Overlay::Search {
             return self.key_search(k);
         }
@@ -1460,6 +1487,14 @@ impl App {
             },
             KeyCode::Char('r') => {
                 self.start_reply();
+                Vec::new()
+            }
+            KeyCode::Char('a') => {
+                if let Some(m) = self.selected_msg() {
+                    self.open_react(&m);
+                } else {
+                    self.flash("select a message first (Up/Down)");
+                }
                 Vec::new()
             }
             KeyCode::Char('e') => {
@@ -1918,6 +1953,122 @@ impl App {
         }
         let Some(c) = self.channel() else { return Vec::new() };
         vec![Cmd::Edit { channel: c.id.clone(), id, text }]
+    }
+
+    /// `a`: open the reaction picker on the selected message. It starts on the reaction you already have there, when it is in the
+    /// table, so `a` then Enter changes nothing and the row above says how to take it back — see `key_react`/`activate_react`.
+    fn open_react(&mut self, m: &Ev) {
+        if self.read_only {
+            self.flash("read-only mode: nothing is sent");
+            return;
+        }
+        self.react = Some(ReactPicker { target: m.id.clone(), query: String::new(), cursor: 0 });
+        if let Some((_, mine)) = self.my_reaction(&m.id) {
+            if let Some(row) = self.react_rows().iter().position(|r| matches!(r, ReactRow::Emoji(g) if *g == mine)) {
+                if let Some(r) = self.react.as_mut() {
+                    r.cursor = row;
+                }
+            }
+        }
+    }
+
+    /// Your own reaction on a message: the reaction event id (so it can be undone) and the emoji, when you reacted to it.
+    fn my_reaction(&self, target: &str) -> Option<(String, String)> {
+        let store = self.store()?;
+        store
+            .reaction_ids
+            .iter()
+            .find(|(_, (msg, _, who))| msg == target && who == &self.me)
+            .map(|(id, (_, emoji, _))| (id.clone(), emoji.clone()))
+    }
+
+    /// The rows the picker shows for what has been typed: taking your reaction back first (when you have one), then the emoji whose
+    /// name matches. With no match, the last resort is what you typed — the picker can send an emoji the table does not have.
+    pub fn react_rows(&self) -> Vec<ReactRow> {
+        let Some(r) = &self.react else { return Vec::new() };
+        let mut rows = Vec::new();
+        if let Some((id, _)) = self.my_reaction(&r.target) {
+            rows.push(ReactRow::Remove(id));
+        }
+        let hits = crate::emoji::search(&r.query);
+        if hits.is_empty() {
+            let typed = emoji_of(&r.query);
+            if !typed.is_empty() {
+                rows.push(ReactRow::Typed(typed));
+            }
+        } else {
+            rows.extend(hits.into_iter().map(|(glyph, _)| ReactRow::Emoji(glyph.to_owned())));
+        }
+        rows
+    }
+
+    /// Keys in the picker: typing narrows the list, the arrows move the row, Enter sends, Esc drops it.
+    fn key_react(&mut self, k: KeyEvent) -> Vec<Cmd> {
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        let n = self.react_rows().len();
+        match k.code {
+            KeyCode::Esc => self.react = None,
+            KeyCode::Enter => return self.activate_react(),
+            KeyCode::Up => {
+                if let Some(r) = self.react.as_mut() {
+                    r.cursor = r.cursor.saturating_sub(1);
+                }
+            }
+            KeyCode::Down => {
+                if let Some(r) = self.react.as_mut() {
+                    r.cursor = (r.cursor + 1).min(n.saturating_sub(1));
+                }
+            }
+            KeyCode::Backspace => self.edit_react(|q| {
+                q.pop();
+            }),
+            KeyCode::Char('u') if ctrl => self.edit_react(|q| q.clear()),
+            KeyCode::Char(c) if !ctrl => self.edit_react(|q| q.push(c)),
+            _ => {}
+        }
+        Vec::new()
+    }
+
+    fn edit_react(&mut self, f: impl FnOnce(&mut String)) {
+        if let Some(r) = self.react.as_mut() {
+            f(&mut r.query);
+        }
+        // the rows changed with the query: put the cursor on the first emoji to send, not on the "remove" row
+        let first = self.react_rows().iter().position(|row| !matches!(row, ReactRow::Remove(_))).unwrap_or(0);
+        if let Some(r) = self.react.as_mut() {
+            r.cursor = first;
+        }
+    }
+
+    /// Enter in the picker: send the emoji on the cursor line, or undo the reaction the row stands for.
+    fn activate_react(&mut self) -> Vec<Cmd> {
+        let Some(r) = self.react.clone() else { return Vec::new() };
+        let rows = self.react_rows();
+        let Some(row) = rows.get(r.cursor).or_else(|| rows.first()).cloned() else {
+            self.flash("type an emoji or a word like \"fire\" (Esc cancels)");
+            return Vec::new();
+        };
+        self.react = None;
+        match row {
+            ReactRow::Remove(id) => {
+                self.flash("reaction removed");
+                vec![Cmd::React { target: r.target, emoji: String::new(), remove: Some(id) }]
+            }
+            ReactRow::Emoji(glyph) | ReactRow::Typed(glyph) => match self.my_reaction(&r.target) {
+                Some((_, mine)) if mine == glyph => {
+                    self.flash(format!("already reacted {glyph}"));
+                    Vec::new()
+                }
+                Some((id, _)) => {
+                    self.flash(format!("reacted {glyph}"));
+                    vec![Cmd::React { target: r.target, emoji: glyph, remove: Some(id) }]
+                }
+                None => {
+                    self.flash(format!("reacted {glyph}"));
+                    vec![Cmd::React { target: r.target, emoji: glyph, remove: None }]
+                }
+            },
+        }
     }
 
     fn ask_delete(&mut self, m: &Ev) {

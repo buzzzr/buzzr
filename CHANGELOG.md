@@ -5,6 +5,12 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
 
 ## [Unreleased]
 
+### Added
+
+- `a` opens a reaction picker on the selected message: choose an emoji from the list, or type a name to search it (or an emoji the
+  list does not have). Enter sends it as a NIP-25 `kind:7` and Esc closes. The picker opens on the reaction you already have there,
+  and its first row takes it back; changing an emoji undoes the one it replaces first, so a message keeps one reaction from you.
+
 ### Fixed
 
 - A `… is typing` indicator was shown for the whole channel it arrived in: typing sent inside a thread was drawn in the channel

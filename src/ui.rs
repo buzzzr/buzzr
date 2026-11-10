@@ -1,7 +1,7 @@
 //! Drawing the screen. Everything here reads `App`; the only thing it changes is the geometry it reports back (so that clicks
 //! can be mapped to what is on screen).
 
-use crate::app::{App, Conn, Focus, Overlay, Row, SideRow, View};
+use crate::app::{App, Conn, Focus, Overlay, ReactRow, Row, SideRow, View};
 use crate::list;
 use ratatui::layout::{Alignment, Constraint, Layout, Position, Rect};
 use ratatui::style::{Modifier, Style};
@@ -21,7 +21,9 @@ fn faint() -> Style {
 }
 
 fn key_hint(key: &str, what: &str) -> Vec<Span<'static>> {
-    vec![Span::styled(format!(" {key} "), Style::default().add_modifier(Modifier::REVERSED)), Span::styled(format!(" {what}  "), dim())]
+    // One space either side of the label: the footer carries a key per action, and the reaction key only fits at 100 columns with
+    // the tighter gap.
+    vec![Span::styled(format!(" {key} "), Style::default().add_modifier(Modifier::REVERSED)), Span::styled(format!(" {what} "), dim())]
 }
 
 /// The scheme's own background and text colour; a scheme that leaves both to the terminal gives the default style.
@@ -71,6 +73,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     draw_status(f, app, status);
     draw_input(f, app, input, input_inner_w);
     draw_footer(f, app, footer);
+    if app.react.is_some() {
+        draw_react(f, app, area);
+    }
     match app.overlay {
         Overlay::Keys => draw_keys(f, body),
         Overlay::Help => draw_help(f, area),
@@ -346,7 +351,11 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect, inner_w: usize) {
     let inner = block.inner(area);
     f.render_widget(block, area);
     if app.editor.is_empty() {
-        let hint = if app.read_only { "read-only: nothing will be sent" } else { "Type a message · /help for commands · F1 for keys" };
+        let hint = if app.read_only {
+            "read-only: nothing will be sent"
+        } else {
+            "Type a message · /help for commands · F1 for keys"
+        };
         f.render_widget(Paragraph::new(Span::styled(hint, dim())), inner);
     } else {
         let lines: Vec<Line> = app.editor.rows(inner_w).iter().map(|r| Line::raw(app.editor.row_text(r))).collect();
@@ -363,29 +372,36 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect, inner_w: usize) {
 
 fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
     let mut spans: Vec<Span> = Vec::new();
-    match app.focus {
-        Focus::Channels => spans.extend(key_hint("⏎", "Open channel")),
-        Focus::Messages => {
-            spans.extend(key_hint("⏎", if app.in_thread() { "Reply" } else { "Open thread" }));
-            spans.extend(key_hint("r", "Reply"));
-            spans.extend(key_hint("c", "Copy"));
-            spans.extend(key_hint("u", "Mark unread"));
-            if app.selected_is_own() {
-                spans.extend(key_hint("e", "Edit"));
-                spans.extend(key_hint("d", "Delete"));
+    if app.react.is_some() {
+        spans.extend(key_hint("type", "Search"));
+        spans.extend(key_hint("⏎", "Send"));
+        spans.extend(key_hint("esc", "Close"));
+    } else {
+        match app.focus {
+            Focus::Channels => spans.extend(key_hint("⏎", "Open channel")),
+            Focus::Messages => {
+                spans.extend(key_hint("⏎", if app.in_thread() { "Reply" } else { "Open thread" }));
+                spans.extend(key_hint("r", "Reply"));
+                spans.extend(key_hint("a", "React"));
+                spans.extend(key_hint("c", "Copy"));
+                spans.extend(key_hint("u", "Mark unread"));
+                if app.selected_is_own() {
+                    spans.extend(key_hint("e", "Edit"));
+                    spans.extend(key_hint("d", "Delete"));
+                }
+                if app.in_thread() {
+                    spans.extend(key_hint("esc", "Back"));
+                }
             }
-            if app.in_thread() {
-                spans.extend(key_hint("esc", "Back"));
-            }
-        }
-        Focus::Input => {
-            spans.extend(key_hint("⏎", "Send"));
-            // Only name Shift+Enter where the terminal confirmed it reports it; Alt+Enter works in every terminal.
-            spans.extend(key_hint(if app.keyboard_enhanced { "Shift+⏎" } else { "Alt+⏎" }, "New line"));
-            if app.editing.is_some() {
-                spans.extend(key_hint("esc", "Cancel edit"));
-            } else if app.reply_target.is_some() {
-                spans.extend(key_hint("esc", "Cancel reply"));
+            Focus::Input => {
+                spans.extend(key_hint("⏎", "Send"));
+                // Only name Shift+Enter where the terminal confirmed it reports it; Alt+Enter works in every terminal.
+                spans.extend(key_hint(if app.keyboard_enhanced { "Shift+⏎" } else { "Alt+⏎" }, "New line"));
+                if app.editing.is_some() {
+                    spans.extend(key_hint("esc", "Cancel edit"));
+                } else if app.reply_target.is_some() {
+                    spans.extend(key_hint("esc", "Cancel reply"));
+                }
             }
         }
     }
@@ -416,6 +432,7 @@ pub const KEYS: &[(&str, &str)] = &[
     ("PgUp / PgDn, Home / End", "scroll, first, last"),
     ("Enter", "open the thread and read it (in a thread: reply)"),
     ("r", "reply in the thread of the selected message"),
+    ("a", "react to the selected message: pick an emoji, or type to search one (Enter sends, Esc closes)"),
     ("c", "copy the selected message to the clipboard"),
     ("u", "mark the selected message unread (until /read)"),
     ("e", "edit the selected message (yours only)"),
@@ -423,6 +440,12 @@ pub const KEYS: &[(&str, &str)] = &[
     ("Ctrl+F", "search channels, people and every message"),
     ("click", "select; open the thread; on a link: copy it"),
     ("mouse wheel", "scroll"),
+    ("", ""),
+    ("Reaction picker (from `a` on a message)", ""),
+    ("type", "search the emoji by name, or type an emoji to send it as-is"),
+    ("Up / Down", "move the cursor"),
+    ("Enter", "send the emoji on the cursor line, or remove yours"),
+    ("Esc", "close"),
     ("", ""),
     ("Panel (from /plugins or a plugin)", ""),
     ("Up / Down, PgUp / PgDn, Home / End", "move"),
@@ -481,6 +504,9 @@ pub const HELP: &[&str] = &[
     "Search (Ctrl+F): channel names, people and full-text message search; Enter opens the result — a person starts a DM.",
     "A person is found by the name in their profile, or by their npub (hex or npub1…): /dm and /whois take either.",
     "Others see \"typing…\" while you write (start with --no-typing to turn that off).",
+    "`a` opens the reaction picker on the selected message: pick an emoji from the list, or type a name to search it (or an",
+    "emoji the list does not have). Enter sends the emoji on the cursor line, Esc closes. The picker opens on your own reaction,",
+    "and its first row takes it back — so `a` then Enter changes nothing, and Enter on that row removes yours.",
     "Enter sends. Alt+Enter and Ctrl+J add a line in any terminal; the footer names the one that works here.",
     "Shift+Enter adds a line only where the terminal reports it: kitty, foot, WezTerm, Ghostty, iTerm2.",
     "",
@@ -491,6 +517,58 @@ pub const HELP: &[&str] = &[
     "",
     "Press Esc, Enter or F2 to close.",
 ];
+
+/// The reaction picker (`a` on a selected message): a query line, then the emoji whose name matches, with the first row
+/// taking your reaction back. Enter sends the row under the cursor, Esc closes. It is drawn over the message pane, so the
+/// message it reacts to keeps its selection underneath.
+fn draw_react(f: &mut Frame, app: &App, area: Rect) {
+    let w = 48.min(area.width.saturating_sub(4)).max(24);
+    let h = 16.min(area.height.saturating_sub(2)).max(6);
+    let r = Rect::new(area.x + (area.width.saturating_sub(w)) / 2, area.y + (area.height.saturating_sub(h)) / 2, w, h);
+    clear_popup(f, r);
+    let block = Block::default().borders(Borders::ALL).border_style(Style::default().fg(crate::theme::get().accent)).title(" React · Enter sends · Esc closes ");
+    let inner = block.inner(r);
+    f.render_widget(block, r);
+    if inner.height < 3 || inner.width < 10 {
+        return;
+    }
+    let picker = app.react.as_ref().expect("draw_react is only called while the picker is up");
+    let prefix = "Search: ";
+    f.render_widget(Paragraph::new(Line::from(vec![Span::styled(prefix, Style::default().add_modifier(Modifier::BOLD)), Span::raw(picker.query.clone())])), Rect::new(inner.x, inner.y, inner.width, 1));
+    // the query cursor sits after what has been typed
+    let col = prefix.chars().count() + picker.query.chars().count();
+    f.set_cursor_position(Position::new((inner.x + col as u16).min(inner.x + inner.width - 1), inner.y));
+    f.render_widget(Paragraph::new(Span::styled("type a name to search · ↑↓ to move", dim())), Rect::new(inner.x, inner.y + 1, inner.width, 1));
+
+    let list_area = Rect::new(inner.x, inner.y + 2, inner.width, inner.height.saturating_sub(2));
+    let rows = app.react_rows();
+    let vis = list_area.height as usize;
+    let start = picker.cursor.saturating_sub(vis.saturating_sub(1) / 2).min(rows.len().saturating_sub(vis));
+    let mut lines = Vec::new();
+    for (i, row) in rows.iter().enumerate().skip(start).take(vis) {
+        let mut spans = vec![Span::raw(if i == picker.cursor { "▌" } else { " " })];
+        match row {
+            ReactRow::Remove(_) => {
+                spans.push(Span::styled("↩  ", dim()));
+                spans.push(Span::styled("remove your reaction", dim()));
+            }
+            ReactRow::Emoji(glyph) | ReactRow::Typed(glyph) => {
+                spans.push(Span::raw(format!("{glyph}  ")));
+                let hint = crate::emoji::name_of(glyph).map(str::to_owned).unwrap_or_else(|| "send this emoji".to_owned());
+                spans.push(Span::styled(hint, dim()));
+            }
+        }
+        let mut line = Line::from(spans);
+        if i == picker.cursor {
+            line = line.style(Style::default().bg(crate::theme::get().sel_bg));
+        }
+        lines.push(line);
+    }
+    if rows.is_empty() {
+        lines.push(Line::from(Span::styled(" no match — try a word like \"fire\", or an emoji", dim())));
+    }
+    f.render_widget(Paragraph::new(lines), list_area);
+}
 
 /// Universal search: a query line, then channels whose name matches, then messages the relay found.
 fn draw_search(f: &mut Frame, app: &App, area: Rect) {
@@ -685,6 +763,25 @@ mod tests {
         assert!(s.contains("Open thread") && s.contains("Switch pane"), "footer hints\n{s}");
         assert!(s.contains("Mark unread"), "the message pane advertises the unread key\n{s}");
         assert!(!s.contains("**"), "markdown is rendered, not shown");
+    }
+
+    #[test]
+    fn the_footer_names_the_reaction_key_and_the_picker_lists_emoji() {
+        let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        let mut app = app();
+        app.focus = Focus::Messages;
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(s.contains("React"), "the message pane advertises the reaction key\n{s}");
+        assert!(s.contains("Switch pane") && s.contains("Delete"), "and the key does not push the navigation hints out\n{s}");
+
+        app.handle(AppEvent::Key(ratatui::crossterm::event::KeyEvent::new(ratatui::crossterm::event::KeyCode::Char('a'), ratatui::crossterm::event::KeyModifiers::NONE)));
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(s.contains("React · Enter sends · Esc closes"), "the picker opens with a title that names the keys\n{s}");
+        assert!(s.contains("thumbs up yes like approve +1"), "and lists the emoji the table offers\n{s}");
+        assert!(s.contains("type a name to search"), "with a line saying what to do\n{s}");
+        assert!(s.contains("Search") && s.contains("Close"), "the footer follows the picker\n{s}");
     }
 
     #[test]

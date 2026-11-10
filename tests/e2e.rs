@@ -538,6 +538,37 @@ fn u_marks_the_selected_message_unread_and_the_sidebar_counts_it() {
 }
 
 #[test]
+fn a_reacts_to_the_selected_message_from_the_keyboard() {
+    let Some(relay) = relay_or_skip("a_reacts_to_the_selected_...") else { return };
+    let s = session(&relay);
+    // #design is open with the keyboard on the channel list; Tab moves it to the message list.
+    s.press("tab");
+    s.expect("the messages pane", "Open thread");
+    s.expect("the footer to name the reaction key", "React");
+    s.press("a");
+    s.expect("the reaction picker", "React · Enter sends · Esc closes");
+    s.expect("its search line", "Search:");
+    s.expect("the footer to follow the picker", "Send");
+    s.expect("the list to offer emoji by name", "thumbs up yes like approve +1");
+    // typing narrows the list to the names that match
+    s.type_text("fire");
+    s.expect("the list to narrow to the match", "fire hot lit");
+    s.expect_gone("the other emoji to drop out of the list", "thumbs up yes like approve +1");
+    s.press("enter");
+    // The relay accepts a kind:7 like any other event; what the screen shows is that it went out and that the
+    // picker closed.
+    let scr = s.until("the status line to confirm the reaction", |sc| sc.contains("reacted 🔥"));
+    assert!(!scr.contains("failed"), "the relay accepted the reaction:\n{scr}");
+    s.expect_gone("the reaction picker to close", "React · Enter sends");
+    std::thread::sleep(Duration::from_millis(500)); // a rejection would replace the status line
+    let scr = s.screen();
+    assert!(!scr.contains("failed"), "the reaction was not rejected:\n{scr}");
+    // Esc on the message list steps back to the channels, as it does outside the picker.
+    s.press("esc");
+    s.expect("the channel list again", "Open channel");
+}
+
+#[test]
 fn the_pane_flags_the_newest_message_only_while_it_is_off_screen() {
     let Some(relay) = relay_or_skip("the_pane_flags_the_newest_...") else { return };
     // In a pane short enough to be taller than the thread, the marker follows what is on screen rather than

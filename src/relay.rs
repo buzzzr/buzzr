@@ -370,6 +370,20 @@ pub fn delete_builder(channel: &str, target: &str) -> Result<EventBuilder> {
     buzz_sdk::build_delete_message(channel_id, target).map_err(|e| anyhow!("{e}"))
 }
 
+/// A NIP-25 reaction (`kind:7`): the emoji, and the message it names. It carries no `h` tag — the message it points at says
+/// which channel the reaction belongs to, which is how it finds its way back to that timeline.
+pub fn reaction_builder(target: &str, emoji: &str) -> Result<EventBuilder> {
+    let target = nostr::EventId::from_hex(target).context("not a message id")?;
+    buzz_sdk::build_reaction(target, emoji).map_err(|e| anyhow!("{e}"))
+}
+
+/// Undo one of your reactions (`kind:5`, NIP-09 naming the reaction event). Changing a reaction removes the old one this way
+/// first, so a message keeps one reaction from you.
+pub fn remove_reaction_builder(reaction: &str) -> Result<EventBuilder> {
+    let reaction = nostr::EventId::from_hex(reaction).context("not a reaction id")?;
+    buzz_sdk::build_remove_reaction(reaction).map_err(|e| anyhow!("{e}"))
+}
+
 /// A new stream channel (`kind:9007`, what `buzz channels create` sends). Returns the builder and the new channel's id.
 pub fn create_channel_builder(name: &str, private: bool, about: Option<&str>) -> Result<(EventBuilder, String)> {
     let id = uuid::Uuid::new_v4();
