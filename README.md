@@ -150,9 +150,9 @@ The full behaviour, for when the feature list above is not enough.
   cursor).
 - **Edit and delete your own messages:** select one and press `e` (it loads into the input; Enter saves, Esc cancels) or `d` (asks
   `y` to confirm). Others see edits and deletions live. `/edit N` and `/delete N` do the same by number.
-- **React to a message:** select one and press `a` — the input turns into a reaction prompt, Enter sends the emoji you typed and Esc
-  cancels. The prompt opens on the reaction you already have there, so the same key changes it, and Enter on an empty prompt removes
-  it; everyone sees the reaction, and its removal, live.
+- **React to a message:** select one and press `a` — a picker opens over the message: choose an emoji from the list, or type a name
+  to search it (or an emoji the list does not have). Enter sends it as a NIP-25 `kind:7` and Esc closes. The picker opens on the
+  reaction you already have there, and its first row takes it back; everyone sees the reaction, and its removal, live.
 - **Search everything:** Ctrl+F (or `/search words`) searches channel names (instantly), people you have seen (from their profiles) and
   every message you can read (full text, from the relay); Enter opens the result — a message or channel in its channel or thread, a
   person in the DM with them (starting one if there is none).
@@ -185,7 +185,7 @@ The full behaviour, for when the feature list above is not enough.
 | Up / Down, at the edges | nothing typed in the input, Up goes to the messages on the newest one; on the newest message, Down goes back to the input |
 | Enter | open the channel / open the thread (which reads it) / send |
 | r, c, u, e, d | reply in the thread, copy, mark unread, edit, delete the selected message (e and d: yours only) |
-| a | react to the selected message: type an emoji, Enter sends it, Esc cancels (an empty prompt removes yours) |
+| a | react to the selected message: pick an emoji, or type to search one (Enter sends, Esc closes) |
 | Ctrl+F | search channels, people and messages |
 | Esc | close a panel, cancel a reply, leave a thread, then step back to the channel list |
 | F1, F2 | keys, help |

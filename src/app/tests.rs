@@ -1079,32 +1079,27 @@ fn edit_and_delete_by_number_and_not_in_read_only_mode() {
 // ---- reactions --------------------------------------------------------------------------------------------------------------
 
 #[test]
-fn a_reacts_to_the_selected_message_and_enter_sends_the_emoji() {
+fn a_opens_the_picker_on_the_selected_message_and_enter_sends_the_emoji() {
     let mut app = app_with(3);
     press(&mut app, KeyCode::End); // the newest message
     let target = selected(&app);
     assert!(press(&mut app, KeyCode::Char('a')).is_empty());
-    assert_eq!((app.focus, app.reacting.as_deref()), (Focus::Input, Some(target.as_str())));
-    assert_eq!(app.editor.text(), "", "nothing is pre-filled when we have not reacted yet");
-    type_text(&mut app, "👍");
+    let picker = app.react.as_ref().expect("the picker is up");
+    assert_eq!(picker.target, target);
+    assert_eq!((picker.query.as_str(), picker.cursor), ("", 0));
+    assert_eq!(app.focus, Focus::Messages, "the message keeps its selection underneath");
+    assert!(app.editor.is_empty(), "the composer is untouched");
+    // typing narrows the table by name; Enter sends the row on the cursor
+    type_text(&mut app, "fire");
+    assert_eq!(app.react_rows(), vec![ReactRow::Emoji("🔥".into())]);
     let cmds = press(&mut app, KeyCode::Enter);
-    assert_eq!(cmds, vec![Cmd::React { target, emoji: "👍".into(), remove: None }]);
-    assert!(app.reacting.is_none() && app.editor.is_empty(), "the prompt is closed and emptied");
-    assert_eq!(app.flash_text(), Some("reacted 👍"));
+    assert_eq!(cmds, vec![Cmd::React { target, emoji: "🔥".into(), remove: None }]);
+    assert!(app.react.is_none(), "the picker closed");
+    assert_eq!(app.flash_text(), Some("reacted 🔥"));
 }
 
 #[test]
-fn a_reaction_is_one_emoji_so_the_rest_of_the_line_is_ignored() {
-    let mut app = app_with(3);
-    press(&mut app, KeyCode::End);
-    let target = selected(&app);
-    press(&mut app, KeyCode::Char('a'));
-    type_text(&mut app, "👍 thanks");
-    assert_eq!(press(&mut app, KeyCode::Enter), vec![Cmd::React { target, emoji: "👍".into(), remove: None }]);
-}
-
-#[test]
-fn the_prompt_opens_on_your_own_reaction_and_changing_it_undoes_the_old_one() {
+fn the_picker_offers_your_reaction_first_and_up_enter_takes_it_back() {
     let mut app = app_with(3);
     press(&mut app, KeyCode::End);
     let target = selected(&app);
@@ -1112,51 +1107,79 @@ fn the_prompt_opens_on_your_own_reaction_and_changing_it_undoes_the_old_one() {
     mine.kind = 7;
     app.handle(AppEvent::Live(Live::Event(mine)));
     press(&mut app, KeyCode::Char('a'));
-    assert_eq!(app.editor.text(), "👍", "the prompt opens on the reaction we already have");
-    assert!(press(&mut app, KeyCode::Enter).is_empty(), "the same emoji is already there");
+    let rows = app.react_rows();
+    assert_eq!(rows.first(), Some(&ReactRow::Remove("reaction1".into())), "the first row takes your reaction back");
+    assert_eq!(app.react.as_ref().unwrap().cursor, 1, "the cursor opens on the reaction you already have");
+    assert!(press(&mut app, KeyCode::Enter).is_empty(), "Enter on your own reaction changes nothing");
     assert_eq!(app.flash_text(), Some("already reacted 👍"));
-    // Enter closed the prompt and left the cursor in the input, so Esc goes back to the messages before `a` opens it again.
-    press(&mut app, KeyCode::Esc);
-    assert_eq!(app.focus, Focus::Messages);
+    // up onto the remove row, then Enter takes the reaction back
     press(&mut app, KeyCode::Char('a'));
-    assert_eq!(app.editor.text(), "👍", "the prompt opens on our reaction again");
-    app.editor.clear();
-    type_text(&mut app, "🎉");
-    let cmds = press(&mut app, KeyCode::Enter);
-    assert_eq!(cmds, vec![Cmd::React { target, emoji: "🎉".into(), remove: Some("reaction1".into()) }]);
-}
-
-#[test]
-fn an_empty_reaction_prompt_removes_your_reaction() {
-    let mut app = app_with(3);
-    press(&mut app, KeyCode::End);
-    let target = selected(&app);
-    let mut mine = msg("reaction1", 6000, ME, "👍", &[&["e", &target]]);
-    mine.kind = 7;
-    app.handle(AppEvent::Live(Live::Event(mine)));
-    press(&mut app, KeyCode::Char('a'));
-    app.editor.clear();
+    press(&mut app, KeyCode::Up);
     let cmds = press(&mut app, KeyCode::Enter);
     assert_eq!(cmds, vec![Cmd::React { target, emoji: String::new(), remove: Some("reaction1".into()) }]);
     assert_eq!(app.flash_text(), Some("reaction removed"));
 }
 
 #[test]
-fn a_cancelled_or_read_only_reaction_sends_nothing() {
+fn changing_the_emoji_undoes_the_one_it_replaces() {
+    let mut app = app_with(3);
+    press(&mut app, KeyCode::End);
+    let target = selected(&app);
+    let mut mine = msg("reaction1", 6000, ME, "👍", &[&["e", &target]]);
+    mine.kind = 7;
+    app.handle(AppEvent::Live(Live::Event(mine)));
+    press(&mut app, KeyCode::Char('a'));
+    assert!(press(&mut app, KeyCode::Enter).is_empty(), "the same emoji is already there");
+    assert_eq!(app.flash_text(), Some("already reacted 👍"));
+    // typing resets the cursor onto the first match, so Enter sends it rather than falling back to the remove row
+    press(&mut app, KeyCode::Char('a'));
+    type_text(&mut app, "party");
+    let cmds = press(&mut app, KeyCode::Enter);
+    assert_eq!(cmds, vec![Cmd::React { target, emoji: "🎉".into(), remove: Some("reaction1".into()) }]);
+}
+
+#[test]
+fn the_picker_sends_an_emoji_the_table_does_not_have() {
+    let mut app = app_with(3);
+    press(&mut app, KeyCode::End);
+    let target = selected(&app);
+    press(&mut app, KeyCode::Char('a'));
+    // no name matches, but an emoji in the query is sent as typed — the table is not a limit
+    type_text(&mut app, "fire 🔥");
+    assert_eq!(app.react_rows(), vec![ReactRow::Typed("🔥".into())]);
+    let cmds = press(&mut app, KeyCode::Enter);
+    assert_eq!(cmds, vec![Cmd::React { target, emoji: "🔥".into(), remove: None }]);
+}
+
+#[test]
+fn the_picker_moves_with_the_arrows_and_esc_closes_it() {
     let mut app = app_with(3);
     press(&mut app, KeyCode::End);
     press(&mut app, KeyCode::Char('a'));
-    type_text(&mut app, "👍");
-    app.typing_sent = None;
-    assert!(app.handle(key(KeyCode::Char('x'))).is_empty(), "a reaction prompt is not typing a message");
+    assert_eq!(app.react.as_ref().unwrap().cursor, 0);
+    press(&mut app, KeyCode::Down);
+    assert_eq!(app.react.as_ref().unwrap().cursor, 1);
+    press(&mut app, KeyCode::Up);
+    press(&mut app, KeyCode::Up); // already at the top: the cursor stays
+    assert_eq!(app.react.as_ref().unwrap().cursor, 0);
     assert!(press(&mut app, KeyCode::Esc).is_empty());
-    assert!(app.reacting.is_none() && app.editor.is_empty());
-    assert_eq!(app.flash_text(), Some("reaction cancelled"));
+    assert!(app.react.is_none());
+    assert_eq!(app.focus, Focus::Messages, "Esc only closes the picker; the message stays selected");
+}
+
+#[test]
+fn a_read_only_reaction_opens_nothing_and_typing_stays_in_the_picker() {
+    let mut app = app_with(3);
+    press(&mut app, KeyCode::End);
+    press(&mut app, KeyCode::Char('a'));
+    assert!(app.handle(key(KeyCode::Char('x'))).is_empty(), "typing in the picker is a search, not a message: no typing indicator");
+    assert_eq!(app.react.as_ref().unwrap().query, "x");
+    assert!(app.editor.is_empty(), "and the composer stays empty");
     let mut ro = app_with(3);
     ro.read_only = true;
     press(&mut ro, KeyCode::End);
     press(&mut ro, KeyCode::Char('a'));
-    assert!(ro.reacting.is_none());
+    assert!(ro.react.is_none());
     assert_eq!(ro.flash_text(), Some("read-only mode: nothing is sent"));
 }
 

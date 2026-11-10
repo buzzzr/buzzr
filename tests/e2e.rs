@@ -546,25 +546,26 @@ fn a_reacts_to_the_selected_message_from_the_keyboard() {
     s.expect("the messages pane", "Open thread");
     s.expect("the footer to name the reaction key", "React");
     s.press("a");
-    s.expect("the composer to become a reaction prompt", " react ");
-    s.expect("the status line", "reacting · Enter sends the emoji, Esc cancels");
-    s.expect("the footer to follow the prompt", "Send reaction");
-    s.expect("the empty prompt to say what to type", "Type an emoji");
-    s.type_text("👍");
-    s.expect("the emoji in the composer", "👍");
+    s.expect("the reaction picker", "React · Enter sends · Esc closes");
+    s.expect("its search line", "Search:");
+    s.expect("the footer to follow the picker", "Send");
+    s.expect("the list to offer emoji by name", "thumbs up yes like approve +1");
+    // typing narrows the list to the names that match
+    s.type_text("fire");
+    s.expect("the list to narrow to the match", "fire hot lit");
+    s.expect_gone("the other emoji to drop out of the list", "thumbs up yes like approve +1");
     s.press("enter");
     // The relay accepts a kind:7 like any other event; what the screen shows is that it went out and that the
-    // composer went back to writing messages rather than staying in the prompt.
-    let scr = s.until("the status line to confirm the reaction", |sc| sc.contains("reacted 👍"));
+    // picker closed.
+    let scr = s.until("the status line to confirm the reaction", |sc| sc.contains("reacted 🔥"));
     assert!(!scr.contains("failed"), "the relay accepted the reaction:\n{scr}");
-    s.expect_gone("the reaction prompt to close", " react ");
-    s.expect("the composer back to a message", "Type a message");
+    s.expect_gone("the reaction picker to close", "React · Enter sends");
     std::thread::sleep(Duration::from_millis(500)); // a rejection would replace the status line
     let scr = s.screen();
     assert!(!scr.contains("failed"), "the reaction was not rejected:\n{scr}");
-    // Esc from the empty composer goes back to the messages, as it does outside the prompt.
+    // Esc on the message list steps back to the channels, as it does outside the picker.
     s.press("esc");
-    s.expect("the messages pane again", "Open thread");
+    s.expect("the channel list again", "Open channel");
 }
 
 #[test]

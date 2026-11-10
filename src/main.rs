@@ -2,6 +2,7 @@ mod app;
 mod config;
 mod contrib;
 mod editor;
+mod emoji;
 mod keyfile;
 mod list;
 mod live;
