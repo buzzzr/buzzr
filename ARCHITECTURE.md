@@ -35,14 +35,16 @@ into `AppEvent`s. Because `App` never touches the network or the terminal, its b
 | `keyfile.rs` | The password-protected key file format (scrypt + AES-256-GCM): `encrypt` and `decrypt`, no I/O. |
 | `selftest.rs` | `--selftest`: a read-only check against a real relay. |
 | `contrib.rs` | What a plugin is allowed to put on the screen (segments, panes, panels, marks) and the `Registry` the app holds; also the bounded `Projection` sent to plugins and the `PluginCmd`/`PluginEvent` that cross between `App` and the plugin runtime. |
-| `plugins/` | The out-of-process plugin host: `proto.rs` is the newline-delimited-JSON wire, `manifest.rs` finds plugin folders and their hot-reload stamps, `host.rs` is the one task that supervises every child process. See `PLUGIN.md`. |
+| `plugins/` | The out-of-process plugin host: `proto.rs` is the newline-delimited-JSON wire, `discover.rs` finds plugin folders, their entry file and their hot-reload stamps, `host.rs` is the one task that supervises every child process. See `PLUGIN.md`. |
 | `update.rs` | How the running copy was installed (Homebrew's Cellar, `~/.cargo/bin`, a checkout build, anything else) and the shell command that upgrades it, for `/update`. Path inspection only, no network. |
 | `release.rs` | The release feed: one throttled GET of the repository's latest release (at most once a day; `BUZZR_NO_UPDATE_CHECK` skips it), the `State` remembered between runs, and the notice printed after the UI closes. Failures are silent. |
 
 ## Plugins
 
 A plugin is a separate process that speaks newline-delimited JSON on stdio, in any language; buzzr owns every cell of the
-terminal. This keeps the core's shape: a plugin is a **third edge** next to `relay.rs` and `live.rs`.
+terminal. This keeps the core's shape: a plugin is a **third edge** next to `relay.rs` and `live.rs`. There is no manifest: a plugin
+is a folder whose name is its id, buzzr runs the executable entry file in it through that file's own `#!` line, and the plugin
+declares its name, permissions and heartbeat in its `ready` message.
 
 ```
                        ┌─────────────────────────┐
@@ -60,7 +62,7 @@ behaviour is testable with synthetic events. Inbound is a bounded `Projection`: 
 address or another channel. Outbound is default-deny — `draft`, a gated `send` (only in the open channel, needs `messages:write`,
 rate-limited), and panel actions, all refused under `--read-only`. Contributions are plain data (status items, badges, message and
 channel marks, a pane, panels) mapped onto surfaces that already exist, so a plugin never draws, never sees the key (the host signs as the
-user when something must be sent) and can never emit an escape sequence. A manifest may ask for a heartbeat (`tickMs`): the host then
+user when something must be sent) and can never emit an escape sequence. A plugin may ask for a heartbeat (`tickMs` in its `ready`): the host then
 sends that one plugin a `tick` on the interval, so a time-based pane (a clock) redraws without a timer of its own. Plugins are off with
 `--no-plugins` or `BUZZR_SAFE_MODE=1`. The contract is in `PLUGIN.md` and working plugins in `examples/plugins/hello` and
 `examples/plugins/clock`.

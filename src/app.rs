@@ -3145,7 +3145,7 @@ impl App {
     fn show_plugins(&mut self) {
         let mut rows = Vec::new();
         if self.plugin_meta.is_empty() {
-            rows.push(PanelRow { text: "No plugins found. Put a folder with a plugin.json in the plugins directory.".into(), tone: contrib::Tone::Dim, action: None });
+            rows.push(PanelRow { text: "No plugins found. Put a folder with an executable entry file in the plugins directory.".into(), tone: contrib::Tone::Dim, action: None });
         }
         for m in &self.plugin_meta {
             let tone = match m.state {
@@ -3177,7 +3177,7 @@ impl App {
         }
         rows.push(PanelRow { text: String::new(), tone: contrib::Tone::Default, action: None });
         rows.push(PanelRow {
-            text: "Put a folder with a plugin.json in the plugins directory; /plugins shows what loaded.".into(),
+            text: "Put a folder with an executable entry file (its shebang picks the language) in the plugins directory; /plugins shows what loaded.".into(),
             tone: contrib::Tone::Dim,
             action: None,
         });

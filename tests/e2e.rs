@@ -12,6 +12,7 @@
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Read, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -910,18 +911,17 @@ fn the_selftest_passes_against_the_fake_relay() {
 // Plugins: what a plugin puts on screen. Every other session starts with `--no-plugins`; this one turns
 // them on and points at a folder of its own, so the check runs through the real host and child process.
 
-/// A plugin that declares a pane in its `ready`, then replaces it on every heartbeat — the shape
-/// `examples/plugins/clock` uses, with fixed text so the test can assert on it.
+/// A plugin that declares a pane and asks for a heartbeat, both in its `ready`, then replaces the
+/// pane on every tick — the shape `examples/plugins/clock` uses, with fixed text so the test can
+/// assert on it.
 const PANE_PLUGIN_MAIN: &str = r#"#!/bin/sh
 while IFS= read -r line; do
   case "$line" in
-    *'"type":"hello"'*) printf '%s\n' '{"type":"ready","contributions":{"pane":{"title":"Demo pane","rows":[{"text":"pane one","tone":"accent"}]}}}' ;;
+    *'"type":"hello"'*) printf '%s\n' '{"type":"ready","tickMs":250,"contributions":{"pane":{"title":"Demo pane","rows":[{"text":"pane one","tone":"accent"}]}}}' ;;
     *'"type":"tick"'*) printf '%s\n' '{"type":"pane","title":"Demo pane","rows":[{"text":"pane two","tone":"accent"}]}' ;;
   esac
 done
 "#;
-const PANE_PLUGIN_MANIFEST: &str =
-    r#"{"id":"demo","name":"Demo","apiVersion":1,"entry":["sh","main.sh"],"permissions":[],"tickMs":250}"#;
 
 #[test]
 fn a_plugin_pane_is_drawn_under_the_channel_list_and_a_heartbeat_refreshes_it() {
@@ -929,8 +929,10 @@ fn a_plugin_pane_is_drawn_under_the_channel_list_and_a_heartbeat_refreshes_it() 
     let dir = std::env::temp_dir().join(format!("buzzr-e2e-plugins-{}", std::process::id()));
     let plugin = dir.join("demo");
     std::fs::create_dir_all(&plugin).expect("could not make the plugin folder");
-    std::fs::write(plugin.join("plugin.json"), PANE_PLUGIN_MANIFEST).unwrap();
-    std::fs::write(plugin.join("main.sh"), PANE_PLUGIN_MAIN).unwrap();
+    let entry = plugin.join("main.sh");
+    std::fs::write(&entry, PANE_PLUGIN_MAIN).unwrap();
+    // buzzr runs the entry file itself, so it has to be executable.
+    std::fs::set_permissions(&entry, std::fs::Permissions::from_mode(0o755)).expect("chmod +x main.sh");
 
     let s = Session::start_with_plugins(&relay, dir.clone(), ROWS);
     settle(&s);
@@ -943,7 +945,7 @@ fn a_plugin_pane_is_drawn_under_the_channel_list_and_a_heartbeat_refreshes_it() 
     assert!(row > last_channel, "the pane sits under the channel list:\n{screen}");
     assert!(screen.contains("Demo pane"), "the pane's title is on its rule:\n{screen}");
     assert!(screen.contains("#design"), "the channel list keeps its rows:\n{screen}");
-    // The heartbeat the manifest asked for reaches the child, which replaces the pane from it.
+    // The heartbeat the plugin asked for in its `ready` reaches the child, which replaces the pane from it.
     let screen = s.until("the heartbeat to refresh the pane", |sc| sc.contains("pane two"));
     assert!(!screen.contains("pane one"), "the pane is replaced, not stacked:\n{screen}");
     let _ = std::fs::remove_dir_all(&dir);

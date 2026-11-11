@@ -148,24 +148,26 @@ async fn main() -> Result<()> {
 
 /// `buzzr plugins list | enable <id> | disable <id>`: the same folders the TUI reads, without starting a terminal or a key.
 fn plugins_cli(cmd: &PluginsCmd, dir: &std::path::Path) -> Result<()> {
-    use plugins::manifest;
+    use plugins::discover;
     match cmd {
         PluginsCmd::List => {
             println!("plugins in {}", dir.display());
-            let found = manifest::scan(dir);
+            let found = discover::scan(dir);
             if found.is_empty() {
                 println!("  (none)");
             }
             for d in found {
+                // The display name is the plugin's own to declare, and it only does that once it is running, so the
+                // list shows the id and the file buzzr would run.
                 let state = if d.disabled {
                     "off"
-                } else if d.manifest.is_some() {
+                } else if d.entry.is_some() {
                     "on"
                 } else {
                     "broken"
                 };
-                match &d.manifest {
-                    Some(m) => println!("  {:<20} {state:<6} {}   [{}]", m.id, m.name, m.entry.join(" ")),
+                match &d.entry {
+                    Some(entry) => println!("  {:<20} {state:<6} {}", d.id(), entry.display()),
                     None => println!("  {:<20} {state:<6} {}", d.id(), d.problem.clone().unwrap_or_default()),
                 }
             }
@@ -177,11 +179,11 @@ fn plugins_cli(cmd: &PluginsCmd, dir: &std::path::Path) -> Result<()> {
 }
 
 fn set_plugin(dir: &std::path::Path, id: &str, on: bool) -> Result<()> {
-    use plugins::manifest;
-    let Some(d) = manifest::scan(dir).into_iter().find(|d| d.id() == id) else {
+    use plugins::discover;
+    let Some(d) = discover::scan(dir).into_iter().find(|d| d.id() == id) else {
         return Err(anyhow!("no plugin {id} in {}", dir.display()));
     };
-    manifest::set_enabled(&d.dir, on).with_context(|| format!("could not change {}", d.dir.display()))?;
+    discover::set_enabled(&d.dir, on).with_context(|| format!("could not change {}", d.dir.display()))?;
     println!("{}: {}", d.id(), if on { "on" } else { "off" });
     Ok(())
 }
