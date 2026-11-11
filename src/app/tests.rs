@@ -1947,3 +1947,246 @@ fn the_palette_names_every_command_that_is_handled() {
         assert!(!flash.starts_with("unknown command"), "/{name} is in the palette but not handled: {flash:?}");
     }
 }
+
+// ---- joining, leaving and browsing channels ----------------------------------------------------------------------------------
+
+/// A channel with its own visibility, for the join/leave cases.
+fn chan_priv(id: &str, name: &str, private: bool) -> Channel {
+    Channel { id: id.into(), name: name.into(), about: String::new(), created_at: 1, section: Section::Channels, label: name.into(), is_private: private }
+}
+
+fn browse_cursor_id(app: &App) -> String {
+    match app.browse_rows()[app.browse_cursor] {
+        BrowseRow::Channel(i) => app.channels[i].id.clone(),
+        BrowseRow::Title(s) => panic!("the browser cursor is on the {s:?} title"),
+    }
+}
+
+#[test]
+fn the_channel_browser_lists_the_channels_by_section_and_leaves_out_dms() {
+    let app = sectioned_app();
+    let labels: Vec<String> = app
+        .browse_rows()
+        .into_iter()
+        .filter_map(|r| match r {
+            BrowseRow::Channel(i) => Some(app.channels[i].label.clone()),
+            BrowseRow::Title(_) => None,
+        })
+        .collect();
+    assert_eq!(labels, ["Another chat", "Plan the week", "general", "random", "team"], "every channel, grouped by section");
+    let titles: Vec<Section> = app.browse_rows().into_iter().filter_map(|r| match r { BrowseRow::Title(s) => Some(s), _ => None }).collect();
+    assert_eq!(titles, [Section::Solo, Section::Channels], "with a title per section");
+}
+
+#[test]
+fn opening_the_browser_lands_on_the_channel_on_screen_and_asks_the_relay_for_the_roster() {
+    let mut app = app_with(1);
+    let cmds = app.open_browse();
+    assert_eq!(app.overlay, Overlay::Channels);
+    assert!(matches!(app.browse_rows()[app.browse_cursor], BrowseRow::Channel(i) if app.channels[i].id == "c1"), "the cursor is on the open channel");
+    assert!(matches!(cmds.as_slice(), [Cmd::LoadRoster { channels }] if channels.len() == 3), "one request for every channel: {cmds:?}");
+}
+
+#[test]
+fn the_browser_cursor_steps_over_the_section_titles_and_esc_closes() {
+    let mut app = sectioned_app();
+    app.open_browse();
+    for _ in 0..20 {
+        app.handle(key(KeyCode::Down));
+        assert!(matches!(app.browse_rows()[app.browse_cursor], BrowseRow::Channel(_)), "the cursor never rests on a title");
+    }
+    app.handle(key(KeyCode::Home));
+    assert!(matches!(app.browse_rows()[app.browse_cursor], BrowseRow::Channel(_)));
+    app.handle(key(KeyCode::End));
+    assert!(matches!(app.browse_rows()[app.browse_cursor], BrowseRow::Channel(_)));
+    app.handle(key(KeyCode::Esc));
+    assert_eq!(app.overlay, Overlay::None, "Esc closes the browser");
+}
+
+#[test]
+fn enter_on_a_channel_you_are_not_in_joins_it_and_opens_it_when_the_list_reloads() {
+    let mut app = app_with(1);
+    app.open_browse();
+    app.handle(key(KeyCode::Down));
+    assert_eq!(browse_cursor_id(&app), "c2", "the cursor moved to random");
+    let cmds = app.handle(key(KeyCode::Enter));
+    assert_eq!(app.overlay, Overlay::None, "the browser closes");
+    assert_eq!(app.open_after.as_deref(), Some("c2"), "the channel is opened once the list comes back with us in it");
+    assert!(matches!(cmds.as_slice(), [Cmd::JoinChannel { channel }] if channel == "c2"), "a join request goes to the relay: {cmds:?}");
+}
+
+#[test]
+fn enter_on_a_channel_you_are_in_just_opens_it() {
+    let mut app = app_with(1);
+    app.joined.insert("c2".into());
+    app.open_browse();
+    app.handle(key(KeyCode::Down));
+    assert_eq!(browse_cursor_id(&app), "c2");
+    let cmds = app.handle(key(KeyCode::Enter));
+    assert_eq!(app.overlay, Overlay::None);
+    assert_eq!(app.channel().map(|c| c.id.as_str()), Some("c2"), "the channel on screen is opened");
+    assert!(cmds.iter().any(|c| matches!(c, Cmd::LoadWindow { channel, .. } if channel == "c2")), "its messages are loaded: {cmds:?}");
+    assert!(!cmds.iter().any(|c| matches!(c, Cmd::JoinChannel { .. })), "nothing is sent for a channel you are already in");
+}
+
+#[test]
+fn a_private_channel_is_not_offered_a_join() {
+    let mut app = App::new(ME.into(), false, chrono_tz::UTC);
+    app.handle(AppEvent::Channels(Ok(vec![chan_priv("p1", "secret", true)])));
+    app.open_browse();
+    let cmds = app.handle(key(KeyCode::Enter));
+    assert!(cmds.is_empty(), "no join is sent: {cmds:?}");
+    assert_eq!(app.overlay, Overlay::None);
+    assert_eq!(app.open_after, None);
+    assert!(app.flash_text().unwrap().contains("needs an invitation"), "{:?}", app.flash_text());
+}
+
+#[test]
+fn join_by_name_finds_the_channel_by_name_hash_or_id() {
+    for typed in ["/join general", "/join #GENERAL", "/join gen", "/join c1"] {
+        let mut app = at_input(1);
+        type_text(&mut app, typed);
+        let cmds = press(&mut app, KeyCode::Enter);
+        assert!(matches!(cmds.as_slice(), [Cmd::JoinChannel { channel }] if channel == "c1"), "{typed}: {cmds:?}");
+        assert_eq!(app.open_after.as_deref(), Some("c1"), "{typed}");
+    }
+}
+
+#[test]
+fn join_by_name_opens_a_channel_you_are_already_in_instead_of_joining() {
+    let mut app = at_input(1);
+    app.joined.insert("c1".into());
+    type_text(&mut app, "/join general");
+    let cmds = press(&mut app, KeyCode::Enter);
+    assert!(!cmds.iter().any(|c| matches!(c, Cmd::JoinChannel { .. })), "no join for a channel you are in: {cmds:?}");
+    assert_eq!(app.channel().map(|c| c.id.as_str()), Some("c1"));
+}
+
+#[test]
+fn join_by_name_says_when_it_finds_nothing_or_too_much() {
+    let mut app = at_input(1);
+    type_text(&mut app, "/join nope");
+    let cmds = press(&mut app, KeyCode::Enter);
+    assert!(cmds.is_empty());
+    assert!(app.flash_text().unwrap().contains("no channel here is called nope"), "{:?}", app.flash_text());
+
+    let mut app = at_input(1);
+    type_text(&mut app, "/join");
+    let cmds = press(&mut app, KeyCode::Enter);
+    assert!(cmds.is_empty());
+    assert!(app.flash_text().unwrap().contains("usage: /join"), "{:?}", app.flash_text());
+
+    let mut app = at_input(1);
+    type_text(&mut app, "/join a"); // both general and random contain an "a": nothing to choose between them
+    let cmds = press(&mut app, KeyCode::Enter);
+    assert!(cmds.is_empty());
+    assert!(app.flash_text().unwrap().contains("could be any of 2"), "{:?}", app.flash_text());
+}
+
+#[test]
+fn leave_asks_first_and_only_y_leaves() {
+    let mut app = at_input(1);
+    type_text(&mut app, "/leave");
+    let cmds = press(&mut app, KeyCode::Enter);
+    assert!(cmds.is_empty(), "nothing is sent until it is confirmed: {cmds:?}");
+    assert_eq!(app.confirm_leave.as_deref(), Some("c1"));
+    assert!(app.flash_text().unwrap().contains("leave general?"), "{:?}", app.flash_text());
+
+    let cmds = press(&mut app, KeyCode::Char('n'));
+    assert!(cmds.is_empty(), "anything but y cancels");
+    assert_eq!(app.confirm_leave, None);
+    assert!(app.flash_text().unwrap().contains("not leaving"), "{:?}", app.flash_text());
+
+    type_text(&mut app, "/leave");
+    press(&mut app, KeyCode::Enter);
+    let cmds = press(&mut app, KeyCode::Char('y'));
+    assert!(matches!(cmds.as_slice(), [Cmd::LeaveChannel { channel }] if channel == "c1"), "{cmds:?}");
+    assert_eq!(app.confirm_leave, None);
+}
+
+#[test]
+fn a_dm_is_not_a_channel_to_leave() {
+    let mut app = at_input(1);
+    app.open_channel(2); // the DM row
+    type_text(&mut app, "/leave");
+    let cmds = press(&mut app, KeyCode::Enter);
+    assert!(cmds.is_empty());
+    assert_eq!(app.confirm_leave, None);
+    assert!(app.flash_text().unwrap().contains("not a channel to leave"), "{:?}", app.flash_text());
+}
+
+#[test]
+fn leaving_drops_the_channel_from_the_local_state_when_the_relay_takes_it() {
+    let mut app = app_with(1);
+    app.joined.insert("c1".into());
+    app.member_counts.insert("c1".into(), 3);
+    app.members.insert("c1".into(), vec![("bob".into(), "member".into())]);
+    app.unread.insert("c1".into(), 2);
+    let cmds = app.handle(AppEvent::Left { channel: "c1".into(), result: Ok("ev".into()) });
+    assert!(!app.joined.contains("c1"), "the membership mark goes");
+    assert!(!app.member_counts.contains_key("c1"), "and the count");
+    assert!(!app.members.contains_key("c1"), "and who may be mentioned in it");
+    assert!(!app.unread.contains_key("c1"), "and the unread badge");
+    assert!(cmds.iter().any(|c| matches!(c, Cmd::LoadChannels)), "the list is reloaded: {cmds:?}");
+    assert!(cmds.iter().any(|c| matches!(c, Cmd::LoadRoster { .. })), "and who is in what: {cmds:?}");
+}
+
+#[test]
+fn a_refused_join_is_reported_and_only_cancels_the_open_it_names() {
+    let mut app = app_with(1);
+    app.open_after = Some("c2".into());
+    let cmds = app.handle(AppEvent::Joined { channel: "c2".into(), result: Err("not an open channel".into()) });
+    assert!(cmds.is_empty());
+    assert_eq!(app.open_after, None, "the channel it was waiting to open is given up");
+    assert!(app.flash_text().unwrap().contains("could not join the channel"), "{:?}", app.flash_text());
+
+    app.open_after = Some("c9".into());
+    app.handle(AppEvent::Joined { channel: "c2".into(), result: Err("no".into()) });
+    assert_eq!(app.open_after.as_deref(), Some("c9"), "an answer for another channel does not cancel a newer join");
+}
+
+#[test]
+fn a_refused_leave_is_reported_and_leaves_the_channel_alone() {
+    let mut app = app_with(1);
+    app.joined.insert("c1".into());
+    let cmds = app.handle(AppEvent::Left { channel: "c1".into(), result: Err("the last owner cannot leave".into()) });
+    assert!(cmds.is_empty());
+    assert!(app.joined.contains("c1"), "still a member");
+    assert!(app.flash_text().unwrap().contains("could not leave the channel"), "{:?}", app.flash_text());
+}
+
+#[test]
+fn the_roster_marks_membership_and_counts_and_is_rebuilt_from_each_answer() {
+    let mut app = app_with(1);
+    let members = |who: &[&str]| who.iter().map(|p| (*p).to_string()).collect::<Vec<String>>();
+    let cmds = app.handle(AppEvent::Roster(Ok([("c1".to_string(), members(&["me", "bob"])), ("c2".to_string(), members(&["bob"]))].into())));
+    assert!(cmds.is_empty());
+    assert!(app.is_member("c1"), "you are in c1");
+    assert!(!app.is_member("c2"));
+    assert_eq!(app.member_counts.get("c1"), Some(&2));
+    assert_eq!(app.member_counts.get("c2"), Some(&1));
+
+    // Each answer replaces the last: a channel it says nothing about keeps no count, and the marks come from it alone.
+    app.handle(AppEvent::Roster(Ok([("c2".to_string(), members(&["me"]))].into())));
+    assert!(app.is_member("c2"));
+    assert!(!app.is_member("c1"), "rebuilt from the answer, not remembered");
+    assert_eq!(app.member_counts.get("c1"), None, "an unanswered channel keeps no count");
+}
+
+#[test]
+fn the_roster_drops_a_channel_that_left_the_list_between_the_two_requests() {
+    let mut app = app_with(1);
+    app.handle(AppEvent::Roster(Ok([("gone".to_string(), vec!["me".to_string()])].into())));
+    assert!(!app.is_member("gone"), "a channel that is not in the list is not tracked");
+    assert_eq!(app.member_counts.get("gone"), None);
+}
+
+#[test]
+fn a_channel_list_that_appears_or_changes_asks_who_is_in_what() {
+    let mut app = App::new(ME.into(), false, chrono_tz::UTC);
+    let cmds = app.handle(AppEvent::Channels(Ok(vec![chan("c1", "general")])));
+    assert!(
+        cmds.iter().any(|c| matches!(c, Cmd::LoadRoster { channels } if channels.len() == 1 && channels[0] == "c1")),
+        "the marks and counts come from the relay: {cmds:?}"
+    );
+}

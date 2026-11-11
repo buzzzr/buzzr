@@ -232,6 +232,17 @@ impl Relay {
             .unwrap_or_default())
     }
 
+    /// Who is in each of `channels`: `kind:39002`, one event per channel whose `p` tags are its members. One request for the whole
+    /// list — it is what tells the channel browser which channels we are a member of, and how many people are in each. A channel the
+    /// relay has no members event for is left out of the map, rather than read as empty.
+    pub async fn roster(&self, channels: &[String]) -> Result<HashMap<String, Vec<String>>> {
+        if channels.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let evs = self.query(&[json!({"kinds": [KIND_GROUP_MEMBERS], "#d": channels, "limit": 500})]).await?;
+        Ok(roster_from(&evs))
+    }
+
     /// The newest `kind:0` profile per pubkey: the name to show and what the person says about themselves.
     pub async fn profiles(&self, pubkeys: &[String]) -> Result<HashMap<String, Profile>> {
         let mut out = HashMap::new();
@@ -382,6 +393,31 @@ pub fn reaction_builder(target: &str, emoji: &str) -> Result<EventBuilder> {
 pub fn remove_reaction_builder(reaction: &str) -> Result<EventBuilder> {
     let reaction = nostr::EventId::from_hex(reaction).context("not a reaction id")?;
     buzz_sdk::build_remove_reaction(reaction).map_err(|e| anyhow!("{e}"))
+}
+
+/// The `channel -> members` map from the `kind:39002` events of a roster query: the `d` tag is the channel, and each `p` tag is a
+/// member. A channel with no event is left out of the map, rather than read as empty — an unanswered channel is not an empty one.
+fn roster_from(evs: &[Ev]) -> HashMap<String, Vec<String>> {
+    evs.iter()
+        .filter_map(|e| {
+            let id = e.tag("d")?;
+            let members = e.tags.iter().filter(|t| t.first().map(String::as_str) == Some("p")).filter_map(|t| t.get(1).cloned()).collect();
+            Some((id.to_owned(), members))
+        })
+        .collect()
+}
+
+/// Join an open channel (`kind:9021`, what `buzz channels join` sends). The relay adds us as a member, or refuses — a private
+/// channel cannot be joined, it needs an invitation.
+pub fn join_builder(channel: &str) -> Result<EventBuilder> {
+    let channel_id = uuid::Uuid::parse_str(channel).context("not a channel id")?;
+    buzz_sdk::build_join(channel_id).map_err(|e| anyhow!("{e}"))
+}
+
+/// Leave a channel (`kind:9022`, what `buzz channels leave` sends). The relay refuses when we are the last owner.
+pub fn leave_builder(channel: &str) -> Result<EventBuilder> {
+    let channel_id = uuid::Uuid::parse_str(channel).context("not a channel id")?;
+    buzz_sdk::build_leave(channel_id).map_err(|e| anyhow!("{e}"))
 }
 
 /// A new stream channel (`kind:9007`, what `buzz channels create` sends). Returns the builder and the new channel's id.
@@ -564,5 +600,37 @@ mod tests {
         let keys = Keys::generate();
         let tag = json!(["auth", keys.public_key().to_hex(), "", "00".repeat(64)]).to_string();
         assert!(Relay::new("https://r", Keys::generate(), Some(tag)).unwrap().auth_tag().is_some());
+    }
+
+    #[test]
+    fn join_and_leave_name_the_channel_and_their_kind() {
+        let keys = Keys::generate();
+        let channel = "11111111-1111-4111-8111-111111111111";
+        let join = join_builder(channel).unwrap().sign_with_keys(&keys).unwrap();
+        assert_eq!(join.kind.as_u16(), 9021, "a join request");
+        assert_eq!(join.content, "");
+        assert!(join.tags.iter().any(|t| t.as_slice() == ["h", channel]), "the channel is the `h` tag: {:?}", join.tags);
+        let leave = leave_builder(channel).unwrap().sign_with_keys(&keys).unwrap();
+        assert_eq!(leave.kind.as_u16(), 9022, "a leave request");
+        assert!(leave.tags.iter().any(|t| t.as_slice() == ["h", channel]), "the channel is the `h` tag: {:?}", leave.tags);
+        assert!(join_builder("general").is_err(), "a name is not a channel id");
+        assert!(leave_builder("").is_err());
+    }
+
+    #[test]
+    fn the_roster_maps_each_channel_to_its_members() {
+        // A `kind:39002`: the channel in `d`, one `p` per member. The map is what marks membership and the counts in the browser.
+        let members = |chan: &str, who: &[&str]| {
+            let mut tags = vec![vec!["d".to_string(), chan.to_string()]];
+            tags.extend(who.iter().map(|p| vec!["p".to_string(), (*p).to_string()]));
+            Ev { id: format!("ev-{chan}"), pubkey: "alice".into(), created_at: 1000, kind: 39002, content: String::new(), tags }
+        };
+        let (a, b) = ("aa".repeat(32), "bb".repeat(32));
+        let map = roster_from(&[members("chan1", &[&a, &b]), members("chan2", &[&a]), members("empty", &[])]);
+        assert_eq!(map.get("chan1"), Some(&vec![a.clone(), b.clone()]));
+        assert_eq!(map.get("chan2"), Some(&vec![a.clone()]));
+        assert_eq!(map.get("empty"), Some(&vec![]), "an event with no members is an empty channel, not an unknown one");
+        assert_eq!(map.get("chan3"), None, "a channel the relay said nothing about is left out, so no count is shown for it");
+        assert!(roster_from(&[]).is_empty());
     }
 }

@@ -512,6 +512,23 @@ fn x_archives_the_channel_under_the_bar_and_a_search_result_brings_it_back() {
     assert!(header(&screen).contains("#design"), "and the channel was opened: {:?}", header(&screen));
 }
 
+/// `/channels` browses what the relay offers: a channel we are not in says what Enter would do, and Esc closes it.
+#[test]
+fn the_channels_browser_lists_what_the_relay_offers_and_esc_closes_it() {
+    let Some(relay) = relay_or_skip("the_channels_browser_...") else { return };
+    let s = session(&relay);
+    s.press_all(&["tab", "tab"]); // channels -> messages -> input
+    s.expect("the input box to take focus", "Send");
+    s.type_text("/channels");
+    s.press("enter");
+    s.expect("the channel browser", "Channels · Enter opens or joins · Esc closes");
+    s.expect("a channel the relay offers", "# general");
+    s.expect("what Enter would do for a channel we are not in", "not joined · Enter joins");
+    s.expect("the footer to follow the browser", "Open or join");
+    s.press("esc");
+    s.expect_gone("the browser to close", "Channels · Enter opens or joins");
+}
+
 #[test]
 fn f1_lists_the_keys_and_esc_closes_them() {
     let Some(relay) = relay_or_skip("f1_lists_the_keys_...") else { return };

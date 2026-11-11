@@ -45,6 +45,9 @@
 - **Search everything.** Ctrl+F searches channel names, people and every message you can read, with full text from the relay. Enter on a
   person opens the DM you already have with them, or starts a new one.
 - **Create channels** from the input with `/new`.
+- **Browse, join and leave channels.** `/channels` lists every channel the relay shows — open or private, joined or not — with what
+  it is for and how many people are in it. Enter opens a channel you are in and joins an open one you are not; `/join NAME` does the
+  same by name, and `/leave` takes you out of the open channel after asking.
 - **People and profiles.** `/whois name` shows a short card (name, npub, what they wrote about themselves); `/dm name` opens your DM with
   someone or starts a new one. Both take a name from a channel or an npub.
 - **Plugins.** Add your own `/commands`, status items, badges and panels from any language. See [PLUGIN.md](PLUGIN.md).
@@ -163,6 +166,12 @@ The full behaviour, for when the feature list above is not enough.
   every message you can read (full text, from the relay); Enter opens the result — a message or channel in its channel or thread, a
   person in the DM with them (starting one if there is none).
 - **New channels:** `/new [private] name [description]` creates one and opens it.
+- **Browse, join and leave channels:** `/channels` opens a browser over every channel the relay shows — Solo, and open and private
+  channels — with what it is for, how many people are in it and whether you are one of them (the counts and the membership come from
+  NIP-29 `kind:39002`). Enter opens a channel you are in; on an open one you are not in it asks the relay to join you (`kind:9021`)
+  and opens it. A private channel is not offered — a self-join needs an open channel, so it would be refused. `/join NAME` (a name,
+  `#name` or a channel id) joins or opens one directly; `/leave` asks first (`y` confirms) and sends `kind:9022`, then drops the
+  channel from the list. The list and the membership are read again after a join or a leave, so they follow what the relay accepted.
 - **People:** `/whois name` shows a short card for someone — their name, npub and about line, filled in as the relay answers. `/dm name`
   and `/whois name` take a display name from a channel, or a key (`npub1…`, `nostr:` URI or hex); an ambiguous or unknown name is
   reported rather than guessed.
@@ -191,6 +200,7 @@ The full behaviour, for when the feature list above is not enough.
 | Up / Down, at the edges | nothing typed in the input, Up goes to the messages on the newest one; on the newest message, Down goes back to the input |
 | Enter | open the channel / open the thread (which reads it) / send |
 | x | archive the channel under the bar (it leaves the list; Ctrl+F or `/search` finds it again) |
+| Enter, in `/channels` | open a channel you are in, or join an open one you are not |
 | r, c, u, e, d | reply in the thread, copy, mark unread, edit, delete the selected message (e and d: yours only) |
 | a | react to the selected message: pick an emoji, or type to search one (Enter sends, Esc closes) |
 | / | start a `/command`: a palette lists the commands above the input and narrows as you type (Enter runs the one on the cursor, Tab completes it) |
@@ -200,7 +210,7 @@ The full behaviour, for when the feature list above is not enough.
 | Ctrl+R, Ctrl+O | reload, load older |
 | Ctrl+Q, Ctrl+C | quit |
 
-Commands in the input (N is the number shown as `#N`): `/r N text`, `/t N`, `/c`, `/copy N`, `/edit N`, `/delete N`, `/search text`, `/whois NAME`, `/dm NAME`, `/new [private] name [about]`, `/plugins`, `/update`, `/read [all]`, `/archive`, `/more`, `/refresh`, `/help`, `/q`. Typing `/` lists them above the input and narrows the list as you type: Enter runs the command on the cursor line, Tab fills its name in for one that takes an argument. Plugin commands appear in the list too.
+Commands in the input (N is the number shown as `#N`): `/r N text`, `/t N`, `/c`, `/copy N`, `/edit N`, `/delete N`, `/search text`, `/whois NAME`, `/dm NAME`, `/new [private] name [about]`, `/channels`, `/join NAME`, `/leave`, `/plugins`, `/update`, `/read [all]`, `/archive`, `/more`, `/refresh`, `/help`, `/q`. Typing `/` lists them above the input and narrows the list as you type: Enter runs the command on the cursor line, Tab fills its name in for one that takes an argument. Plugin commands appear in the list too.
 
 ## Clipboard
 

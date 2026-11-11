@@ -7,6 +7,11 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
 
 ### Added
 
+- `/channels` opens a browser over every channel the relay shows — open or private, joined or not — with what it is for, how many
+  people are in it and whether you are in it (the membership and the counts come from NIP-29 `kind:39002`). Enter opens a channel
+  you are in and joins an open one you are not; `/join NAME` (a name, `#name` or a channel id) joins or opens one directly, and
+  `/leave` asks first (`y` confirms) before it sends `kind:9022` and drops the channel from the list. A private channel is not
+  offered, because a self-join needs an open one. The list and the membership are read again after a join or a leave.
 - `x` on the channel list archives the channel under the cursor (`/archive` archives the channel you are in): it drops out of the
   list without leaving it, so the relay membership and the read position are untouched. Ctrl+F or `/search` still matches it, its
   row says `archived`, and Enter brings it back and opens it. The archive set lives in `archived.json` next to the read positions

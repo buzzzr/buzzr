@@ -33,6 +33,14 @@ pub enum SideRow {
     Channel(usize),
 }
 
+/// One row of the channel browser (`/channels`): a section title or a channel (an index into `App::channels`). Same shape as
+/// `SideRow`; the browser draws every channel the relay shows us except the DMs, and keeps the archived ones.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BrowseRow {
+    Title(Section),
+    Channel(usize),
+}
+
 fn sort_channel_list(list: &mut [Channel]) {
     list.sort_by(|a, b| (a.section, a.label.to_lowercase(), &a.id).cmp(&(b.section, b.label.to_lowercase(), &b.id)));
 }
@@ -58,6 +66,9 @@ pub enum Overlay {
     Search,
     /// Somebody's profile card (`/whois`).
     Whois,
+    /// The channel browser (`/channels`): every channel the relay shows us, with what it is for, how many people are in it and
+    /// whether we are one of them.
+    Channels,
     /// A plugin panel (or the built-in plugin list), drawn from `App::panel`.
     Panel,
 }
@@ -118,11 +129,14 @@ pub enum Row {
 pub const COMMANDS: &[(&str, &str)] = &[
     ("archive", "archive this channel (search finds it again)"),
     ("c", "back to the channel"),
+    ("channels", "browse the channels and join one"),
     ("copy", "copy message N to the clipboard"),
     ("delete", "delete your own message N (asks first)"),
     ("dm", "open your DM with NAME, or start one"),
     ("edit", "edit your own message N"),
     ("help", "the commands and how things work"),
+    ("join", "join a channel: /join NAME"),
+    ("leave", "leave this channel (asks first)"),
     ("more", "load older messages"),
     ("new", "create a channel: /new [private] name [about]"),
     ("plugins", "what is loaded, and the commands plugins added"),
@@ -188,6 +202,12 @@ pub enum Cmd {
     /// an empty `emoji` with `remove` set is the reaction going away.
     React { target: String, emoji: String, remove: Option<String> },
     CreateChannel { name: String, private: bool, about: Option<String> },
+    /// Ask to join an open channel (`kind:9021`).
+    JoinChannel { channel: String },
+    /// Leave a channel (`kind:9022`).
+    LeaveChannel { channel: String },
+    /// Who is in every channel, and whether we are: one `kind:39002` request (`relay::roster`).
+    LoadRoster { channels: Vec<String> },
     /// Ask the relay for the direct message with this person (`kind:41010`); it creates it when it does not exist yet.
     OpenDm { peer: String },
     /// One person's profile card (`kind:0`).
@@ -215,6 +235,12 @@ pub enum AppEvent {
     Sent(Result<String, String>),
     /// The id of the channel we asked to create.
     Created(Result<String, String>),
+    /// The relay took (or refused) our join request for a channel.
+    Joined { channel: String, result: Result<String, String> },
+    /// The relay took (or refused) our leave request for a channel.
+    Left { channel: String, result: Result<String, String> },
+    /// The answer to `Cmd::LoadRoster`: the members of every channel we asked about.
+    Roster(Result<HashMap<String, Vec<String>>, String>),
     /// The relay took (or found) the direct message we asked for; the channel list is reloaded to find its id.
     DmOpened(Result<(), String>),
     /// The answer to `Cmd::LoadProfile`.
@@ -305,6 +331,16 @@ pub struct App {
     /// The slash-command palette's row under the cursor. The palette itself is derived from the editor text (`command_rows`);
     /// this is only where the highlight sits, reset to the first row every time the command word changes.
     pub cmd_cursor: usize,
+    /// The channel browser's row under the cursor (`/channels`), a position in `browse_rows`.
+    pub browse_cursor: usize,
+    /// The channels we are a member of, from the relay's `kind:39002` (`Cmd::LoadRoster`): the browser marks them, and Enter
+    /// opens one instead of joining it.
+    pub joined: HashSet<String>,
+    /// How many people are in each channel, from the same answer. A channel with no entry is one the relay told us nothing
+    /// about; the browser shows no count rather than a wrong one.
+    pub member_counts: HashMap<String, usize>,
+    /// The channel a `/leave` is waiting on a yes/no for.
+    pub confirm_leave: Option<String>,
     pub search: Search,
     /// Somebody's profile card, while `Overlay::Whois` is up.
     pub whois: Option<Whois>,
@@ -386,6 +422,10 @@ impl App {
             confirm_delete: None,
             react: None,
             cmd_cursor: 0,
+            browse_cursor: 0,
+            joined: HashSet::new(),
+            member_counts: HashMap::new(),
+            confirm_leave: None,
             search: Search { query: Editor::default(), messages: Vec::new(), cursor: 0, seq: 0, asked: String::new(), edited_at: Instant::now(), loading: false },
             whois: None,
             pending_dm: None,
@@ -1044,6 +1084,117 @@ impl App {
         Some(Cmd::SaveArchived(self.archived.clone()))
     }
 
+    // ---- the channel browser (/channels)
+
+    /// The browser's rows: every channel the relay shows us except the DMs, grouped by section like the channel list. Archived
+    /// channels stay in it — the browser is a directory of what the relay offers, and Enter brings one back, the way its search
+    /// result does.
+    pub fn browse_rows(&self) -> Vec<BrowseRow> {
+        let mut rows = Vec::new();
+        for section in [Section::Solo, Section::Channels] {
+            let mut titled = false;
+            for (i, c) in self.channels.iter().enumerate() {
+                if c.section != section {
+                    continue;
+                }
+                if !titled {
+                    rows.push(BrowseRow::Title(section));
+                    titled = true;
+                }
+                rows.push(BrowseRow::Channel(i));
+            }
+        }
+        rows
+    }
+
+    /// Whether we are a member of a channel, as far as the relay has told us (`Cmd::LoadRoster`). A channel we know nothing
+    /// about reads as "not a member", which is also what the browser offers to fix by joining it.
+    pub fn is_member(&self, id: &str) -> bool {
+        self.joined.contains(id)
+    }
+
+    /// `/channels`: the directory of every channel the relay shows us, with what it is for, how many people are in it and
+    /// whether we are one of them. The counts and the membership come from the relay, and are asked for again as it opens.
+    fn open_browse(&mut self) -> Vec<Cmd> {
+        self.overlay = Overlay::Channels;
+        let rows = self.browse_rows();
+        let open = self.cur;
+        self.browse_cursor = rows
+            .iter()
+            .position(|r| matches!(r, BrowseRow::Channel(i) if Some(*i) == open))
+            .or_else(|| rows.iter().position(|r| matches!(r, BrowseRow::Channel(_))))
+            .unwrap_or(0);
+        let channels: Vec<String> = self.channels.iter().map(|c| c.id.clone()).collect();
+        if channels.is_empty() {
+            Vec::new()
+        } else {
+            vec![Cmd::LoadRoster { channels }]
+        }
+    }
+
+    /// Move the browser's cursor by `delta` channels, stepping over the section titles. It goes as far as it can: at the edge
+    /// the cursor stays on the last channel it was on.
+    fn browse_move(&mut self, delta: isize) {
+        let rows = self.browse_rows();
+        let step = delta.signum();
+        let mut left = delta.abs();
+        while left > 0 {
+            let mut i = self.browse_cursor as isize;
+            loop {
+                i += step;
+                if i < 0 || i as usize >= rows.len() {
+                    return; // nothing further in that direction: the cursor stays where it was
+                }
+                if matches!(rows[i as usize], BrowseRow::Channel(_)) {
+                    break;
+                }
+            }
+            self.browse_cursor = i as usize;
+            left -= 1;
+        }
+    }
+
+    fn browse_edge(&mut self, last: bool) {
+        let rows = self.browse_rows();
+        let found = if last {
+            rows.iter().rposition(|r| matches!(r, BrowseRow::Channel(_)))
+        } else {
+            rows.iter().position(|r| matches!(r, BrowseRow::Channel(_)))
+        };
+        if let Some(i) = found {
+            self.browse_cursor = i;
+        }
+    }
+
+    /// Enter in the browser: open a channel we are in, join an open one we are not, and refuse a private one (that needs an
+    /// invitation). An archived channel comes back into the list first, as it does from a search result.
+    fn browse_activate(&mut self) -> Vec<Cmd> {
+        let rows = self.browse_rows();
+        let Some(BrowseRow::Channel(i)) = rows.get(self.browse_cursor).copied() else { return Vec::new() };
+        let id = self.channels[i].id.clone();
+        self.overlay = Overlay::None; // either way the browser is done with
+        if self.is_member(&id) {
+            return self.open_from_browser(i);
+        }
+        if self.channels[i].is_private {
+            let label = self.channels[i].label.clone();
+            self.flash(format!("{label} is private, so it needs an invitation"));
+            return Vec::new();
+        }
+        self.join_channel(i)
+    }
+
+    /// Leave the browser and open a channel from it, bringing it back into the list first if it was archived.
+    fn open_from_browser(&mut self, index: usize) -> Vec<Cmd> {
+        let mut cmds = Vec::new();
+        if let Some(cmd) = self.unarchive(index) {
+            cmds.push(cmd);
+        }
+        cmds.extend(self.open_channel(index));
+        self.set_focus(Focus::Messages);
+        cmds
+    }
+
     fn open_thread(&mut self, root: String) -> Vec<Cmd> {
         let Some(c) = self.channel() else { return Vec::new() };
         let channel = c.id.clone();
@@ -1161,6 +1312,34 @@ impl App {
                 self.flash(format!("could not open the DM: {e}"));
                 Vec::new()
             }
+            AppEvent::Joined { channel, result } => match result {
+                // The channel is opened by the reloaded list: `open_after` still names it.
+                Ok(_) => self.reload_membership(),
+                Err(e) => {
+                    // Only drop the intent to open when this answer is about the channel it still names: a stale refusal must not
+                    // cancel a newer join.
+                    if self.open_after.as_deref() == Some(channel.as_str()) {
+                        self.open_after = None;
+                    }
+                    self.flash(format!("could not join the channel: {e}"));
+                    Vec::new()
+                }
+            },
+            AppEvent::Left { channel, result } => match result {
+                Ok(_) => {
+                    let mut cmds = Vec::new();
+                    if let Some(cmd) = self.forget_channel(&channel) {
+                        cmds.push(cmd);
+                    }
+                    cmds.extend(self.reload_membership());
+                    cmds
+                }
+                Err(e) => {
+                    self.flash(format!("could not leave the channel: {e}"));
+                    Vec::new()
+                }
+            },
+            AppEvent::Roster(r) => self.roster_loaded(r),
             AppEvent::Profile { pubkey, result } => {
                 // An answer for a card that has since been replaced by another person is dropped.
                 if self.whois.as_ref().map(|w| w.pubkey == pubkey).unwrap_or(false) {
@@ -1257,6 +1436,31 @@ impl App {
         Vec::new()
     }
 
+    /// The relay's answer to `Cmd::LoadRoster` (`kind:39002`): who is in each channel. It is what says which channels we are a
+    /// member of and how many people are in each. A channel with no answer keeps no count, rather than a wrong one, and the
+    /// marks are rebuilt from this answer alone so a leave is not left looking like a join.
+    fn roster_loaded(&mut self, r: Result<HashMap<String, Vec<String>>, String>) -> Vec<Cmd> {
+        match r {
+            Ok(map) => {
+                let me = self.me.clone();
+                let known: HashSet<String> = self.channels.iter().map(|c| c.id.clone()).collect();
+                self.joined.clear();
+                self.member_counts.clear();
+                for (id, members) in map {
+                    if !known.contains(&id) {
+                        continue; // a channel that left the list between the two requests
+                    }
+                    if members.iter().any(|p| *p == me) {
+                        self.joined.insert(id.clone());
+                    }
+                    self.member_counts.insert(id, members.len());
+                }
+            }
+            Err(e) => self.flash(format!("could not load who is in the channels: {e}")),
+        }
+        Vec::new()
+    }
+
     fn channels_loaded(&mut self, r: Result<Vec<Channel>, String>) -> Vec<Cmd> {
         let mut list = match r {
             Ok(l) => l,
@@ -1283,6 +1487,8 @@ impl App {
         let mut cmds = Vec::new();
         if ids != old_ids {
             cmds.push(Cmd::Subscribe(ids.clone()));
+            // A channel that appeared or went away changes who is in what: the browser's marks and counts come from the relay.
+            cmds.push(Cmd::LoadRoster { channels: ids.clone() });
         }
         for c in self.channels.clone() {
             if c.is_dm() && !self.members.contains_key(&c.id) && self.loading.insert(format!("members:{}", c.id)) {
@@ -1498,11 +1704,17 @@ impl App {
         if self.confirm_delete.is_some() {
             return self.answer_delete(k);
         }
+        if self.confirm_leave.is_some() {
+            return self.answer_leave(k);
+        }
         if self.react.is_some() {
             return self.key_react(k);
         }
         if self.overlay == Overlay::Search {
             return self.key_search(k);
+        }
+        if self.overlay == Overlay::Channels {
+            return self.key_browse(k);
         }
         if self.overlay == Overlay::Panel {
             return self.key_panel(k);
@@ -1872,6 +2084,9 @@ impl App {
                 }
                 Vec::new()
             }
+            "channels" => self.open_browse(),
+            "join" => self.join_command(arg),
+            "leave" => self.ask_leave(),
             "new" => self.create_channel(arg),
             "dm" => {
                 if arg.trim().is_empty() {
@@ -2378,6 +2593,136 @@ impl App {
         vec![Cmd::CreateChannel { name: name.to_owned(), private, about: (!about.is_empty()).then(|| about.to_owned()) }]
     }
 
+    // ---- joining and leaving channels
+
+    /// Ask to join an open channel and open it when the answer comes back: the relay re-publishes the group's state when
+    /// membership changes, so the reloaded list and roster have us in it. A private channel is refused here — the relay would
+    /// refuse too, and there is nothing the user could type to change that.
+    fn join_channel(&mut self, index: usize) -> Vec<Cmd> {
+        if self.read_only {
+            self.flash("read-only mode: nothing is sent");
+            return Vec::new();
+        }
+        let Some(c) = self.channels.get(index) else { return Vec::new() };
+        let (id, label) = (c.id.clone(), c.label.clone());
+        if c.is_private && !self.is_member(&id) {
+            self.flash(format!("{label} is private, so it needs an invitation"));
+            return Vec::new();
+        }
+        self.open_after = Some(id.clone());
+        self.flash(format!("joining {label}…"));
+        vec![Cmd::JoinChannel { channel: id }]
+    }
+
+    /// `/join NAME`: the channel `NAME` names. One we are already in is simply opened; an open one we are not in is joined.
+    /// A leading `#` and the case are ignored, and a channel id works too.
+    fn join_command(&mut self, arg: &str) -> Vec<Cmd> {
+        let who = arg.trim();
+        let q = who.trim_start_matches('#').trim().to_lowercase();
+        if q.is_empty() {
+            self.flash("usage: /join NAME (a channel name, or its id) — /channels lists them");
+            return Vec::new();
+        }
+        let found = self.channel_matching(who, &q);
+        match found.len() {
+            0 => {
+                self.flash(format!("no channel here is called {who} — /channels lists the ones the relay shows"));
+                Vec::new()
+            }
+            1 => {
+                let index = found[0];
+                if self.is_member(&self.channels[index].id) {
+                    self.open_from_browser(index)
+                } else {
+                    self.join_channel(index)
+                }
+            }
+            n => {
+                let names: Vec<String> = found.iter().take(4).map(|i| format!("#{}", self.channels[*i].label)).collect();
+                self.flash(format!("{who} could be any of {n}: {} — type more of the name", names.join(", ")));
+                Vec::new()
+            }
+        }
+    }
+
+    /// The channels `who` names: its id, else an exact name, else the names it is part of. DMs are left out: they are opened
+    /// with `/dm`, not joined.
+    fn channel_matching(&self, who: &str, q: &str) -> Vec<usize> {
+        if let Some(i) = self.channels.iter().position(|c| c.id == who) {
+            return vec![i];
+        }
+        let (mut exact, mut partial) = (Vec::new(), Vec::new());
+        for (i, c) in self.channels.iter().enumerate() {
+            if c.is_dm() {
+                continue;
+            }
+            let label = c.label.to_lowercase();
+            if label == q {
+                exact.push(i);
+            } else if label.contains(q) {
+                partial.push(i);
+            }
+        }
+        if exact.is_empty() {
+            partial
+        } else {
+            exact
+        }
+    }
+
+    /// `/leave`: leaving changes membership on the relay and takes the channel out of the list, so it asks first (`y`).
+    fn ask_leave(&mut self) -> Vec<Cmd> {
+        if self.read_only {
+            self.flash("read-only mode: nothing is sent");
+            return Vec::new();
+        }
+        let Some(c) = self.channel() else {
+            self.flash("usage: /leave (open the channel you want to leave first)");
+            return Vec::new();
+        };
+        let (id, label) = (c.id.clone(), c.label.clone());
+        if c.is_dm() {
+            self.flash("a DM is not a channel to leave");
+            return Vec::new();
+        }
+        self.confirm_leave = Some(id);
+        self.flash(format!("leave {label}? y confirms, any other key cancels"));
+        Vec::new()
+    }
+
+    /// The yes/no after `/leave`: `y` leaves, anything else cancels.
+    fn answer_leave(&mut self, k: KeyEvent) -> Vec<Cmd> {
+        let Some(id) = self.confirm_leave.take() else { return Vec::new() };
+        if !matches!(k.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
+            self.flash("not leaving");
+            return Vec::new();
+        }
+        let label = self.channels.iter().find(|c| c.id == id).map(|c| c.label.clone()).unwrap_or_default();
+        self.flash(format!("leaving {label}…"));
+        vec![Cmd::LeaveChannel { channel: id }]
+    }
+
+    /// The channel list and the roster both change when membership does: the relay re-publishes a group's state after a join or
+    /// a leave, so both are asked for again.
+    fn reload_membership(&mut self) -> Vec<Cmd> {
+        let channels: Vec<String> = self.channels.iter().map(|c| c.id.clone()).collect();
+        let mut cmds = vec![Cmd::LoadChannels];
+        if !channels.is_empty() {
+            cmds.push(Cmd::LoadRoster { channels });
+        }
+        cmds
+    }
+
+    /// Forget what a channel we have left held locally: the membership mark, the count, the members (they are who may be
+    /// mentioned in it) and the unread badge. The read position stays, so rejoining picks up where we left off.
+    fn forget_channel(&mut self, id: &str) -> Option<Cmd> {
+        self.joined.remove(id);
+        self.member_counts.remove(id);
+        self.members.remove(id);
+        self.unread.remove(id);
+        self.archived.remove(id).then(|| Cmd::SaveArchived(self.archived.clone()))
+    }
+
     // ---- people and DMs
 
     /// Everyone whose display name contains `q`, exact matches first. Names come from the relay's `kind:0` profiles, so this
@@ -2542,6 +2887,23 @@ impl App {
         }
         rows.extend(self.search.messages.iter().cloned().map(Row::Message));
         rows
+    }
+
+    /// The channel browser: the arrow keys and Home/End move over the channels (the section titles are not selectable), Enter
+    /// opens or joins the one on the cursor, Esc closes.
+    fn key_browse(&mut self, k: KeyEvent) -> Vec<Cmd> {
+        match k.code {
+            KeyCode::Esc => self.overlay = Overlay::None,
+            KeyCode::Up => self.browse_move(-1),
+            KeyCode::Down => self.browse_move(1),
+            KeyCode::PageUp => self.browse_move(-8),
+            KeyCode::PageDown => self.browse_move(8),
+            KeyCode::Home => self.browse_edge(false),
+            KeyCode::End => self.browse_edge(true),
+            KeyCode::Enter => return self.browse_activate(),
+            _ => {}
+        }
+        Vec::new()
     }
 
     fn key_search(&mut self, k: KeyEvent) -> Vec<Cmd> {
