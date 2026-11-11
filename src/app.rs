@@ -369,7 +369,7 @@ pub struct App {
     pub whois: Option<Whois>,
     /// The person a fresh DM was asked for: the channel is opened as soon as the reloaded list has it.
     pending_dm: Option<String>,
-    /// What loaded plugins put on the screen: status items, badges, marks and `/commands`.
+    /// What loaded plugins put on the screen: status items, badges, marks, a pane and `/commands`.
     pub plugins: Registry,
     /// How this copy of buzzr was installed, for `/update`; the loop fills it in, tests set it directly.
     pub update_source: InstallSource,
@@ -3084,6 +3084,11 @@ impl App {
                 self.plugins.set_status(&id, segments);
                 Vec::new()
             }
+            PluginEvent::Pane { id, pane } => {
+                // Same rule as status: a pane for a plugin that is not registered is dropped, and the next draw shows it.
+                self.plugins.set_pane(&id, pane);
+                Vec::new()
+            }
             PluginEvent::Panel { plugin, panel } => {
                 self.open_panel(plugin, panel);
                 Vec::new()
@@ -3140,7 +3145,7 @@ impl App {
     fn show_plugins(&mut self) {
         let mut rows = Vec::new();
         if self.plugin_meta.is_empty() {
-            rows.push(PanelRow { text: "No plugins found. Put a folder with a plugin.json in the plugins directory.".into(), tone: contrib::Tone::Dim, action: None });
+            rows.push(PanelRow { text: "No plugins found. Put a folder with an executable entry file in the plugins directory.".into(), tone: contrib::Tone::Dim, action: None });
         }
         for m in &self.plugin_meta {
             let tone = match m.state {
@@ -3172,7 +3177,7 @@ impl App {
         }
         rows.push(PanelRow { text: String::new(), tone: contrib::Tone::Default, action: None });
         rows.push(PanelRow {
-            text: "Put a folder with a plugin.json in the plugins directory; /plugins shows what loaded.".into(),
+            text: "Put a folder with an executable entry file (its shebang picks the language) in the plugins directory; /plugins shows what loaded.".into(),
             tone: contrib::Tone::Dim,
             action: None,
         });

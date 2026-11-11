@@ -1,16 +1,18 @@
 //! The wire between buzzr and a plugin process: one JSON object per line, both ways.
 //!
-//! Host to plugin: `hello`, `snapshot`, `invoke`, `panel_action`, `bye`.
-//! Plugin to host: `ready`, `status`, `panel`, `flash`, `draft`, `send`, `log`.
-//! Unknown message types and unknown fields are ignored (and logged), so a newer plugin can talk to an older buzzr; an unknown
-//! `apiVersion` in the manifest is refused instead, because that is a contract change.
+//! Host to plugin: `hello`, `snapshot`, `tick`, `invoke`, `panel_action`, `bye`.
+//! Plugin to host: `ready`, `status`, `pane`, `panel`, `flash`, `draft`, `send`, `log`.
+//! Unknown message types and unknown fields are ignored (and logged), so a newer plugin can talk to an older buzzr; a
+//! plugin that cannot speak the `apiVersion` in `hello` refuses it and exits instead.
 
-use crate::contrib::{clean_block, clean_line, Contributions, Panel, Projection, Segment, MAX_ROWS};
+use crate::contrib::{clean_block, clean_line, Contributions, Pane, Panel, Projection, Segment, MAX_ROWS};
+use crate::plugins::discover;
 use serde::Serialize;
 use serde_json::Value;
 
 pub const PROTOCOL: u32 = 1;
-pub const API_VERSION: u32 = 1;
+/// The contract version, sent in `hello`. It lives in `discover` because that is the module the host reads it from.
+pub const API_VERSION: u32 = discover::API_VERSION;
 /// A line longer than this is a protocol violation, not a message.
 pub const MAX_LINE: usize = 64 * 1024;
 
@@ -20,6 +22,8 @@ pub const MAX_LINE: usize = 64 * 1024;
 pub enum ToPlugin<'a> {
     Hello { protocol: u32, #[serde(rename = "apiVersion")] api_version: u32, host: &'a str, plugin: &'a str },
     Snapshot { seq: u64, projection: &'a Projection },
+    /// The opt-in heartbeat the plugin asked for with `tickMs` in its `ready`: something time-based may need redrawing.
+    Tick { seq: u64 },
     Invoke { id: u64, command: &'a str, args: &'a str },
     PanelAction { id: &'a str, row: usize, value: Option<&'a str> },
     Bye,
@@ -31,12 +35,26 @@ impl ToPlugin<'_> {
     }
 }
 
+/// What a plugin declares about itself when it says `ready` — its display name, what it may do, and whether it wants a
+/// heartbeat — all of it in the plugin's own code, where it belongs.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Declaration {
+    /// The display name, cleaned; empty means "call it by its id".
+    pub name: String,
+    /// What the plugin asked to be allowed to do. Only names this build enforces survive.
+    pub permissions: Vec<String>,
+    /// Opt-in heartbeat in milliseconds; `0` (or absent) means never.
+    pub tick_ms: u64,
+}
+
 /// Plugin to host, after parsing and cleaning.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FromPlugin {
-    Ready { contributions: Contributions },
+    Ready { declaration: Declaration, contributions: Contributions },
     /// Replaces the plugin's status item; empty segments clear it.
     Status { segments: Vec<Segment> },
+    /// Replaces the plugin's pane under the channel list; `None` clears it.
+    Pane(Option<Pane>),
     Panel(Panel),
     Flash { text: String },
     Draft { text: String },
@@ -61,7 +79,7 @@ pub fn parse(line: &str) -> Result<Option<FromPlugin>, String> {
                 Some(v) => obj(v, "contributions")?,
                 None => Contributions::default(),
             };
-            FromPlugin::Ready { contributions: contributions.clean() }
+            FromPlugin::Ready { declaration: declaration(&value)?, contributions: contributions.clean() }
         }
         "status" => {
             // `{"type":"status","text":"2 open PRs"}` or `{"type":"status","segments":[...]}`; no text clears the item.
@@ -70,6 +88,12 @@ pub fn parse(line: &str) -> Result<Option<FromPlugin>, String> {
                 None => field("text").and_then(Value::as_str).map(|t| vec![Segment::new(clean_line(t), Default::default())]).unwrap_or_default(),
             };
             FromPlugin::Status { segments: clean_segments(segments) }
+        }
+        "pane" => {
+            // `{"type":"pane","title":"…","rows":[…]}` replaces it; `{"type":"pane"}` (or only empty rows) clears it.
+            let pane: Pane = serde_json::from_value(value.clone()).map_err(|e| format!("bad pane: {e}"))?;
+            let pane = pane.clean();
+            FromPlugin::Pane(if pane.is_empty() { None } else { Some(pane) })
         }
         "panel" => {
             let mut panel: Panel = serde_json::from_value(value.clone()).map_err(|e| format!("bad panel: {e}"))?;
@@ -100,6 +124,22 @@ pub fn parse(line: &str) -> Result<Option<FromPlugin>, String> {
     Ok(Some(msg))
 }
 
+/// Read the fields a plugin declares about itself out of a `ready` message. What it asks to do is filtered against what
+/// this build enforces, so a plugin can never claim more than buzzr grants.
+fn declaration(value: &Value) -> Result<Declaration, String> {
+    let name = value.get("name").and_then(Value::as_str).map(clean_line).unwrap_or_default().trim().to_string();
+    let mut permissions: Vec<String> = match value.get("permissions") {
+        Some(v) => serde_json::from_value(v.clone()).map_err(|e| format!("bad permissions: {e}"))?,
+        None => Vec::new(),
+    };
+    permissions.retain(|p| discover::KNOWN_PERMISSIONS.contains(&p.as_str()));
+    permissions.sort();
+    permissions.dedup();
+    let asked = value.get("tickMs").and_then(Value::as_u64).unwrap_or(0);
+    let tick_ms = if asked == 0 { 0 } else { asked.clamp(discover::MIN_TICK_MS, discover::MAX_TICK_MS) };
+    Ok(Declaration { name, permissions, tick_ms })
+}
+
 fn clean_segments(segments: Vec<Segment>) -> Vec<Segment> {
     segments.into_iter().take(32).map(Segment::clean).filter(|s| !s.text.is_empty()).collect()
 }
@@ -112,7 +152,7 @@ mod tests {
     fn the_host_speaks_one_json_object_per_line() {
         let hello = ToPlugin::Hello { protocol: PROTOCOL, api_version: API_VERSION, host: "buzzr/0.1.0", plugin: "todo" }.line();
         assert!(hello.starts_with(r#"{"type":"hello""#), "{hello}");
-        assert!(hello.contains(r#""apiVersion":1"#), "the wire name matches the manifest: {hello}");
+        assert!(hello.contains(r#""apiVersion":2"#), "the wire name matches the contract version: {hello}");
         assert!(!hello.contains('\n'));
         let p = Projection { me: "me".into(), connection: "live".into(), view: "channel".into(), unread: 2, ..Projection::default() };
         let snap = ToPlugin::Snapshot { seq: 3, projection: &p }.line();
@@ -120,12 +160,51 @@ mod tests {
     }
 
     #[test]
+    fn a_pane_replaces_itself_and_an_empty_one_clears_it() {
+        let line = r#"{"type":"pane","title":"Clock","rows":[{"text":"12:00","tone":"accent"}]}"#;
+        let Some(FromPlugin::Pane(Some(pane))) = parse(line).unwrap() else { panic!("not a pane") };
+        assert_eq!(pane.title, "Clock");
+        assert_eq!(pane.rows[0].text, "12:00");
+        assert_eq!(pane.rows[0].tone, crate::contrib::Tone::Accent);
+        // an empty pane is the same as none: it takes the space back
+        assert!(matches!(parse(r#"{"type":"pane"}"#).unwrap(), Some(FromPlugin::Pane(None))));
+        assert!(matches!(parse(r#"{"type":"pane","title":"","rows":[]}"#).unwrap(), Some(FromPlugin::Pane(None))));
+        // a row is a single line, and its control characters never survive
+        let Some(FromPlugin::Pane(Some(pane))) = parse("{\"type\":\"pane\",\"rows\":[{\"text\":\"a\\nb\\u001b[31m\"}]}").unwrap() else { panic!() };
+        assert_eq!(pane.rows[0].text, "a b[31m");
+    }
+
+    #[test]
+    fn the_heartbeat_is_one_line_of_json() {
+        assert_eq!(ToPlugin::Tick { seq: 7 }.line(), r#"{"type":"tick","seq":7}"#);
+    }
+
+    #[test]
     fn a_ready_cleans_what_it_brings() {
         let line = r#"{"type":"ready","contributions":{"commands":[{"id":"todo","title":"TODO \u001b[31m"}],"status":[{"text":"1 \u0007item","tone":"warn"}],"unknown_field":true}}"#;
-        let Some(FromPlugin::Ready { contributions }) = parse(line).unwrap() else { panic!("not ready") };
+        let Some(FromPlugin::Ready { contributions, .. }) = parse(line).unwrap() else { panic!("not ready") };
         assert_eq!(contributions.status[0].text, "1 item");
         assert_eq!(contributions.status[0].tone, crate::contrib::Tone::Warn);
         assert_eq!(contributions.commands[0].title, "TODO [31m");
+    }
+
+    #[test]
+    fn a_ready_declares_the_name_permissions_and_heartbeat_in_code() {
+        // the name, permissions and heartbeat all arrive in `ready`, except that a plugin can only ask for what this build enforces
+        let line = r#"{"type":"ready","name":"  My Plugin \u001b[31m ","permissions":["messages:write","root","read:visible"],"tickMs":1000}"#;
+        let Some(FromPlugin::Ready { declaration, .. }) = parse(line).unwrap() else { panic!("not ready") };
+        assert_eq!(declaration.name, "My Plugin [31m");
+        assert_eq!(declaration.permissions, vec!["messages:write", "read:visible"], "root is not implemented, so it is dropped");
+        assert_eq!(declaration.tick_ms, 1000);
+
+        // absent fields are the defaults, and a heartbeat is clamped to what buzzr will honour
+        let Some(FromPlugin::Ready { declaration, .. }) = parse(r#"{"type":"ready"}"#).unwrap() else { panic!() };
+        assert_eq!(declaration, Declaration::default());
+        let Some(FromPlugin::Ready { declaration, .. }) = parse(r#"{"type":"ready","tickMs":1}"#).unwrap() else { panic!() };
+        assert_eq!(declaration.tick_ms, discover::MIN_TICK_MS);
+        let Some(FromPlugin::Ready { declaration, .. }) = parse(r#"{"type":"ready","tickMs":999999}"#).unwrap() else { panic!() };
+        assert_eq!(declaration.tick_ms, discover::MAX_TICK_MS);
+        assert!(parse(r#"{"type":"ready","permissions":"read:visible"}"#).is_err(), "permissions is a list");
     }
 
     #[test]
@@ -155,13 +234,13 @@ mod tests {
     }
 
     #[test]
-    fn contributions_use_the_same_camel_case_names_as_the_manifest() {
+    fn contributions_use_the_same_camel_case_names_as_the_rest_of_the_wire() {
         let line = r#"{"type":"ready","contributions":{"messageMarks":[{"target":"m1","text":"PR"}],"channelMarks":[{"target":"c1","text":"3"}]}}"#;
-        let Some(FromPlugin::Ready { contributions }) = parse(line).unwrap() else { panic!() };
+        let Some(FromPlugin::Ready { contributions, .. }) = parse(line).unwrap() else { panic!() };
         assert_eq!(contributions.message_marks[0].target, "m1");
         assert_eq!(contributions.channel_marks[0].text, "3");
         // the snake_case spelling is unknown, so it is ignored rather than half-understood
-        let Some(FromPlugin::Ready { contributions }) = parse(r#"{"type":"ready","contributions":{"message_marks":[{"target":"m1","text":"PR"}]}}"#).unwrap()
+        let Some(FromPlugin::Ready { contributions, .. }) = parse(r#"{"type":"ready","contributions":{"message_marks":[{"target":"m1","text":"PR"}]}}"#).unwrap()
         else {
             panic!()
         };
