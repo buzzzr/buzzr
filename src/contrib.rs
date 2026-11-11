@@ -396,7 +396,7 @@ pub struct PluginMeta {
     pub id: String,
     pub name: String,
     pub state: PluginState,
-    /// A manifest problem or the last runtime error; empty when all is well.
+    /// Why the plugin is not running: a folder that would not load, or the last runtime error; empty when all is well.
     pub detail: String,
     pub permissions: Vec<String>,
     pub commands: usize,

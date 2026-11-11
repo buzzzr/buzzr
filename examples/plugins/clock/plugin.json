@@ -1,9 +1,0 @@
-{
-  "id": "clock",
-  "name": "Clock",
-  "apiVersion": 1,
-  "description": "A pane under the channel list with the current time in large digits, redrawn on every heartbeat.",
-  "entry": ["sh", "main.sh"],
-  "permissions": [],
-  "tickMs": 1000
-}

@@ -28,7 +28,7 @@ Things we want to hear about:
   than as the user chose (see [AGENTS.md](AGENTS.md), principle 4)
 - weaknesses in how the key file is sealed or read (`src/keyfile.rs`)
 - message text, names or plugin output that can inject terminal escape sequences or otherwise run something (principle 3)
-- a plugin getting more than its manifest and `PLUGIN.md` allow, or `--no-plugins` / `BUZZR_SAFE_MODE=1` not turning plugins off
+- a plugin getting more than its declared permissions and `PLUGIN.md` allow, or `--no-plugins` / `BUZZR_SAFE_MODE=1` not turning plugins off
 - the update check (`src/release.rs`) or a release download fetching or running something unverified
 - signing or sending events the user did not ask for
 

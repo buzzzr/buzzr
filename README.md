@@ -171,11 +171,13 @@ The full behaviour, for when the feature list above is not enough.
 - **Help on screen:** F1 lists the keys, F2 the commands. Esc closes a panel first, then cancels a reply, then leaves a thread;
   after that it steps back a pane at a time — from the input to the message list, and from the message list to the channel list.
 - **Plugins:** a plugin is a separate process (in any language) that adds `/commands`, a status item, header badges, per-channel and
-  per-message marks, a pane under the channel list, and panels; buzzr hot-reloads it when its files change. A pane is always on screen,
-  and a plugin can ask for a heartbeat (`tickMs` in `plugin.json`) to refresh something time-based — that is how the clock example keeps
-  the time. Put a folder with a `plugin.json` in `~/.config/buzzr/plugins` (or point `--plugins-dir`/`BUZZR_PLUGINS_DIR` elsewhere).
-  `/plugins` lists what loaded, and `buzzr plugins list|enable|disable` works from the shell. `--no-plugins` (or `BUZZR_SAFE_MODE=1`)
-  turns the whole system off. See [PLUGIN.md](PLUGIN.md); tiny examples are in `examples/plugins/hello` and `examples/plugins/clock`.
+  per-message marks, a pane under the channel list, and panels; buzzr hot-reloads it when its files change. A plugin is one folder
+  with an executable entry file and **no manifest**: the folder name is its id, and it declares its own name, permissions and
+  heartbeat in its code, when it is ready. A heartbeat (`tickMs`) refreshes something time-based — that is how the clock example
+  keeps the time. Put the folder in `~/.config/buzzr/plugins` (or point `--plugins-dir`/`BUZZR_PLUGINS_DIR` elsewhere). `/plugins`
+  lists what loaded, and `buzzr plugins list|enable|disable` works from the shell. `--no-plugins` (or `BUZZR_SAFE_MODE=1`) turns the
+  whole system off. See [PLUGIN.md](PLUGIN.md); tiny examples are in `examples/plugins/hello` (the raw protocol, in shell) and
+  `examples/plugins/clock` (TypeScript, built on the SDK in `sdk/typescript/`).
 - **Upgrading:** `/update` in the input says how to upgrade this copy, worked out from where the binary lives — `brew update &&
   brew upgrade buzzr` for a Homebrew install, `cargo install --force --git https://github.com/buzzzr/buzzr` for a
   `cargo install`, or the release page otherwise.

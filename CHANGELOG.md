@@ -17,9 +17,16 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
 - `a` opens a reaction picker on the selected message: choose an emoji from the list, or type a name to search it (or an emoji the
   list does not have). Enter sends it as a NIP-25 `kind:7` and Esc closes. The picker opens on the reaction you already have there,
   and its first row takes it back; changing an emoji undoes the one it replaces first, so a message keeps one reaction from you.
-- A plugin can keep a **pane** under the channel list: a small block that is always on screen and takes no focus, key or click. A
-  manifest can also ask for an opt-in heartbeat (`tickMs`) so the plugin redraws something time-based without a timer of its own.
-  `examples/plugins/clock` shows the time in large digits with both.
+- A plugin can keep a **pane** under the channel list: a small block that is always on screen and takes no focus, key or click.
+  `examples/plugins/clock` shows the time in large digits there and redraws it from an opt-in heartbeat.
+- A plugin is now declared **entirely in its own code, with no manifest**: the folder name is the plugin's id, buzzr runs the first
+  executable entry file it finds in the folder through that file's own `#!` line (so the language is the author's choice, and a
+  JavaScript or TypeScript runtime needs nothing added to buzzr), and the plugin sends its display name, its permissions and its
+  heartbeat (`tickMs`) in its `ready` message. The contract version is now `apiVersion` 2. A folder that will not load — no entry
+  file, no executable bit, an id that is not safe — is listed with the reason instead of failing quietly.
+- A **typed SDK for TypeScript** (`sdk/typescript/buzzr.ts`): one dependency-free file that turns the protocol into a single
+  `definePlugin({ name, permissions, tickMs, ready, onTick, onCommand, … })` call, with `status`, `pane`, `panel`, `flash`, `draft`,
+  `send` and `log` on the handle it gives back. `examples/plugins/clock` is written with it.
 
 ### Fixed
 
