@@ -21,6 +21,11 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
   downloads the archive for the machine it runs on, checks it against the release's `SHA256SUMS` before unpacking anything, and
   puts the binary in `~/.local/bin`. `--version` pins a release (a prerelease too, which `/releases/latest` skips) and `--dir`
   moves the destination; running it again replaces the binary, so it is also the upgrade.
+- `/invite NAME` adds someone — a display name from a channel, or an npub — to the channel on screen (or the group DM you are in)
+  as a plain member. A message you send that `@mentions` someone who is not in the channel is held back and the status line asks:
+  `y` invites them and sends, `n` sends without inviting, Esc keeps the message in the input. Mentioning a member never asks, and
+  a DM never asks; nothing is offered before the channel's member list has loaded, and only names the profiles have given us are
+  recognised this way.
 
 ### Fixed
 

@@ -546,6 +546,39 @@ fn typing_reaches_the_input_box() {
     s.expect("the messages pane again", "Open thread");
 }
 
+/// A message that `@mentions` someone the channel does not have is held back, and the status line asks whether to
+/// invite them; Esc answers by keeping the message in the input. The fake relay serves no member list for an open
+/// channel, so a person whose profile it seeds (carol, the author of #design's message) is not a member of the channel
+/// the app opens by itself, and a mention of her is a mention of someone outside it.
+///
+/// The send itself cannot be driven here: a message is built from a channel *uuid*, and the relay's ids (`c-design`)
+/// are not uuids, so a send ends in `failed: not a channel id` — the same wall the join/leave paths meet. What this case
+/// is about is the app's own screen: the question, and the keys that answer it.
+#[test]
+fn a_mention_of_someone_outside_the_channel_asks_whether_to_invite_them() {
+    let Some(relay) = relay_or_skip("a_mention_of_someone_outside_...") else { return };
+    let s = session(&relay);
+    // The names arrive with the profiles; the DM rows are relabelled once a peer's has, so wait until carol is named.
+    s.until("the DMs to be named after the other member", |sc| sidebar(sc).iter().any(|n| n == "@carol"));
+    s.press_all(&["tab", "tab"]); // channels -> messages -> input
+    s.expect("the input box to take focus", "Send");
+    s.type_text("@carol: can you look?");
+    s.press("enter");
+    // Nothing goes out: the message is held out of the input while the status line asks.
+    s.expect("the question about inviting carol", "Invite carol to #design?");
+    s.expect_gone("the held message to leave the input while the question is up", "@carol: can you look?");
+    // Esc answers it by keeping the message: the text comes back, so it can be changed.
+    s.press("esc");
+    s.expect("the status line to say the message was not sent", "not sent");
+    s.expect("the message to come back to the input", "@carol: can you look?");
+    s.expect_gone("the question to clear when it is answered", "Invite carol to #design?");
+    // Enter asks again, and `n` answers: the question is gone once it has an answer.
+    s.press("enter");
+    s.expect("the question again", "Invite carol to #design?");
+    s.press("n");
+    s.expect_gone("the question to clear once it is answered", "Invite carol to #design?");
+}
+
 #[test]
 fn a_slash_opens_the_command_palette_and_enter_runs_the_command() {
     let Some(relay) = relay_or_skip("a_slash_opens_the_command_palette_...") else { return };

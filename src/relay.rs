@@ -405,6 +405,19 @@ pub fn dm_open_builder(peer: &str) -> Result<EventBuilder> {
     buzz_sdk::build_dm_open(&[peer]).map_err(|e| anyhow!("{e}"))
 }
 
+/// Add someone to a channel (`kind:9000`, what `buzz channels add-member` sends) or to a group DM (`kind:41011`, what
+/// `buzz dms add-member` sends). A channel is a NIP-29 group and a DM is a conversation with people, so the relay takes a
+/// different event for each and `dm` picks which. No role is asked for, so the person joins as a plain member — the same
+/// as `add-member` with no `--role`.
+pub fn invite_builder(channel: &str, pubkey: &str, dm: bool) -> Result<EventBuilder> {
+    let channel_id = uuid::Uuid::parse_str(channel).context("not a channel id")?;
+    if dm {
+        buzz_sdk::build_dm_add_member(channel_id, pubkey).map_err(|e| anyhow!("{e}"))
+    } else {
+        buzz_sdk::build_add_member(channel_id, pubkey, None).map_err(|e| anyhow!("{e}"))
+    }
+}
+
 /// The human-readable part of a relay error body.
 fn relay_message(body: &str) -> String {
     serde_json::from_str::<Value>(body)
@@ -556,6 +569,24 @@ mod tests {
         assert_eq!(ev.content, "");
         assert!(ev.tags.iter().any(|t| t.as_slice() == ["p", peer.as_str()]), "{:?}", ev.tags);
         assert!(dm_open_builder("alice").is_err(), "a pubkey is required");
+    }
+
+    #[test]
+    fn an_invite_adds_a_member_the_way_the_cli_does() {
+        let keys = Keys::generate();
+        let channel = "11111111-1111-4111-8111-111111111111";
+        let friend = "cd".repeat(32);
+        let ev = invite_builder(channel, &friend, false).unwrap().sign_with_keys(&keys).unwrap();
+        assert_eq!((ev.kind.as_u16(), ev.content.as_str()), (9000, ""), "a channel invite is a NIP-29 add-member with no content");
+        assert!(ev.tags.iter().any(|t| t.as_slice() == ["h", channel]));
+        assert!(ev.tags.iter().any(|t| t.as_slice() == ["p", friend.as_str()]), "{:?}", ev.tags);
+        assert!(!ev.tags.iter().any(|t| t.as_slice().first().map(String::as_str) == Some("role")), "no role tag: the person joins as a plain member");
+        let dm = invite_builder(channel, &friend, true).unwrap().sign_with_keys(&keys).unwrap();
+        assert_eq!(dm.kind.as_u16(), 41011, "a DM invite adds to the conversation instead");
+        assert!(dm.tags.iter().any(|t| t.as_slice() == ["h", channel]) && dm.tags.iter().any(|t| t.as_slice() == ["p", friend.as_str()]));
+        assert!(invite_builder("not-a-uuid", &friend, false).is_err(), "the channel must be a uuid");
+        assert!(invite_builder(channel, "alice", false).is_err(), "a pubkey is required");
+        assert!(invite_builder(channel, "alice", true).is_err(), "and the same goes for a DM");
     }
 
     #[test]

@@ -51,6 +51,9 @@
 - **Create channels** from the input with `/new`.
 - **People and profiles.** `/whois name` shows a short card (name, npub, what they wrote about themselves); `/dm name` opens your DM with
   someone or starts a new one. Both take a name from a channel or an npub.
+- **Invite people into a channel.** `/invite name` adds someone to the channel on screen (or the group DM you are in). A message
+  that `@mentions` someone who is not in the channel asks first: `y` invites them and sends, `n` sends without inviting, Esc
+  keeps the message in the input.
 - **Plugins.** Add your own `/commands`, status items, badges and panels from any language. See [PLUGIN.md](PLUGIN.md).
 - **Themes.** The default `buzz-dark` uses the dark palette of the Buzz desktop app. `BUZZR_THEME=dark` keeps your terminal's own background, `BUZZR_THEME=buzz-light` is the desktop app's light palette, and `BUZZR_THEME=light` is for a light terminal. `BUZZR_THEME=high-contrast` is black-on-white at WCAG AAA (7:1), and `NO_COLOR` or `TERM=dumb` turns colour off entirely.
 - **Read-only mode** (`--read-only`) for identities you should not speak for.
@@ -179,6 +182,12 @@ The full behaviour, for when the feature list above is not enough.
 - **People:** `/whois name` shows a short card for someone — their name, npub and about line, filled in as the relay answers. `/dm name`
   and `/whois name` take a display name from a channel, or a key (`npub1…`, `nostr:` URI or hex); an ambiguous or unknown name is
   reported rather than guessed.
+- **Invite people:** `/invite name` adds someone — a display name from a channel, or an npub — to the channel on screen, or to
+  the group DM you are in; they join as a plain member (no role is asked for). A message you send that `@mentions` someone who
+  is not in the channel asks before it goes out: `y` invites them and sends, `n` sends it without inviting, Esc puts the message
+  back in the input. A name that is already a member is treated as that member, so a plain mention never asks; a DM is a
+  conversation rather than a room to join, so it never asks either; and nothing is offered before the channel's member list has
+  loaded. Only names the profiles have given us can be recognised this way.
 - **Your typing shows:** others see `<your name> is typing…` while you write (once every three seconds; not for `/commands` or
   edits). `--no-typing` turns it off.
 - **Help on screen:** F1 lists the keys, F2 the commands. Esc closes a panel first, then cancels a reply, then leaves a thread;
@@ -203,6 +212,7 @@ The full behaviour, for when the feature list above is not enough.
 | Up / Down | select a channel or message (Up at the top of a channel loads older messages) |
 | Up / Down, at the edges | nothing typed in the input, Up goes to the messages on the newest one; on the newest message, Down goes back to the input |
 | Enter | open the channel / open the thread (which reads it) / send |
+| y, n, Esc (invite prompt) | invite the mentioned person and send, send without inviting them, keep the message in the input |
 | x | archive the channel under the bar (it leaves the list; Ctrl+F or `/search` finds it again) |
 | r, c, u, e, d | reply in the thread, copy, mark unread, edit, delete the selected message (e and d: yours only) |
 | a | react to the selected message: pick an emoji, or type to search one (Enter sends, Esc closes) |
@@ -213,7 +223,7 @@ The full behaviour, for when the feature list above is not enough.
 | Ctrl+R, Ctrl+O | reload, load older |
 | Ctrl+Q, Ctrl+C | quit |
 
-Commands in the input (N is the number shown as `#N`): `/r N text`, `/t N`, `/c`, `/copy N`, `/edit N`, `/delete N`, `/search text`, `/whois NAME`, `/dm NAME`, `/new [private] name [about]`, `/plugins`, `/update`, `/read [all]`, `/archive`, `/more`, `/refresh`, `/help`, `/q`. Typing `/` lists them above the input and narrows the list as you type: Enter runs the command on the cursor line, Tab fills its name in for one that takes an argument. Plugin commands appear in the list too.
+Commands in the input (N is the number shown as `#N`): `/r N text`, `/t N`, `/c`, `/copy N`, `/edit N`, `/delete N`, `/search text`, `/whois NAME`, `/dm NAME`, `/invite NAME`, `/new [private] name [about]`, `/plugins`, `/update`, `/read [all]`, `/archive`, `/more`, `/refresh`, `/help`, `/q`. Typing `/` lists them above the input and narrows the list as you type: Enter runs the command on the cursor line, Tab fills its name in for one that takes an argument. Plugin commands appear in the list too.
 
 ## Clipboard
 
