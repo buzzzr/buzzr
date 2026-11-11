@@ -18,6 +18,10 @@
 
 > The screenshots and the recording in this README show a scripted demo community, not real conversations.
 
+<p align="center">
+  <b>Install:</b> <code>curl -fsSL https://raw.githubusercontent.com/buzzzr/buzzr/main/install.sh | sh</code>
+</p>
+
 ## Why buzzr
 
 - **It talks to the relay directly.** No bridge, no helper daemon, no polling loop: buzzr opens a WebSocket and the screen updates the
@@ -56,6 +60,15 @@
 </p>
 
 ## Install
+
+**One line** (Linux and macOS; checks the archive against the release's `SHA256SUMS` and installs to `~/.local/bin`):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/buzzzr/buzzr/main/install.sh | sh
+```
+
+Options go to the shell that runs the script — `| sh -s -- --version v0.1.1 --dir /usr/local/bin` — and `--help` lists them.
+Running it again replaces the binary, so it is also the upgrade.
 
 **Homebrew** (tested on macOS; the formula also lists the Linux binaries, untested):
 
