@@ -372,6 +372,85 @@ fn a_thread_shows_its_root_as_one_header_line_and_indents_the_replies() {
     assert_eq!(app.message_number(2).map(|m| m.id), Some("t1".into()));
 }
 
+/// A `kind:39005` thread summary, the way the relay serves it with a channel window: `count` replies, the last one at `at`.
+fn summary(root: &str, count: u64, at: u64) -> Ev {
+    let mut e = msg(
+        &format!("sum-{root}"),
+        at,
+        BOB,
+        &format!(r#"{{"reply_count":{count},"last_reply_at":{at}}}"#),
+        &[&["e", root]],
+    );
+    e.kind = crate::model::KIND_THREAD_SUMMARY;
+    e
+}
+
+/// An app on one channel with `events` loaded, its keyboard on the messages (Tab), the way `app_with` leaves it.
+fn app_on(events: Vec<Ev>) -> App {
+    let mut app = App::new(ME.into(), false, chrono_tz::UTC);
+    app.view_h = 10;
+    app.areas = Areas { channels: Rect::new(0, 1, 20, 20), msgs: Rect::new(20, 1, 80, 10), input: Rect::new(20, 12, 80, 3) };
+    app.handle(AppEvent::Channels(Ok(vec![chan("c1", "general")])));
+    app.handle(AppEvent::Window { channel: "c1".into(), cursor: None, result: Ok(Window { events, has_more: false, next_cursor: None }) });
+    app.handle(key(KeyCode::Tab));
+    app.layout(78);
+    app
+}
+
+#[test]
+fn right_arrow_opens_the_thread_of_the_selected_message() {
+    // The relay says the message has two replies; they are not loaded until the thread is opened.
+    let mut app = app_on(vec![msg("m000", 1000, BOB, "the root", &[]), summary("m000", 2, 3000)]);
+    assert_eq!(selected(&app), "m000");
+    let cmds = press(&mut app, KeyCode::Right);
+    assert!(app.in_thread(), "Right goes into the thread");
+    assert_eq!(app.view_key(), Some(("c1".to_string(), Some("m000".to_string()))));
+    assert!(cmds.contains(&Cmd::LoadThread { channel: "c1".into(), root: "m000".into() }), "and asks for its replies: {cmds:?}");
+
+    app.handle(AppEvent::Thread { channel: "c1".into(), root: "m000".into(), result: Ok(vec![reply("t1", 3000, "alice", "m000"), reply("t2", 3001, "carol", "m000")]) });
+    app.layout(78);
+    assert_eq!(app.shown_ids(), ["m000", "t1", "t2"]);
+    // Inside a thread there is nothing further to go into: Right opens nothing and moves nothing.
+    let on = selected(&app);
+    let cmds = press(&mut app, KeyCode::Right);
+    assert!(cmds.is_empty(), "Right inside a thread opens nothing: {cmds:?}");
+    assert_eq!((app.in_thread(), selected(&app)), (true, on), "and moves nothing");
+}
+
+#[test]
+fn left_arrow_in_a_thread_goes_to_the_root_and_then_out_to_the_channel() {
+    let mut app = app_on(vec![msg("m000", 1000, BOB, "the root", &[]), summary("m000", 2, 3000)]);
+    press(&mut app, KeyCode::Right);
+    app.handle(AppEvent::Thread { channel: "c1".into(), root: "m000".into(), result: Ok(vec![reply("t1", 3000, "alice", "m000"), reply("t2", 3001, "carol", "m000")]) });
+    app.layout(78);
+    // the thread opens on its first row; Down walks into the replies
+    press(&mut app, KeyCode::Down);
+    assert_eq!(selected(&app), "t1", "a reply is selected");
+
+    press(&mut app, KeyCode::Left);
+    assert!(app.in_thread(), "Left from a reply stays in the thread");
+    assert_eq!(selected(&app), "m000", "and lands on the message it answers");
+
+    press(&mut app, KeyCode::Left);
+    assert!(!app.in_thread(), "Left again, on the root, leaves the thread");
+    assert_eq!(app.view_key(), Some(("c1".to_string(), None)));
+}
+
+#[test]
+fn the_arrows_leave_a_message_with_no_thread_alone() {
+    let mut app = app_with(3);
+    assert_eq!(selected(&app), "m002");
+    for k in [KeyCode::Right, KeyCode::Left] {
+        let cmds = press(&mut app, k);
+        assert!(cmds.is_empty(), "{k:?} on a message with no replies does nothing: {cmds:?}");
+        assert_eq!((app.in_thread(), app.focus, selected(&app)), (false, Focus::Messages, "m002".to_string()));
+    }
+    // A stray reply whose root is not loaded is listed on the timeline; Right opens the thread it belongs to, as Enter does.
+    let mut app = app_on(vec![msg("t1", 1000, BOB, "an orphan reply", &[&["e", "gone", "", "reply"]])]);
+    let cmds = press(&mut app, KeyCode::Right);
+    assert!(app.in_thread() && cmds.contains(&Cmd::LoadThread { channel: "c1".into(), root: "gone".into() }), "{cmds:?}");
+}
+
 #[test]
 fn read_only_never_sends() {
     let mut app = app_with(2);

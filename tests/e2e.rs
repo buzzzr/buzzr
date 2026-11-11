@@ -315,6 +315,8 @@ fn key_bytes(key: &str) -> (Vec<u8>, Duration) {
         "backtab" => b"\x1b[Z".to_vec(),
         "up" => b"\x1b[A".to_vec(),
         "down" => b"\x1b[B".to_vec(),
+        "right" => b"\x1b[C".to_vec(),
+        "left" => b"\x1b[D".to_vec(),
         "home" => b"\x1b[H".to_vec(),
         "end" => b"\x1b[F".to_vec(),
         "f1" => b"\x1bOP".to_vec(),
@@ -379,6 +381,11 @@ fn indent_of(line: &str) -> usize {
         None => line.to_string(),
     };
     line.chars().take_while(|c| *c == ' ').count()
+}
+
+/// The line of the messages pane the cursor bar (`▌`) is on, if any — the selected message's first line.
+fn cursor_row(screen: &str) -> Option<String> {
+    messages_pane(screen).into_iter().find(|l| l.starts_with('▌'))
 }
 
 /// How many lines the input box is showing: the rows between its top border (which carries the ` message ` title)
@@ -558,6 +565,83 @@ fn a_thread_reads_as_a_root_header_line_with_the_replies_indented_under_it() {
             indent_of(body_line),
             root_indent + 2,
             "reply {head}'s text lines up with its head: {body_line:?} (root {root:?})"
+        );
+    }
+}
+
+/// With a message row selected, Right walks into its thread and Left walks back out, the up/down of the tree
+/// rather than of the list. A message with no replies has nothing under it, so there both keys do nothing.
+#[test]
+fn the_arrow_keys_walk_into_a_thread_and_back_out_of_it() {
+    let Some(relay) = relay_or_skip("the_arrow_keys_walk_...") else { return };
+    let s = session(&relay);
+    // #general is the third channel; its newest message carries a two-reply thread. Enter opens the channel and
+    // leaves the keyboard on the messages, on that message.
+    s.press_all(&["down", "down", "enter"]);
+    s.expect("the general channel", "hello from c-general");
+    s.expect("its thread summary", "2 replies");
+
+    // Right, on the selected message, opens its thread the way Enter does.
+    s.press("right");
+    s.expect("the thread view", "› thread");
+    s.expect("the first reply, which is only in the thread", "the sidebar keeps a fixed order");
+    let pane = messages_pane(&s.screen());
+    let root_row = pane.first().cloned().unwrap_or_default();
+    assert!(root_row.contains("#1") && root_row.contains("hello from c-general"), "the thread holds its root: {root_row:?}");
+
+    // Home puts the cursor on the root; Down walks down into its replies.
+    s.press("home");
+    let screen = s.until("the cursor on the root", |sc| cursor_row(sc).is_some_and(|l| l.contains("#1")));
+    assert!(cursor_row(&screen).unwrap().contains("hello from c-general"), "the root is the message the thread is about");
+    s.press("down");
+    let screen = s.until("the cursor on the first reply", |sc| cursor_row(sc).is_some_and(|l| l.contains("#2")));
+    assert!(
+        messages_pane(&screen).iter().any(|l| l.contains("the sidebar keeps a fixed order")),
+        "Down walks down to the first reply. The pane is:\n{}",
+        messages_pane(&screen).join("\n")
+    );
+
+    // Right inside a thread opens nothing: the cursor stays on the reply it is on.
+    s.press("right");
+    let screen = s.screen();
+    assert!(header(&screen).contains("› thread"), "Right inside a thread opens no other thread: {:?}", header(&screen));
+    assert!(
+        cursor_row(&screen).is_some_and(|l| l.contains("#2")),
+        "and leaves the cursor where it was. The pane is:\n{}",
+        messages_pane(&screen).join("\n")
+    );
+
+    // Left goes back up to the root, still in the thread.
+    s.press("left");
+    let screen = s.until("the cursor back on the root, still in the thread", |sc| {
+        header(sc).contains("› thread") && cursor_row(sc).is_some_and(|l| l.contains("#1"))
+    });
+    assert!(header(&screen).contains("› thread"), "Left from a reply stays in the thread: {:?}", header(&screen));
+
+    // Left again, on the root, leaves the thread for the channel, the way Esc does.
+    s.press("left");
+    let screen = s.until("the header to go back to the channel", |sc| header(sc).contains("#general") && !header(sc).contains("› thread"));
+    let h = header(&screen);
+    assert!(h.contains("#general"), "back in the channel: {h:?}");
+    s.expect("the thread summary again", "2 replies");
+}
+
+#[test]
+fn the_arrows_leave_a_message_with_no_thread_alone() {
+    let Some(relay) = relay_or_skip("the_arrows_leave_a_message_...") else { return };
+    let s = session(&relay);
+    // #design opens by itself, and its one message has no replies: neither arrow opens anything.
+    s.expect("the design channel", "hello from c-design");
+    s.press("tab"); // the channel list -> the messages
+    s.expect("the messages pane", "Open thread");
+    for key in ["right", "left"] {
+        s.press(key);
+        let screen = s.screen();
+        assert!(!header(&screen).contains("› thread"), "{key} on a message with no replies opens no thread: {:?}", header(&screen));
+        assert!(
+            cursor_row(&screen).is_some_and(|l| l.contains("#1")) && messages_pane(&screen).iter().any(|l| l.contains("hello from c-design")),
+            "{key} leaves the cursor on the message. The pane is:\n{}",
+            messages_pane(&screen).join("\n")
         );
     }
 }
