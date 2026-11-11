@@ -429,6 +429,23 @@ fn run(cmd: Cmd, relay: &Arc<Relay>, tx: &UnboundedSender<AppEvent>, subscriptio
                 let _ = tx.send(AppEvent::Created(result));
             });
         }
+        Cmd::JoinChannel { channel } => {
+            tokio::spawn(async move {
+                let result = async { relay.submit(relay::join_builder(&channel)?).await }.await.map_err(e);
+                let _ = tx.send(AppEvent::Joined { channel, result });
+            });
+        }
+        Cmd::LeaveChannel { channel } => {
+            tokio::spawn(async move {
+                let result = async { relay.submit(relay::leave_builder(&channel)?).await }.await.map_err(e);
+                let _ = tx.send(AppEvent::Left { channel, result });
+            });
+        }
+        Cmd::LoadRoster { channels } => {
+            tokio::spawn(async move {
+                let _ = tx.send(AppEvent::Roster(relay.roster(&channels).await.map_err(e)));
+            });
+        }
         Cmd::OpenDm { peer } => {
             tokio::spawn(async move {
                 let result = async { relay.submit(relay::dm_open_builder(&peer)?).await.map(|_| ()) }.await.map_err(e);

@@ -5,6 +5,16 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
 
 ## [Unreleased]
 
+### Added
+
+- Ctrl+F finds a channel by name across every channel the relay lists, joined or not, and its row says what the channel is for, how
+  many people are in it and whether you are one of them (the membership and the counts come from NIP-29 `kind:39002`). A channel you
+  are not in opens read-only: in place of the composer there is a `[ Join ]` button, reached with Tab the way the input is, and Enter
+  on it asks the relay to join you (`kind:9021`) — its answer turns the button back into the composer. A private channel is not
+  offered, because a self-join needs an open one. `/join NAME` (a name, `#name` or a channel id) joins or opens one directly, and
+  `/leave` asks first (`y` confirms) before it sends `kind:9022` and drops the channel from the list. The list and the membership are
+  read again after a join or a leave.
+
 ## [0.2.0-rc.2] - 2026-11-11
 
 ### Added
