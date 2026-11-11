@@ -391,6 +391,9 @@ fn now_secs() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
+/// How far a thread's replies are pushed over from its root, so the list reads as a thread rather than a flat feed.
+const THREAD_INDENT: usize = 2;
+
 /// The `─── new messages ───` rule drawn above the first message that arrived after the stored read position.
 fn new_messages_divider(width: usize) -> Line {
     let label = " new messages ";
@@ -398,6 +401,18 @@ fn new_messages_divider(width: usize) -> Line {
     let left = dashes / 2;
     let text = format!("{}{}{}", "─".repeat(left), label, "─".repeat(dashes - left));
     Line { spans: vec![Span::styled(text, Style::default().fg(crate::theme::get().warn))], links: Vec::new() }
+}
+
+/// Push a rendered message over by `n` columns, so a thread's replies sit under its root. The link columns move with the text,
+/// so a click on a link in a reply still lands on the link.
+fn indent_lines(r: &mut Rendered, n: usize) {
+    for line in r.lines.iter_mut() {
+        line.spans.insert(0, Span::raw(" ".repeat(n)));
+        for hit in line.links.iter_mut() {
+            hit.start += n;
+            hit.end += n;
+        }
+    }
 }
 
 impl App {
@@ -912,6 +927,46 @@ impl App {
         Rendered { id: m.id.clone(), lines }
     }
 
+    /// The thread root at the top of a thread: one line — its head (number, time, author) and then the first line of what it
+    /// says, cut off with `…` when there is more. It is the thread's head, not another row in the feed; the replies below it
+    /// are indented (see `build_layout`).
+    fn render_thread_root(&self, store: &Store, m: &Ev, number: usize, width: usize) -> Rendered {
+        let th = crate::theme::get();
+        let dim = Style::default().fg(th.dim);
+        let mine = m.pubkey == self.me;
+        let (content, edited) = store.content_of(m);
+        let mut head: Vec<Span<'static>> = vec![
+            Span::styled(format!("#{number} "), dim),
+            Span::styled(format!("{} ", self.fmt_time(m.created_at)), Style::default().fg(th.time)),
+            Span::styled(self.name_of(&m.pubkey), Style::default().fg(if mine { th.ok } else { th.accent }).add_modifier(Modifier::BOLD)),
+        ];
+        if edited {
+            head.push(Span::styled(" (edited)", dim));
+        }
+        if let Some(mark) = self.plugins.message_mark(&m.id) {
+            head.insert(0, Span::styled(format!("{} ", mark.text), mark.tone.style()));
+        }
+        let span_w = |s: &Span| unicode_width::UnicodeWidthStr::width(s.content.as_ref());
+        while head.iter().map(span_w).sum::<usize>() > width && head.len() > 3 {
+            head.pop();
+        }
+        let head_w: usize = head.iter().map(span_w).sum();
+        // What the root says, after the head, on the same line: rendered at what is left of the width (one column kept for the
+        // `…`), so a narrow pane loses the tail rather than the whole line.
+        let avail = width.saturating_sub(head_w + 2);
+        if avail >= 8 && !content.trim().is_empty() {
+            let body = markdown::render(content, avail - 1);
+            if let Some(first) = body.first() {
+                head.push(Span::styled("  ", dim));
+                head.extend(first.spans.iter().cloned());
+                if body.len() > 1 {
+                    head.push(Span::styled("…", dim));
+                }
+            }
+        }
+        Rendered { id: m.id.clone(), lines: vec![Line { spans: head, links: Vec::new() }] }
+    }
+
     fn build_layout(&self, width: usize) -> Layout {
         let Some(store) = self.store() else { return Layout::default() };
         let first_unread = self.first_unread();
@@ -920,7 +975,16 @@ impl App {
             .iter()
             .enumerate()
             .map(|(i, m)| {
-                let mut rendered = self.render_message(store, m, i + 1, width);
+                let mut rendered = match &self.view {
+                    // The thread's root is its header, and every reply is indented under it, so the list reads as a thread.
+                    View::Thread(root) if i == 0 && m.id == *root => self.render_thread_root(store, m, i + 1, width),
+                    View::Thread(_) => {
+                        let mut r = self.render_message(store, m, i + 1, width.saturating_sub(THREAD_INDENT));
+                        indent_lines(&mut r, THREAD_INDENT);
+                        r
+                    }
+                    _ => self.render_message(store, m, i + 1, width),
+                };
                 if Some(i) == first_unread {
                     rendered.lines.insert(0, new_messages_divider(width));
                 }

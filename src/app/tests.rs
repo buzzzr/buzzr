@@ -338,6 +338,41 @@ fn in_a_thread_plain_messages_are_replies() {
 }
 
 #[test]
+fn a_thread_shows_its_root_as_one_header_line_and_indents_the_replies() {
+    let mut app = App::new(ME.into(), false, chrono_tz::UTC);
+    app.view_h = 10;
+    app.areas = Areas { channels: Rect::new(0, 1, 20, 20), msgs: Rect::new(20, 1, 80, 10), input: Rect::new(20, 12, 80, 3) };
+    app.handle(AppEvent::Channels(Ok(vec![chan("c1", "general")])));
+    let events = vec![msg("m000", 1000, BOB, "a first line\nand a second line the header leaves out", &[])];
+    app.handle(AppEvent::Window { channel: "c1".into(), cursor: None, result: Ok(Window { events, has_more: false, next_cursor: None }) });
+    app.layout(78);
+    press(&mut app, KeyCode::Enter); // channels -> the message list
+    press(&mut app, KeyCode::Enter); // into the thread of the selected message
+    assert!(app.in_thread());
+    app.handle(AppEvent::Thread { channel: "c1".into(), root: "m000".into(), result: Ok(vec![reply("t1", 3000, "alice", "m000"), reply("t2", 3001, ME, "m000")]) });
+    app.layout(78);
+    assert_eq!(app.shown_ids(), ["m000", "t1", "t2"]);
+
+    let (_, layout) = app.layout_ref().unwrap();
+    assert_eq!(layout.items[0].lines.len(), 1, "the root is a one-line header, not a row in the feed");
+    let header: String = layout.items[0].lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+    assert!(header.contains("a first line"), "the header previews the root: {header:?}");
+    assert!(header.ends_with('…'), "and says there is more of it: {header:?}");
+    assert!(!header.contains("second line"), "the rest of the root is left out of the header: {header:?}");
+
+    for item in &layout.items[1..] {
+        for line in &item.lines {
+            let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(text.starts_with("  "), "every reply line is indented under the root: {text:?}");
+        }
+    }
+    // the header is still message #1, so the numbers a reply names (`/r N`) are the ones on screen
+    assert_eq!(layout.items[1].id, "t1");
+    assert_eq!(app.message_number(1).map(|m| m.id), Some("m000".into()));
+    assert_eq!(app.message_number(2).map(|m| m.id), Some("t1".into()));
+}
+
+#[test]
 fn read_only_never_sends() {
     let mut app = app_with(2);
     app.read_only = true;

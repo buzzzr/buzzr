@@ -25,6 +25,13 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
   `definePlugin({ name, permissions, tickMs, ready, onTick, onCommand, … })` call, with `status`, `pane`, `panel`, `flash`, `draft`,
   `send` and `log` on the handle it gives back. `examples/plugins/clock` is written with it.
 
+### Changed
+
+- The thread pane reads as a thread: its root sits at the top as one header line — the message number, the time, the author and
+  the first line of what was said, cut with `…` when there is more — and every reply is indented two columns under it. The root
+  keeps message number 1, so the numbers `/r N` and `/t N` take are the ones on screen, and links in an indented reply are still
+  where they look.
+
 ### Fixed
 
 - Esc while the slash-command palette was up moved the keyboard out of the composer and left the `/command` behind in the input.
