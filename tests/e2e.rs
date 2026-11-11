@@ -313,7 +313,7 @@ fn key_bytes(key: &str) -> (Vec<u8>, Duration) {
 
 /// The sidebar, top to bottom, as the app draws it: the rows in the channel pane (the pane is 28
 /// columns wide, and a `▌` marks the row the channel cursor is on). Every row is returned, including
-/// the section titles: a channel row starts with `#` (or `*` when private) and a DM row with `✉ `.
+/// the section titles: a channel row starts with `#` (or `*` when private) and a DM row with `@`.
 fn sidebar_marked(screen: &str) -> Vec<(bool, String)> {
     screen
         .lines()
@@ -395,14 +395,14 @@ fn the_sidebar_lists_the_channels_the_relay_serves_and_opens_the_first_one() {
     // member, but only once the room's member list and those members' profiles have arrived — which
     // is after the first screen. Wait for that, or the assertion below races the relabelling.
     let screen = s.until("the three DMs to be named after the other member", |sc| {
-        sidebar(sc).iter().filter(|n| n.starts_with("✉ ")).count() == 3
+        sidebar(sc).iter().filter(|n| n.starts_with("@")).count() == 3
     });
     let names = sidebar(&screen);
     for want in ["#design", "#dev", "#general", "#ops", "#random"] {
         assert!(names.iter().any(|n| n == want), "the sidebar is missing {want:?}. It lists {names:?}");
     }
     assert_eq!(names.iter().filter(|n| n.starts_with('#')).count(), 5, "five channels. The sidebar lists {names:?}");
-    assert_eq!(names.iter().filter(|n| n.starts_with("✉ ")).count(), 3, "three DMs. The sidebar lists {names:?}");
+    assert_eq!(names.iter().filter(|n| n.starts_with("@")).count(), 3, "three DMs. The sidebar lists {names:?}");
     assert!(!names.iter().any(|n| n == "DM"), "every DM row is named after a member: {names:?}");
     let h = header(&s.screen());
     assert!(h.contains("#design"), "the first channel opens by itself; the header is {h:?}");
@@ -524,7 +524,9 @@ fn a_channel_we_are_not_in_opens_with_a_join_button_in_place_of_the_composer() {
     s.type_text("random");
     s.expect("the channel row to count the members the relay named", "2 members");
     s.expect("and to say we are not one of them", "not joined · Enter opens");
-    // Enter opens it read-only: the composer is a Join button, and there is no text field.
+    // Enter opens the row on the cursor, which needs the search to have run: wait for the relay's answer (its message
+    // hit) first, or the Enter just starts the search.
+    s.expect("the relay's answer to the search", "hello from c-random");
     s.press("enter");
     let screen = s.until("the channel to open", |sc| header(sc).contains("#random"));
     assert!(screen.contains("[ Join ]"), "the composer is a Join button:\n{screen}");
@@ -575,6 +577,39 @@ fn typing_reaches_the_input_box() {
     s.expect("the typed text in the input box", "a message for the fake relay");
     s.press("esc"); // empty and not replying: back to the messages
     s.expect("the messages pane again", "Open thread");
+}
+
+/// A message that `@mentions` someone the channel does not have is held back, and the status line asks whether to
+/// invite them; Esc answers by keeping the message in the input. The fake relay serves no member list for an open
+/// channel, so a person whose profile it seeds (carol, the author of #design's message) is not a member of the channel
+/// the app opens by itself, and a mention of her is a mention of someone outside it.
+///
+/// The send itself cannot be driven here: a message is built from a channel *uuid*, and the relay's ids (`c-design`)
+/// are not uuids, so a send ends in `failed: not a channel id` — the same wall the join/leave paths meet. What this case
+/// is about is the app's own screen: the question, and the keys that answer it.
+#[test]
+fn a_mention_of_someone_outside_the_channel_asks_whether_to_invite_them() {
+    let Some(relay) = relay_or_skip("a_mention_of_someone_outside_...") else { return };
+    let s = session(&relay);
+    // The names arrive with the profiles; the DM rows are relabelled once a peer's has, so wait until carol is named.
+    s.until("the DMs to be named after the other member", |sc| sidebar(sc).iter().any(|n| n == "@carol"));
+    s.press_all(&["tab", "tab"]); // channels -> messages -> input
+    s.expect("the input box to take focus", "Send");
+    s.type_text("@carol: can you look?");
+    s.press("enter");
+    // Nothing goes out: the message is held out of the input while the status line asks.
+    s.expect("the question about inviting carol", "Invite carol to #design?");
+    s.expect_gone("the held message to leave the input while the question is up", "@carol: can you look?");
+    // Esc answers it by keeping the message: the text comes back, so it can be changed.
+    s.press("esc");
+    s.expect("the status line to say the message was not sent", "not sent");
+    s.expect("the message to come back to the input", "@carol: can you look?");
+    s.expect_gone("the question to clear when it is answered", "Invite carol to #design?");
+    // Enter asks again, and `n` answers: the question is gone once it has an answer.
+    s.press("enter");
+    s.expect("the question again", "Invite carol to #design?");
+    s.press("n");
+    s.expect_gone("the question to clear once it is answered", "Invite carol to #design?");
 }
 
 #[test]

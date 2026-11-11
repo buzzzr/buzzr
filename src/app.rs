@@ -82,6 +82,20 @@ fn short_key(pubkey: &str) -> String {
     }
 }
 
+/// Whether the lowercased `text` names `needle` (an `@name`) as a whole word: what follows it must not be a name
+/// character, so `@bob` is not found in `@bobby`.
+fn at_mention(text_lower: &str, needle: &str) -> bool {
+    let mut from = 0;
+    while let Some(i) = text_lower[from..].find(needle) {
+        let end = from + i + needle.len();
+        if text_lower[end..].chars().next().map(|c| !c.is_alphanumeric() && c != '_').unwrap_or(true) {
+            return true;
+        }
+        from = end;
+    }
+    false
+}
+
 /// An open panel: rows and a cursor owned by the host, `Enter` sends the row's action to its plugin.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PanelState {
@@ -123,6 +137,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("dm", "open your DM with NAME, or start one"),
     ("edit", "edit your own message N"),
     ("help", "the commands and how things work"),
+    ("invite", "add someone to this channel: /invite NAME"),
     ("join", "join a channel: /join NAME"),
     ("leave", "leave this channel (asks first)"),
     ("more", "load older messages"),
@@ -162,6 +177,22 @@ pub enum ReactRow {
     Typed(String),
 }
 
+/// A message held back because it mentions someone who is not in the channel: the answer decides whether to invite them
+/// before it goes out. The text and the mentions are kept so the message is sent unchanged whichever way the answer goes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingInvite {
+    pub channel: String,
+    /// The channel as it is drawn (`#general`, `@Alice`), for the prompt and the flashes.
+    pub label: String,
+    pub dm: bool,
+    pub text: String,
+    pub root: Option<String>,
+    /// The members the text mentions, resolved when the message was submitted.
+    pub mentions: Vec<String>,
+    /// The people the text mentions who are not in the channel: `(pubkey, name)`.
+    pub people: Vec<(String, String)>,
+}
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Conn {
     Connecting,
@@ -198,6 +229,8 @@ pub enum Cmd {
     LoadRoster { channels: Vec<String> },
     /// Ask the relay for the direct message with this person (`kind:41010`); it creates it when it does not exist yet.
     OpenDm { peer: String },
+    /// Add someone to the open channel (`kind:9000`) or group DM (`kind:41011`).
+    Invite { channel: String, pubkey: String, dm: bool },
     /// One person's profile card (`kind:0`).
     LoadProfile(String),
     Search { query: String, seq: u64 },
@@ -231,6 +264,8 @@ pub enum AppEvent {
     Roster(Result<HashMap<String, Vec<String>>, String>),
     /// The relay took (or found) the direct message we asked for; the channel list is reloaded to find its id.
     DmOpened(Result<(), String>),
+    /// The answer to `Cmd::Invite`.
+    Invited { channel: String, pubkey: String, result: Result<(), String> },
     /// The answer to `Cmd::LoadProfile`.
     Profile { pubkey: String, result: Result<Profile, String> },
     Search { seq: u64, result: Result<Vec<Ev>, String> },
@@ -314,6 +349,8 @@ pub struct App {
     /// The message being edited in the input box, and a message waiting for a yes/no before it is deleted.
     pub editing: Option<String>,
     pub confirm_delete: Option<String>,
+    /// A message waiting for a yes/no before it goes out, because it mentions people who are not in the channel.
+    pub confirm_invite: Option<PendingInvite>,
     /// The reaction picker, while it is up: the message it reacts to, what has been typed to search, and the row under the cursor.
     pub react: Option<ReactPicker>,
     /// The slash-command palette's row under the cursor. The palette itself is derived from the editor text (`command_rows`);
@@ -406,6 +443,7 @@ impl App {
             typing_sent: None,
             editing: None,
             confirm_delete: None,
+            confirm_invite: None,
             react: None,
             cmd_cursor: 0,
             joined: HashSet::new(),
@@ -1264,6 +1302,7 @@ impl App {
                 }
             },
             AppEvent::Roster(r) => self.roster_loaded(r),
+            AppEvent::Invited { channel, pubkey, result } => self.invited(channel, pubkey, result),
             AppEvent::Profile { pubkey, result } => {
                 // An answer for a card that has since been replaced by another person is dropped.
                 if self.whois.as_ref().map(|w| w.pubkey == pubkey).unwrap_or(false) {
@@ -1330,14 +1369,14 @@ impl App {
             }
             let others: Vec<String> = self.members.get(&self.channels[i].id).map(|m| m.iter().filter(|(p, _)| *p != me).map(|(p, _)| self.name_of(p)).collect()).unwrap_or_default();
             if !others.is_empty() {
-                self.channels[i].label = format!("✉ {}", others.join(", "));
+                self.channels[i].label = others.join(", ");
             }
         }
         self.sort_channels();
     }
 
-    /// Sections first, then by label. Run after every label change: DMs all arrive named "DM" and only get their
-    /// "✉ name" label later, so sorting once on arrival would leave them out of order. The open channel and the keyboard
+    /// Sections first, then by label. Run after every label change: DMs all arrive named "DM" and only get the other
+    /// member's name as their label later, so sorting once on arrival would leave them out of order. The open channel and the keyboard
     /// cursor follow their channel, not their index.
     fn sort_channels(&mut self) {
         let open_id = self.channel().map(|c| c.id.clone());
@@ -1627,6 +1666,9 @@ impl App {
         }
         if self.confirm_delete.is_some() {
             return self.answer_delete(k);
+        }
+        if self.confirm_invite.is_some() {
+            return self.answer_invite(k);
         }
         if self.confirm_leave.is_some() {
             return self.answer_leave(k);
@@ -2033,6 +2075,7 @@ impl App {
                 }
             }
             "whois" => self.show_whois(arg),
+            "invite" => self.invite(arg),
             "edit" | "delete" => match arg.parse::<usize>().ok().and_then(|n| self.message_number(n)) {
                 Some(m) if cmd == "edit" => {
                     self.start_edit(&m);
@@ -2184,8 +2227,15 @@ impl App {
             self.flash("pick a channel first");
             return Vec::new();
         };
-        let channel = c.id.clone();
+        let (channel, dm, label) = (c.id.clone(), c.is_dm(), format!("{}{}", c.marker(), c.label));
         let mentions = self.resolve_mentions(&channel, &text);
+        // A mention of someone outside the channel reaches nobody there, so ask before the message goes out. A DM is a
+        // conversation with the people already in it rather than a room to join, so it is not offered.
+        let people = if dm { Vec::new() } else { self.mentioned_non_members(&channel, &text) };
+        if !people.is_empty() {
+            self.confirm_invite = Some(PendingInvite { channel, label, dm, text, root, mentions, people });
+            return Vec::new();
+        }
         self.stick_bottom = true;
         self.content_changed();
         vec![Cmd::Send { channel, text, root, mentions }]
@@ -2200,17 +2250,32 @@ impl App {
                 continue;
             }
             let Some(name) = self.names.get(pk) else { continue };
-            let needle = format!("@{}", name.to_lowercase());
-            let mut from = 0;
-            while let Some(i) = lower[from..].find(&needle) {
-                let end = from + i + needle.len();
-                if lower[end..].chars().next().map(|c| !c.is_alphanumeric() && c != '_').unwrap_or(true) {
-                    out.push(pk.clone());
-                    break;
-                }
-                from = end;
+            if at_mention(&lower, &format!("@{}", name.to_lowercase())) {
+                out.push(pk.clone());
             }
         }
+        out
+    }
+
+    /// The people the text mentions with `@name` who are **not** in the channel: who to offer to invite. Only names the
+    /// profiles have given us are known, so this sees the people already met in a loaded channel. A name that also belongs
+    /// to a member is left to `resolve_mentions` — it is the member who is meant. Nothing is reported before the channel's
+    /// member list has loaded, because then there is no list to compare against.
+    fn mentioned_non_members(&self, channel: &str, text: &str) -> Vec<(String, String)> {
+        let Some(members) = self.members.get(channel) else { return Vec::new() };
+        let member_keys: HashSet<&str> = members.iter().map(|(pk, _)| pk.as_str()).collect();
+        let member_names: HashSet<String> = members.iter().filter_map(|(pk, _)| self.names.get(pk)).map(|n| n.to_lowercase()).collect();
+        let lower = text.to_lowercase();
+        let mut out: Vec<(String, String)> = Vec::new();
+        for (pk, name) in &self.names {
+            if pk == &self.me || member_keys.contains(pk.as_str()) || member_names.contains(&name.to_lowercase()) {
+                continue;
+            }
+            if at_mention(&lower, &format!("@{}", name.to_lowercase())) {
+                out.push((pk.clone(), name.clone()));
+            }
+        }
+        out.sort(); // `names` is a map, so order it: the prompt and the tests must not depend on hashing
         out
     }
 
@@ -2501,6 +2566,49 @@ impl App {
         vec![Cmd::Delete { channel, id }]
     }
 
+    /// The status-line question asked before a message that mentions people who are not in the channel.
+    pub fn invite_prompt(&self) -> Option<String> {
+        let p = self.confirm_invite.as_ref()?;
+        let who: Vec<&str> = p.people.iter().map(|(_, n)| n.as_str()).collect();
+        Some(format!("Invite {} to {}? y invites and sends, n just sends, Esc cancels", who.join(", "), p.label))
+    }
+
+    /// The answer to the invite prompt: `y` invites the people it names and sends the message, `n` (or any other key)
+    /// sends it without inviting them, and Esc keeps it in the input.
+    fn answer_invite(&mut self, k: KeyEvent) -> Vec<Cmd> {
+        let Some(p) = self.confirm_invite.take() else { return Vec::new() };
+        let names: Vec<&str> = p.people.iter().map(|(_, n)| n.as_str()).collect();
+        let names = names.join(", ");
+        match k.code {
+            KeyCode::Esc => {
+                self.editor.insert_str(&p.text);
+                self.cmd_cursor = 0;
+                self.set_focus(Focus::Input);
+                self.flash("not sent");
+                Vec::new()
+            }
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                // The invited people are named in the message too, so they are told about it as members would be.
+                let mut mentions = p.mentions.clone();
+                mentions.extend(p.people.iter().map(|(pk, _)| pk.clone()));
+                mentions.sort();
+                mentions.dedup();
+                self.stick_bottom = true;
+                self.content_changed();
+                let mut cmds = vec![Cmd::Send { channel: p.channel.clone(), text: p.text, root: p.root, mentions }];
+                cmds.extend(p.people.iter().map(|(pk, _)| Cmd::Invite { channel: p.channel.clone(), pubkey: pk.clone(), dm: p.dm }));
+                self.flash(format!("inviting {names} to {}", p.label));
+                cmds
+            }
+            _ => {
+                self.stick_bottom = true;
+                self.content_changed();
+                self.flash(format!("sent without inviting {names}"));
+                vec![Cmd::Send { channel: p.channel, text: p.text, root: p.root, mentions: p.mentions }]
+            }
+        }
+    }
+
     /// `/new [private] name [description]`
     fn create_channel(&mut self, arg: &str) -> Vec<Cmd> {
         if self.read_only {
@@ -2744,6 +2852,63 @@ impl App {
         let cmds = self.open_channel(i);
         self.set_focus(Focus::Input);
         cmds
+    }
+
+    /// `/invite NAME`: add someone to the channel on screen (or to the group DM), by name or npub. The relay takes a
+    /// NIP-29 add-member for a channel and a different event for a DM (see `relay::invite_builder`).
+    fn invite(&mut self, who: &str) -> Vec<Cmd> {
+        if who.trim().is_empty() {
+            self.flash("usage: /invite NAME (a name from a channel, or an npub)");
+            return Vec::new();
+        }
+        if self.read_only {
+            self.flash("read-only mode: nothing is sent");
+            return Vec::new();
+        }
+        let Some(c) = self.channel() else {
+            self.flash("pick a channel first");
+            return Vec::new();
+        };
+        let (channel, dm, label) = (c.id.clone(), c.is_dm(), format!("{}{}", c.marker(), c.label));
+        let pubkey = match self.resolve_person(who) {
+            Ok(pk) => pk,
+            Err(e) => {
+                self.flash(e);
+                return Vec::new();
+            }
+        };
+        if pubkey == self.me {
+            self.flash("you are already here");
+            return Vec::new();
+        }
+        let name = self.name_of(&pubkey);
+        if self.members.get(&channel).map(|m| m.iter().any(|(p, _)| *p == pubkey)).unwrap_or(false) {
+            self.flash(format!("{name} is already in {label}"));
+            return Vec::new();
+        }
+        self.flash(format!("inviting {name} to {label}…"));
+        vec![Cmd::Invite { channel, pubkey, dm }]
+    }
+
+    /// An invite came back: on success the channel's member list is stale, so drop it and ask for the fresh one (the next
+    /// mention in that channel then knows the person is a member). A failure is reported, never swallowed.
+    fn invited(&mut self, channel: String, pubkey: String, result: Result<(), String>) -> Vec<Cmd> {
+        match result {
+            Ok(()) => {
+                let name = self.name_of(&pubkey);
+                self.members.remove(&channel);
+                self.flash(format!("invited {name}"));
+                if self.channel().map(|c| c.id == channel).unwrap_or(false) {
+                    vec![Cmd::LoadMembers { channel }]
+                } else {
+                    Vec::new()
+                }
+            }
+            Err(e) => {
+                self.flash(format!("could not invite: {e}"));
+                Vec::new()
+            }
+        }
     }
 
     /// `/whois NAME`: the profile card, filled with the name we already have and the about line from the relay.

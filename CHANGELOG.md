@@ -7,11 +7,13 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
 
 ### Added
 
-- `/channels` opens a browser over every channel the relay shows — open or private, joined or not — with what it is for, how many
-  people are in it and whether you are in it (the membership and the counts come from NIP-29 `kind:39002`). Enter opens a channel
-  you are in and joins an open one you are not; `/join NAME` (a name, `#name` or a channel id) joins or opens one directly, and
-  `/leave` asks first (`y` confirms) before it sends `kind:9022` and drops the channel from the list. A private channel is not
-  offered, because a self-join needs an open one. The list and the membership are read again after a join or a leave.
+- Ctrl+F finds a channel by name across every channel the relay lists, joined or not, and its row says what the channel is for, how
+  many people are in it and whether you are one of them (the membership and the counts come from NIP-29 `kind:39002`). A channel you
+  are not in opens read-only: in place of the composer there is a `[ Join ]` button, reached with Tab the way the input is, and Enter
+  on it asks the relay to join you (`kind:9021`) — its answer turns the button back into the composer. A private channel is not
+  offered, because a self-join needs an open one. `/join NAME` (a name, `#name` or a channel id) joins or opens one directly, and
+  `/leave` asks first (`y` confirms) before it sends `kind:9022` and drops the channel from the list. The list and the membership are
+  read again after a join or a leave.
 - `x` on the channel list archives the channel under the cursor (`/archive` archives the channel you are in): it drops out of the
   list without leaving it, so the relay membership and the read position are untouched. Ctrl+F or `/search` still matches it, its
   row says `archived`, and Enter brings it back and opens it. The archive set lives in `archived.json` next to the read positions
@@ -22,12 +24,23 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
 - `a` opens a reaction picker on the selected message: choose an emoji from the list, or type a name to search it (or an emoji the
   list does not have). Enter sends it as a NIP-25 `kind:7` and Esc closes. The picker opens on the reaction you already have there,
   and its first row takes it back; changing an emoji undoes the one it replaces first, so a message keeps one reaction from you.
+- `install.sh` installs buzzr in one line: `curl -fsSL https://raw.githubusercontent.com/buzzzr/buzzr/main/install.sh | sh`
+  downloads the archive for the machine it runs on, checks it against the release's `SHA256SUMS` before unpacking anything, and
+  puts the binary in `~/.local/bin`. `--version` pins a release (a prerelease too, which `/releases/latest` skips) and `--dir`
+  moves the destination; running it again replaces the binary, so it is also the upgrade.
+- `/invite NAME` adds someone — a display name from a channel, or an npub — to the channel on screen (or the group DM you are in)
+  as a plain member. A message you send that `@mentions` someone who is not in the channel is held back and the status line asks:
+  `y` invites them and sends, `n` sends without inviting, Esc keeps the message in the input. Mentioning a member never asks, and
+  a DM never asks; nothing is offered before the channel's member list has loaded, and only names the profiles have given us are
+  recognised this way.
 
 ### Fixed
 
 - A `… is typing` indicator was shown for the whole channel it arrived in: typing sent inside a thread was drawn in the channel
   timeline, and typing sent in the channel was drawn inside every thread. An indicator is now shown only in the channel or the
   thread it was sent in.
+- A DM row opened with `✉ ` (U+2709), an envelope that a terminal font without it draws as a box. A DM is now marked `@`, ASCII
+  like the `#` and `*` of an open and a private channel, and no line that names a DM carries the glyph any more.
 
 ## [0.2.0-rc.1] - 2026-11-09
 

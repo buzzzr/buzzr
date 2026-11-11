@@ -97,8 +97,8 @@ fn spans(segments: &[crate::contrib::Segment], width: usize) -> Vec<Span<'static
 fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     let title = match (app.channel(), &app.view) {
         (None, _) => "no channel".to_owned(),
-        (Some(c), View::Channel) => if c.is_dm() { c.label.clone() } else { format!("#{}", c.label) },
-        (Some(c), View::Thread(_)) => format!("{} › thread", if c.is_dm() { c.label.clone() } else { format!("#{}", c.label) }),
+        (Some(c), View::Channel) => format!("{}{}", c.marker(), c.label),
+        (Some(c), View::Thread(_)) => format!("{}{} › thread", c.marker(), c.label),
     };
     let left = Line::from(vec![Span::styled(" buzzr ", Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED)), Span::raw(format!(" {title}"))]);
     let (dot, text, color) = match &app.conn {
@@ -151,15 +151,9 @@ fn draw_channels(f: &mut Frame, app: &App, area: Rect) {
             style = style.fg(crate::theme::get().warn).add_modifier(Modifier::BOLD);
         }
         let marker = if bar { "▌" } else { " " };
-        // `#` for an open channel, `*` for a private one (RFC 2811's private-channel prefix); both are ASCII, so every font
-        // has them. DMs are pulled out by `is_dm` and already labelled `✉ name`, so they get no marker.
-        let glyph = if c.is_dm() {
-            ""
-        } else if c.is_private {
-            "*"
-        } else {
-            "#"
-        };
+        // `#` for an open channel, `*` for a private one (RFC 2811's private-channel prefix), `@` for a DM (a person, not a
+        // room); all ASCII, so every font has them and a DM row never opens with a box it cannot draw.
+        let glyph = c.marker();
         let badge = if unread > 0 { format!(" ({unread})") } else { String::new() };
         let mark = app.plugins.channel_mark(&c.id);
         let mark_text = mark.map(|m| format!(" {}", m.text)).unwrap_or_default();
@@ -275,6 +269,11 @@ fn draw_typing(f: &mut Frame, app: &App, area: Rect) {
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     if app.confirm_delete.is_some() {
         let prompt = Span::styled("Delete this message? press y to delete, anything else cancels", Style::default().fg(crate::theme::get().warn).add_modifier(Modifier::BOLD));
+        f.render_widget(Paragraph::new(prompt).alignment(Alignment::Right), area);
+        return;
+    }
+    if let Some(prompt) = app.invite_prompt() {
+        let prompt = Span::styled(prompt, Style::default().fg(crate::theme::get().warn).add_modifier(Modifier::BOLD));
         f.render_widget(Paragraph::new(prompt).alignment(Alignment::Right), area);
         return;
     }
@@ -548,6 +547,11 @@ pub const KEYS: &[(&str, &str)] = &[
     ("Ctrl+A / E, Ctrl+W / U / K", "line start / end, kill word / to start / to end"),
     ("Alt+Backspace", "delete the word before the cursor"),
     ("Ctrl+← →, Alt+B / F", "move by word"),
+    ("", ""),
+    ("Invite prompt (a message mentions someone who is not in the channel)", ""),
+    ("y", "invite them, then send the message"),
+    ("n", "send the message without inviting them"),
+    ("Esc", "keep the message in the input"),
 ];
 
 fn draw_keys(f: &mut Frame, body: Rect) {
@@ -579,6 +583,7 @@ pub const HELP: &[&str] = &[
     "  /help       this screen                /q   quit",
     "  /edit N     edit your message N        /delete N   delete your message N (asks first)",
     "  /whois NAME their profile             /dm NAME   start (or open) a DM",
+    "  /invite NAME   add them to this channel (or the group DM you are in)",
     "  /search text   search                  /new [private] name [about]   create a channel",
     "  /join NAME  join (or open) a channel   /leave   leave this channel (asks first, y confirms)",
     "  /plugins    what is loaded, and the commands plugins added",
@@ -596,6 +601,8 @@ pub const HELP: &[&str] = &[
     "Unread survives a restart: it comes from the last-read position per channel and per thread in",
     "~/.config/buzzr/read-state.json, and a \"new messages\" line marks where new messages start.",
     "A person is found by the name in their profile, or by their npub (hex or npub1…): /dm and /whois take either.",
+    "Mentioning `@name` someone who is not in the channel asks first: y invites them and sends, n sends without inviting,",
+    "Esc keeps the message in the input. /invite NAME does the same without a message.",
     "Others see \"typing…\" while you write (start with --no-typing to turn that off).",
     "`a` opens the reaction picker on the selected message: pick an emoji from the list, or type a name to search it (or an",
     "emoji the list does not have). Enter sends the emoji on the cursor line, Esc closes. The picker opens on your own reaction,",
@@ -700,7 +707,7 @@ fn draw_search(f: &mut Frame, app: &App, area: Rect) {
             Row::Channel(c) => {
                 let ch = &app.channels[*c];
                 let dm = ch.is_dm();
-                spans.push(Span::styled(if dm { ch.label.clone() } else { format!("# {}", ch.label) }, Style::default().fg(crate::theme::get().accent).add_modifier(Modifier::BOLD)));
+                spans.push(Span::styled(format!("{} {}", ch.marker(), ch.label), Style::default().fg(crate::theme::get().accent).add_modifier(Modifier::BOLD)));
                 if app.is_archived(&ch.id) {
                     spans.push(Span::styled("  archived · Enter brings it back", dim()));
                 } else if dm {
@@ -1116,6 +1123,33 @@ mod tests {
     }
 
     #[test]
+    fn a_message_that_mentions_an_outsider_asks_whether_to_invite_them() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let key = |code| AppEvent::Key(KeyEvent::new(code, KeyModifiers::NONE));
+        let mut term = Terminal::new(TestBackend::new(130, 30)).unwrap();
+        let alice = "aa".repeat(32);
+        let mut app = app();
+        // bob is in #general; Alice, whose profile we know, is not
+        app.handle(AppEvent::Members { channel: "c1".into(), result: Ok(vec![("me".into(), "owner".into()), ("bob".into(), "member".into())]) });
+        app.handle(AppEvent::Names(Ok([("bob".to_string(), "Bob".to_string()), (alice.clone(), "Alice Smith".to_string())].into())));
+        app.focus = Focus::Input;
+        for c in "hello @Alice Smith".chars() {
+            app.handle(key(KeyCode::Char(c)));
+        }
+        app.handle(key(KeyCode::Enter));
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(s.contains("Invite Alice Smith to #general? y invites and sends, n just sends, Esc cancels"), "the status line asks and says what each key does\n{s}");
+        assert!(app.editor.is_empty(), "the message waits for the answer, held out of the input");
+        // `n` sends it without inviting, and the question clears
+        app.handle(key(KeyCode::Char('n')));
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(!s.contains("Invite Alice Smith to"), "the question is gone once it is answered\n{s}");
+        assert!(s.contains("sent without inviting Alice Smith"), "and the status line reports what happened\n{s}");
+    }
+
+    #[test]
     fn the_channel_bar_follows_the_cursor_and_returns_when_the_list_loses_focus() {
         use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let key = |code| AppEvent::Key(KeyEvent::new(code, KeyModifiers::NONE));
@@ -1196,7 +1230,7 @@ mod tests {
     }
 
     #[test]
-    fn the_channel_list_marks_private_channels_and_leaves_dms_alone() {
+    fn the_channel_list_marks_open_private_and_direct_channels() {
         use crate::model::Section::*;
         let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
         let mut app = App::new("me".into(), false, chrono_tz::UTC);
@@ -1207,7 +1241,7 @@ mod tests {
         let col: Vec<String> = s[1..8].iter().map(|l| l.chars().take(26).collect::<String>().trim().to_owned()).collect();
         assert!(col.iter().any(|r| r.ends_with("#general")), "an open channel is marked #\n{col:?}");
         assert!(col.iter().any(|r| r.ends_with("*dev-buzzr")), "a private channel is marked *\n{col:?}");
-        assert!(col.iter().any(|r| r.ends_with("DM") && !r.contains('#') && !r.contains('*')), "a DM gets no marker\n{col:?}");
+        assert!(col.iter().any(|r| r.ends_with("@DM")), "a DM is marked @, never a glyph a font may lack\n{col:?}");
     }
 
     #[test]

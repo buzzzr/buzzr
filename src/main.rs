@@ -452,6 +452,15 @@ fn run(cmd: Cmd, relay: &Arc<Relay>, tx: &UnboundedSender<AppEvent>, subscriptio
                 let _ = tx.send(AppEvent::DmOpened(result));
             });
         }
+        Cmd::Invite { channel, pubkey, dm } => {
+            tokio::spawn(async move {
+                let result = match relay::invite_builder(&channel, &pubkey, dm) {
+                    Ok(builder) => relay.submit(builder).await.map(|_| ()).map_err(e),
+                    Err(err) => Err(e(err)),
+                };
+                let _ = tx.send(AppEvent::Invited { channel, pubkey, result });
+            });
+        }
         Cmd::LoadProfile(pubkey) => {
             tokio::spawn(async move {
                 let result = relay.profile(&pubkey).await.map_err(e);

@@ -18,6 +18,10 @@
 
 > The screenshots and the recording in this README show a scripted demo community, not real conversations.
 
+<p align="center">
+  <b>Install:</b> <code>curl -fsSL https://raw.githubusercontent.com/buzzzr/buzzr/main/install.sh | sh</code>
+</p>
+
 ## Why buzzr
 
 - **It talks to the relay directly.** No bridge, no helper daemon, no polling loop: buzzr opens a WebSocket and the screen updates the
@@ -45,11 +49,14 @@
 - **Search everything.** Ctrl+F searches channel names, people and every message you can read, with full text from the relay. Enter on a
   person opens the DM you already have with them, or starts a new one.
 - **Create channels** from the input with `/new`.
-- **Browse, join and leave channels.** `/channels` lists every channel the relay shows — open or private, joined or not — with what
-  it is for and how many people are in it. Enter opens a channel you are in and joins an open one you are not; `/join NAME` does the
-  same by name, and `/leave` takes you out of the open channel after asking.
+- **Join and leave channels.** A channel you are not in opens read-only: its composer is a `[ Join ]` button, and Enter on it joins the
+  channel. `/join NAME` does the same by name, and `/leave` takes you out of the open channel after asking. Ctrl+F shows what a
+  channel is for, how many people are in it and whether you are one of them.
 - **People and profiles.** `/whois name` shows a short card (name, npub, what they wrote about themselves); `/dm name` opens your DM with
   someone or starts a new one. Both take a name from a channel or an npub.
+- **Invite people into a channel.** `/invite name` adds someone to the channel on screen (or the group DM you are in). A message
+  that `@mentions` someone who is not in the channel asks first: `y` invites them and sends, `n` sends without inviting, Esc
+  keeps the message in the input.
 - **Plugins.** Add your own `/commands`, status items, badges and panels from any language. See [PLUGIN.md](PLUGIN.md).
 - **Themes.** The default `buzz-dark` uses the dark palette of the Buzz desktop app. `BUZZR_THEME=dark` keeps your terminal's own background, `BUZZR_THEME=buzz-light` is the desktop app's light palette, and `BUZZR_THEME=light` is for a light terminal. `BUZZR_THEME=high-contrast` is black-on-white at WCAG AAA (7:1), and `NO_COLOR` or `TERM=dumb` turns colour off entirely.
 - **Read-only mode** (`--read-only`) for identities you should not speak for.
@@ -59,6 +66,15 @@
 </p>
 
 ## Install
+
+**One line** (Linux and macOS; checks the archive against the release's `SHA256SUMS` and installs to `~/.local/bin`):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/buzzzr/buzzr/main/install.sh | sh
+```
+
+Options go to the shell that runs the script — `| sh -s -- --version v0.1.1 --dir /usr/local/bin` — and `--help` lists them.
+Running it again replaces the binary, so it is also the upgrade.
 
 **Homebrew** (tested on macOS; the formula also lists the Linux binaries, untested):
 
@@ -124,8 +140,8 @@ values and skip the questions (for scripts and containers; the key is never acce
 
 The full behaviour, for when the feature list above is not enough.
 
-- **Channels and DMs** on the left (DMs are labelled with the other person, `✉ name`), with unread counts. An open channel is
-  marked `#` and a private (restricted) one `*`; DMs get no marker. The selected channel has a full-width grey tint and a bar on
+- **Channels and DMs** on the left (a DM is labelled with the other person, `@name`), with unread counts. An open channel is
+  marked `#`, a private (restricted) one `*` and a DM `@`; all three are ASCII, so no terminal font can fail to draw them. The selected channel has a full-width grey tint and a bar on
   the left, like the selected message; the bar is the accent colour while the list has focus and grey when it does not, so the accent
   marks where the focus is. The bar sits on the channel on screen; while the list has focus it follows the cursor, and leaving the
   list without opening a channel puts it back. The keyboard starts on the channel list, so Up/Down and Enter work as soon as buzzr opens.
@@ -166,15 +182,22 @@ The full behaviour, for when the feature list above is not enough.
   every message you can read (full text, from the relay); Enter opens the result — a message or channel in its channel or thread, a
   person in the DM with them (starting one if there is none).
 - **New channels:** `/new [private] name [description]` creates one and opens it.
-- **Browse, join and leave channels:** `/channels` opens a browser over every channel the relay shows — Solo, and open and private
-  channels — with what it is for, how many people are in it and whether you are one of them (the counts and the membership come from
-  NIP-29 `kind:39002`). Enter opens a channel you are in; on an open one you are not in it asks the relay to join you (`kind:9021`)
-  and opens it. A private channel is not offered — a self-join needs an open channel, so it would be refused. `/join NAME` (a name,
-  `#name` or a channel id) joins or opens one directly; `/leave` asks first (`y` confirms) and sends `kind:9022`, then drops the
-  channel from the list. The list and the membership are read again after a join or a leave, so they follow what the relay accepted.
+- **Join and leave channels:** Ctrl+F finds a channel by name, and its row says what it is for, how many people are in it and whether
+  you are one of them (the count and the membership come from NIP-29 `kind:39002`). Enter opens it; a channel you are not in opens
+  read-only, with a `[ Join ]` button in place of the composer — Enter on the button asks the relay to join you (`kind:9021`), and its
+  answer turns the button back into the composer. A private channel is not offered — a self-join needs an open channel, so it is
+  refused ("needs an invitation"). `/join NAME` (a name, `#name` or a channel id) joins or opens one directly; `/leave` asks first
+  (`y` confirms) and sends `kind:9022`, then drops the channel from the list. The list and the membership are read again after a join
+  or a leave, so they follow what the relay accepted.
 - **People:** `/whois name` shows a short card for someone — their name, npub and about line, filled in as the relay answers. `/dm name`
   and `/whois name` take a display name from a channel, or a key (`npub1…`, `nostr:` URI or hex); an ambiguous or unknown name is
   reported rather than guessed.
+- **Invite people:** `/invite name` adds someone — a display name from a channel, or an npub — to the channel on screen, or to
+  the group DM you are in; they join as a plain member (no role is asked for). A message you send that `@mentions` someone who
+  is not in the channel asks before it goes out: `y` invites them and sends, `n` sends it without inviting, Esc puts the message
+  back in the input. A name that is already a member is treated as that member, so a plain mention never asks; a DM is a
+  conversation rather than a room to join, so it never asks either; and nothing is offered before the channel's member list has
+  loaded. Only names the profiles have given us can be recognised this way.
 - **Your typing shows:** others see `<your name> is typing…` while you write (once every three seconds; not for `/commands` or
   edits). `--no-typing` turns it off.
 - **Help on screen:** F1 lists the keys, F2 the commands. Esc closes a panel first, then cancels a reply, then leaves a thread;
@@ -199,8 +222,9 @@ The full behaviour, for when the feature list above is not enough.
 | Up / Down | select a channel or message (Up at the top of a channel loads older messages) |
 | Up / Down, at the edges | nothing typed in the input, Up goes to the messages on the newest one; on the newest message, Down goes back to the input |
 | Enter | open the channel / open the thread (which reads it) / send |
+| y, n, Esc (invite prompt) | invite the mentioned person and send, send without inviting them, keep the message in the input |
 | x | archive the channel under the bar (it leaves the list; Ctrl+F or `/search` finds it again) |
-| Enter, in `/channels` | open a channel you are in, or join an open one you are not |
+| Enter, in a channel you are not in | join it (the composer is a `[ Join ]` button) |
 | r, c, u, e, d | reply in the thread, copy, mark unread, edit, delete the selected message (e and d: yours only) |
 | a | react to the selected message: pick an emoji, or type to search one (Enter sends, Esc closes) |
 | / | start a `/command`: a palette lists the commands above the input and narrows as you type (Enter runs the one on the cursor, Tab completes it) |
@@ -210,7 +234,7 @@ The full behaviour, for when the feature list above is not enough.
 | Ctrl+R, Ctrl+O | reload, load older |
 | Ctrl+Q, Ctrl+C | quit |
 
-Commands in the input (N is the number shown as `#N`): `/r N text`, `/t N`, `/c`, `/copy N`, `/edit N`, `/delete N`, `/search text`, `/whois NAME`, `/dm NAME`, `/new [private] name [about]`, `/channels`, `/join NAME`, `/leave`, `/plugins`, `/update`, `/read [all]`, `/archive`, `/more`, `/refresh`, `/help`, `/q`. Typing `/` lists them above the input and narrows the list as you type: Enter runs the command on the cursor line, Tab fills its name in for one that takes an argument. Plugin commands appear in the list too.
+Commands in the input (N is the number shown as `#N`): `/r N text`, `/t N`, `/c`, `/copy N`, `/edit N`, `/delete N`, `/search text`, `/whois NAME`, `/dm NAME`, `/invite NAME`, `/new [private] name [about]`, `/join NAME`, `/leave`, `/plugins`, `/update`, `/read [all]`, `/archive`, `/more`, `/refresh`, `/help`, `/q`. Typing `/` lists them above the input and narrows the list as you type: Enter runs the command on the cursor line, Tab fills its name in for one that takes an argument. Plugin commands appear in the list too.
 
 ## Clipboard
 
@@ -252,7 +276,7 @@ expects it to come back live.
 ## Status and limitations
 
 buzzr is young (0.1) and under active development. It works against real Buzz relays, but expect rough edges. Not done yet:
-adding reactions, attachments and images (shown as links only), joining or leaving channels.
+adding reactions, attachments and images (shown as links only).
 
 If something is missing that you need, please [open an issue](https://github.com/buzzzr/buzzr/issues).
 
