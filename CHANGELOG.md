@@ -27,6 +27,9 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
 - The **channel list tells the two kinds of unread apart**: a channel with unseen top-level messages shows their count (`(2)`),
   one whose only unseen news is inside a thread shows `●`, and a channel with both shows `(2) *`. A thread reply still does not
   add to the counted unread — a count for it could never be cleared by opening the channel, because a reply is not a timeline row.
+- **A draft belongs to the place it was typed**: switching channel, or going into or out of a thread, empties the box instead of
+  carrying a half-written message along, and the text is back when you return to that channel or thread. Sending clears that
+  place's draft. They are kept in `drafts.json` next to the read positions, so they survive a restart.
 
 ### Changed
 
