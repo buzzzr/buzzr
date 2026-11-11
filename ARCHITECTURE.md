@@ -23,7 +23,7 @@ into `AppEvent`s. Because `App` never touches the network or the terminal, its b
 |---|---|
 | `main.rs` | Arguments, wiring of setup and relay, terminal setup/restore (raw mode, alternate screen, mouse, bracketed paste, kitty keyboard flags), the `select!` loop, `run(Cmd)`. |
 | `app.rs` | State and behaviour: channels, stores, view (channel or thread), focus, overlays, selection and scroll, input, commands, mentions, unread, typing, clipboard requests. `app/tests.rs` has the tests. |
-| `ui.rs` | Drawing: header, channel list, message list, typing line, status line, input box, footer, key panel, help. |
+| `ui.rs` | Drawing: header, channel list, plugin panes, message list, typing line, status line, input box, footer, key panel, help. |
 | `list.rs` | Geometry of the message list: offsets, hit-testing, anchors that keep the reader's place, selection scrolling. Pure. |
 | `markdown.rs` | Message text -> wrapped styled lines + link positions. Strips control characters first. |
 | `model.rs` | `Ev` (an event), `Channel`, `Summary`, and `Store`: everything loaded for one channel (messages, edits, deletions, reactions, thread summaries) and the views over it (timeline, thread). |
@@ -34,7 +34,7 @@ into `AppEvent`s. Because `App` never touches the network or the terminal, its b
 | `setup.rs` | First-run setup and key loading: asks for what is missing (relay, key, how to keep it) through an `Io` trait so the flow is tested with scripted answers. |
 | `keyfile.rs` | The password-protected key file format (scrypt + AES-256-GCM): `encrypt` and `decrypt`, no I/O. |
 | `selftest.rs` | `--selftest`: a read-only check against a real relay. |
-| `contrib.rs` | What a plugin is allowed to put on the screen (segments, panels, marks) and the `Registry` the app holds; also the bounded `Projection` sent to plugins and the `PluginCmd`/`PluginEvent` that cross between `App` and the plugin runtime. |
+| `contrib.rs` | What a plugin is allowed to put on the screen (segments, panes, panels, marks) and the `Registry` the app holds; also the bounded `Projection` sent to plugins and the `PluginCmd`/`PluginEvent` that cross between `App` and the plugin runtime. |
 | `plugins/` | The out-of-process plugin host: `proto.rs` is the newline-delimited-JSON wire, `manifest.rs` finds plugin folders and their hot-reload stamps, `host.rs` is the one task that supervises every child process. See `PLUGIN.md`. |
 | `update.rs` | How the running copy was installed (Homebrew's Cellar, `~/.cargo/bin`, a checkout build, anything else) and the shell command that upgrades it, for `/update`. Path inspection only, no network. |
 | `release.rs` | The release feed: one throttled GET of the repository's latest release (at most once a day; `BUZZR_NO_UPDATE_CHECK` skips it), the `State` remembered between runs, and the notice printed after the UI closes. Failures are silent. |
@@ -59,9 +59,11 @@ Plugin input arrives as `AppEvent::Plugin` and plugin requests leave as `Cmd::Pl
 behaviour is testable with synthetic events. Inbound is a bounded `Projection`: only the rows on screen, never the key, the relay
 address or another channel. Outbound is default-deny — `draft`, a gated `send` (only in the open channel, needs `messages:write`,
 rate-limited), and panel actions, all refused under `--read-only`. Contributions are plain data (status items, badges, message and
-channel marks, panels) mapped onto surfaces that already exist, so a plugin never draws, never sees the key (the host signs as the
-user when something must be sent) and can never emit an escape sequence. Plugins are off with `--no-plugins` or `BUZZR_SAFE_MODE=1`.
-The contract is in `PLUGIN.md` and a working plugin in `examples/plugins/hello`.
+channel marks, a pane, panels) mapped onto surfaces that already exist, so a plugin never draws, never sees the key (the host signs as the
+user when something must be sent) and can never emit an escape sequence. A manifest may ask for a heartbeat (`tickMs`): the host then
+sends that one plugin a `tick` on the interval, so a time-based pane (a clock) redraws without a timer of its own. Plugins are off with
+`--no-plugins` or `BUZZR_SAFE_MODE=1`. The contract is in `PLUGIN.md` and working plugins in `examples/plugins/hello` and
+`examples/plugins/clock`.
 
 ## Protocol (what is asked of the relay)
 

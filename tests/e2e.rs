@@ -132,6 +132,16 @@ impl Session {
     }
 
     fn start_sized(relay: &Relay, config: PathBuf, keyboard_enhanced: bool, rows: u16) -> Session {
+        Session::start_full(relay, config, keyboard_enhanced, rows, None)
+    }
+
+    /// Like `start_sized`, but with plugins on and `dir` as their folder, so a test can see what a plugin draws
+    /// (every other session starts with `--no-plugins`).
+    fn start_with_plugins(relay: &Relay, dir: PathBuf, rows: u16) -> Session {
+        Session::start_full(relay, fresh_config_dir(), false, rows, Some(dir))
+    }
+
+    fn start_full(relay: &Relay, config: PathBuf, keyboard_enhanced: bool, rows: u16, plugins: Option<PathBuf>) -> Session {
         let pty = nix::pty::openpty(
             Some(&nix::pty::Winsize { ws_row: rows, ws_col: COLS, ws_xpixel: 0, ws_ypixel: 0 }),
             None,
@@ -147,8 +157,11 @@ impl Session {
         let out = std::fs::File::from(pty.master);
         let inp = std::fs::File::from(pty.slave);
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_buzzr"));
-        cmd.arg("--no-plugins")
-            .env("BUZZR_CONFIG_DIR", &config)
+        match &plugins {
+            Some(dir) => cmd.env("BUZZR_PLUGINS_DIR", dir),
+            None => cmd.arg("--no-plugins"),
+        };
+        cmd.env("BUZZR_CONFIG_DIR", &config)
             .env("BUZZ_RELAY_URL", &relay.url)
             .env("BUZZ_PRIVATE_KEY", KEY)
             .env("BUZZR_NO_UPDATE_CHECK", "1")
@@ -801,4 +814,47 @@ fn the_selftest_passes_against_the_fake_relay() {
     let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert!(out.status.success(), "buzzr --selftest failed against the fake relay:\n{text}");
     assert!(text.contains("selftest ok"), "buzzr --selftest did not say it was ok:\n{text}");
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Plugins: what a plugin puts on screen. Every other session starts with `--no-plugins`; this one turns
+// them on and points at a folder of its own, so the check runs through the real host and child process.
+
+/// A plugin that declares a pane in its `ready`, then replaces it on every heartbeat — the shape
+/// `examples/plugins/clock` uses, with fixed text so the test can assert on it.
+const PANE_PLUGIN_MAIN: &str = r#"#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    *'"type":"hello"'*) printf '%s\n' '{"type":"ready","contributions":{"pane":{"title":"Demo pane","rows":[{"text":"pane one","tone":"accent"}]}}}' ;;
+    *'"type":"tick"'*) printf '%s\n' '{"type":"pane","title":"Demo pane","rows":[{"text":"pane two","tone":"accent"}]}' ;;
+  esac
+done
+"#;
+const PANE_PLUGIN_MANIFEST: &str =
+    r#"{"id":"demo","name":"Demo","apiVersion":1,"entry":["sh","main.sh"],"permissions":[],"tickMs":250}"#;
+
+#[test]
+fn a_plugin_pane_is_drawn_under_the_channel_list_and_a_heartbeat_refreshes_it() {
+    let Some(relay) = relay_or_skip("a_plugin_pane_is_drawn_...") else { return };
+    let dir = std::env::temp_dir().join(format!("buzzr-e2e-plugins-{}", std::process::id()));
+    let plugin = dir.join("demo");
+    std::fs::create_dir_all(&plugin).expect("could not make the plugin folder");
+    std::fs::write(plugin.join("plugin.json"), PANE_PLUGIN_MANIFEST).unwrap();
+    std::fs::write(plugin.join("main.sh"), PANE_PLUGIN_MAIN).unwrap();
+
+    let s = Session::start_with_plugins(&relay, dir.clone(), ROWS);
+    settle(&s);
+    // The pane is always on screen: under the channel list, with its title on the rule above its rows, and
+    // the channel list keeps its own rows.
+    let screen = s.until("the plugin's pane", |sc| sc.contains("pane one"));
+    let lines: Vec<&str> = screen.lines().collect();
+    let row = lines.iter().position(|l| l.contains("pane one")).expect("the pane row");
+    let last_channel = lines.iter().rposition(|l| l.contains("#random")).expect("a channel row");
+    assert!(row > last_channel, "the pane sits under the channel list:\n{screen}");
+    assert!(screen.contains("Demo pane"), "the pane's title is on its rule:\n{screen}");
+    assert!(screen.contains("#design"), "the channel list keeps its rows:\n{screen}");
+    // The heartbeat the manifest asked for reaches the child, which replaces the pane from it.
+    let screen = s.until("the heartbeat to refresh the pane", |sc| sc.contains("pane two"));
+    assert!(!screen.contains("pane one"), "the pane is replaced, not stacked:\n{screen}");
+    let _ = std::fs::remove_dir_all(&dir);
 }

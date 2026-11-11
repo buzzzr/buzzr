@@ -18,6 +18,11 @@ pub const DISABLED: &str = "DISABLED";
 /// not implement would only mislead the person installing the plugin.
 pub const KNOWN_PERMISSIONS: &[&str] = &["read:visible", "messages:write"];
 
+/// The heartbeat a manifest asks for with `tickMs` is clamped to this range: below it a plugin would only be asking for a
+/// busy loop (the host's poll is the granularity), and above it a clock would stop being a clock.
+pub const MIN_TICK_MS: u64 = 250;
+pub const MAX_TICK_MS: u64 = 60_000;
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Manifest {
@@ -31,6 +36,10 @@ pub struct Manifest {
     pub entry: Vec<String>,
     #[serde(default)]
     pub permissions: Vec<String>,
+    /// Opt-in heartbeat: buzzr sends `tick` this often so a plugin can refresh something time-based. `0` (or absent)
+    /// means never — a plugin that only reacts to commands and snapshots does not want to be woken.
+    #[serde(default)]
+    pub tick_ms: u64,
 }
 
 /// A folder found under the plugins directory, valid or not.
@@ -82,6 +91,7 @@ pub fn load(dir: &Path) -> Result<Manifest, String> {
     m.permissions.retain(|p| KNOWN_PERMISSIONS.contains(&p.as_str()));
     m.permissions.sort();
     m.permissions.dedup();
+    m.tick_ms = if m.tick_ms == 0 { 0 } else { m.tick_ms.clamp(MIN_TICK_MS, MAX_TICK_MS) };
     Ok(m)
 }
 
@@ -188,6 +198,22 @@ mod tests {
     }
 
     #[test]
+    fn the_heartbeat_a_manifest_asks_for_is_clamped_and_off_by_default() {
+        let root = temp("tick");
+        let load_with = |body: &str| {
+            let dir = root.join("tick");
+            write(&dir, body);
+            load(&dir).map(|m| m.tick_ms)
+        };
+        assert_eq!(load_with(r#"{"id":"tick","name":"T","apiVersion":1,"entry":["sh"]}"#).unwrap(), 0, "no tickMs means no heartbeat");
+        assert_eq!(load_with(r#"{"id":"tick","name":"T","apiVersion":1,"entry":["sh"],"tickMs":0}"#).unwrap(), 0);
+        assert_eq!(load_with(r#"{"id":"tick","name":"T","apiVersion":1,"entry":["sh"],"tickMs":1000}"#).unwrap(), 1000);
+        assert_eq!(load_with(r#"{"id":"tick","name":"T","apiVersion":1,"entry":["sh"],"tickMs":1}"#).unwrap(), MIN_TICK_MS);
+        assert_eq!(load_with(r#"{"id":"tick","name":"T","apiVersion":1,"entry":["sh"],"tickMs":999999}"#).unwrap(), MAX_TICK_MS);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn a_manifest_that_would_load_something_else_is_refused() {
         let root = temp("manifest-bad");
         let cases = [
@@ -230,11 +256,14 @@ mod tests {
     }
 
     #[test]
-    fn the_example_plugin_in_the_repository_is_a_valid_manifest() {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/plugins/hello");
-        let m = load(&dir).unwrap_or_else(|e| panic!("examples/plugins/hello does not load: {e}"));
-        assert_eq!(m.id, "hello");
-        assert!(!m.entry.is_empty());
+    fn the_example_plugins_in_the_repository_are_valid_manifests() {
+        for (name, tick) in [("hello", 0), ("clock", 1000)] {
+            let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/plugins").join(name);
+            let m = load(&dir).unwrap_or_else(|e| panic!("examples/plugins/{name} does not load: {e}"));
+            assert_eq!(m.id, name);
+            assert!(!m.entry.is_empty());
+            assert_eq!(m.tick_ms, tick, "examples/plugins/{name}: tickMs");
+        }
     }
 
     #[test]

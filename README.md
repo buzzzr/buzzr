@@ -45,7 +45,7 @@
 - **Create channels** from the input with `/new`.
 - **People and profiles.** `/whois name` shows a short card (name, npub, what they wrote about themselves); `/dm name` opens your DM with
   someone or starts a new one. Both take a name from a channel or an npub.
-- **Plugins.** Add your own `/commands`, status items, badges and panels from any language. See [PLUGIN.md](PLUGIN.md).
+- **Plugins.** Add your own `/commands`, status items, badges, a pane under the channel list and panels from any language. See [PLUGIN.md](PLUGIN.md).
 - **Themes.** The default `buzz-dark` uses the dark palette of the Buzz desktop app. `BUZZR_THEME=dark` keeps your terminal's own background, `BUZZR_THEME=buzz-light` is the desktop app's light palette, and `BUZZR_THEME=light` is for a light terminal. `BUZZR_THEME=high-contrast` is black-on-white at WCAG AAA (7:1), and `NO_COLOR` or `TERM=dumb` turns colour off entirely.
 - **Read-only mode** (`--read-only`) for identities you should not speak for.
 
@@ -165,10 +165,11 @@ The full behaviour, for when the feature list above is not enough.
 - **Help on screen:** F1 lists the keys, F2 the commands. Esc closes a panel first, then cancels a reply, then leaves a thread;
   after that it steps back a pane at a time — from the input to the message list, and from the message list to the channel list.
 - **Plugins:** a plugin is a separate process (in any language) that adds `/commands`, a status item, header badges, per-channel and
-  per-message marks, and panels; buzzr hot-reloads it when its files change. Put a folder with a `plugin.json` in
-  `~/.config/buzzr/plugins` (or point `--plugins-dir`/`BUZZR_PLUGINS_DIR` elsewhere). `/plugins` lists what loaded, and
-  `buzzr plugins list|enable|disable` works from the shell. `--no-plugins` (or `BUZZR_SAFE_MODE=1`) turns the whole system off. See
-  [PLUGIN.md](PLUGIN.md); a tiny example is in `examples/plugins/hello`.
+  per-message marks, a pane under the channel list, and panels; buzzr hot-reloads it when its files change. A pane is always on screen,
+  and a plugin can ask for a heartbeat (`tickMs` in `plugin.json`) to refresh something time-based — that is how the clock example keeps
+  the time. Put a folder with a `plugin.json` in `~/.config/buzzr/plugins` (or point `--plugins-dir`/`BUZZR_PLUGINS_DIR` elsewhere).
+  `/plugins` lists what loaded, and `buzzr plugins list|enable|disable` works from the shell. `--no-plugins` (or `BUZZR_SAFE_MODE=1`)
+  turns the whole system off. See [PLUGIN.md](PLUGIN.md); tiny examples are in `examples/plugins/hello` and `examples/plugins/clock`.
 - **Upgrading:** `/update` in the input says how to upgrade this copy, worked out from where the binary lives — `brew update &&
   brew upgrade buzzr` for a Homebrew install, `cargo install --force --git https://github.com/buzzzr/buzzr` for a
   `cargo install`, or the release page otherwise.

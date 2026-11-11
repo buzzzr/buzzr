@@ -1,11 +1,11 @@
 //! The wire between buzzr and a plugin process: one JSON object per line, both ways.
 //!
-//! Host to plugin: `hello`, `snapshot`, `invoke`, `panel_action`, `bye`.
-//! Plugin to host: `ready`, `status`, `panel`, `flash`, `draft`, `send`, `log`.
+//! Host to plugin: `hello`, `snapshot`, `tick`, `invoke`, `panel_action`, `bye`.
+//! Plugin to host: `ready`, `status`, `pane`, `panel`, `flash`, `draft`, `send`, `log`.
 //! Unknown message types and unknown fields are ignored (and logged), so a newer plugin can talk to an older buzzr; an unknown
 //! `apiVersion` in the manifest is refused instead, because that is a contract change.
 
-use crate::contrib::{clean_block, clean_line, Contributions, Panel, Projection, Segment, MAX_ROWS};
+use crate::contrib::{clean_block, clean_line, Contributions, Pane, Panel, Projection, Segment, MAX_ROWS};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -20,6 +20,8 @@ pub const MAX_LINE: usize = 64 * 1024;
 pub enum ToPlugin<'a> {
     Hello { protocol: u32, #[serde(rename = "apiVersion")] api_version: u32, host: &'a str, plugin: &'a str },
     Snapshot { seq: u64, projection: &'a Projection },
+    /// The opt-in heartbeat a manifest asked for with `tickMs`: something time-based may need redrawing.
+    Tick { seq: u64 },
     Invoke { id: u64, command: &'a str, args: &'a str },
     PanelAction { id: &'a str, row: usize, value: Option<&'a str> },
     Bye,
@@ -37,6 +39,8 @@ pub enum FromPlugin {
     Ready { contributions: Contributions },
     /// Replaces the plugin's status item; empty segments clear it.
     Status { segments: Vec<Segment> },
+    /// Replaces the plugin's pane under the channel list; `None` clears it.
+    Pane(Option<Pane>),
     Panel(Panel),
     Flash { text: String },
     Draft { text: String },
@@ -70,6 +74,12 @@ pub fn parse(line: &str) -> Result<Option<FromPlugin>, String> {
                 None => field("text").and_then(Value::as_str).map(|t| vec![Segment::new(clean_line(t), Default::default())]).unwrap_or_default(),
             };
             FromPlugin::Status { segments: clean_segments(segments) }
+        }
+        "pane" => {
+            // `{"type":"pane","title":"…","rows":[…]}` replaces it; `{"type":"pane"}` (or only empty rows) clears it.
+            let pane: Pane = serde_json::from_value(value.clone()).map_err(|e| format!("bad pane: {e}"))?;
+            let pane = pane.clean();
+            FromPlugin::Pane(if pane.is_empty() { None } else { Some(pane) })
         }
         "panel" => {
             let mut panel: Panel = serde_json::from_value(value.clone()).map_err(|e| format!("bad panel: {e}"))?;
@@ -117,6 +127,26 @@ mod tests {
         let p = Projection { me: "me".into(), connection: "live".into(), view: "channel".into(), unread: 2, ..Projection::default() };
         let snap = ToPlugin::Snapshot { seq: 3, projection: &p }.line();
         assert!(snap.contains(r#""type":"snapshot""#) && snap.contains(r#""seq":3"#));
+    }
+
+    #[test]
+    fn a_pane_replaces_itself_and_an_empty_one_clears_it() {
+        let line = r#"{"type":"pane","title":"Clock","rows":[{"text":"12:00","tone":"accent"}]}"#;
+        let Some(FromPlugin::Pane(Some(pane))) = parse(line).unwrap() else { panic!("not a pane") };
+        assert_eq!(pane.title, "Clock");
+        assert_eq!(pane.rows[0].text, "12:00");
+        assert_eq!(pane.rows[0].tone, crate::contrib::Tone::Accent);
+        // an empty pane is the same as none: it takes the space back
+        assert!(matches!(parse(r#"{"type":"pane"}"#).unwrap(), Some(FromPlugin::Pane(None))));
+        assert!(matches!(parse(r#"{"type":"pane","title":"","rows":[]}"#).unwrap(), Some(FromPlugin::Pane(None))));
+        // a row is a single line, and its control characters never survive
+        let Some(FromPlugin::Pane(Some(pane))) = parse("{\"type\":\"pane\",\"rows\":[{\"text\":\"a\\nb\\u001b[31m\"}]}").unwrap() else { panic!() };
+        assert_eq!(pane.rows[0].text, "a b[31m");
+    }
+
+    #[test]
+    fn the_heartbeat_the_manifest_asked_for_is_one_line_of_json() {
+        assert_eq!(ToPlugin::Tick { seq: 7 }.line(), r#"{"type":"tick","seq":7}"#);
     }
 
     #[test]
