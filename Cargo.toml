@@ -1,6 +1,6 @@
 [package]
 name = "buzzr"
-version = "0.2.0-rc.1"
+version = "0.2.0-rc.2"
 edition = "2021"
 rust-version = "1.88"
 description = "A terminal client for Buzz that talks to the relay directly"
