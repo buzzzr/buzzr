@@ -97,8 +97,8 @@ fn spans(segments: &[crate::contrib::Segment], width: usize) -> Vec<Span<'static
 fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     let title = match (app.channel(), &app.view) {
         (None, _) => "no channel".to_owned(),
-        (Some(c), View::Channel) => if c.is_dm() { c.label.clone() } else { format!("#{}", c.label) },
-        (Some(c), View::Thread(_)) => format!("{} › thread", if c.is_dm() { c.label.clone() } else { format!("#{}", c.label) }),
+        (Some(c), View::Channel) => format!("{}{}", c.marker(), c.label),
+        (Some(c), View::Thread(_)) => format!("{}{} › thread", c.marker(), c.label),
     };
     let left = Line::from(vec![Span::styled(" buzzr ", Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED)), Span::raw(format!(" {title}"))]);
     let (dot, text, color) = match &app.conn {
@@ -151,15 +151,9 @@ fn draw_channels(f: &mut Frame, app: &App, area: Rect) {
             style = style.fg(crate::theme::get().warn).add_modifier(Modifier::BOLD);
         }
         let marker = if bar { "▌" } else { " " };
-        // `#` for an open channel, `*` for a private one (RFC 2811's private-channel prefix); both are ASCII, so every font
-        // has them. DMs are pulled out by `is_dm` and already labelled `✉ name`, so they get no marker.
-        let glyph = if c.is_dm() {
-            ""
-        } else if c.is_private {
-            "*"
-        } else {
-            "#"
-        };
+        // `#` for an open channel, `*` for a private one (RFC 2811's private-channel prefix), `@` for a DM (a person, not a
+        // room); all ASCII, so every font has them and a DM row never opens with a box it cannot draw.
+        let glyph = c.marker();
         let badge = if unread > 0 { format!(" ({unread})") } else { String::new() };
         let mark = app.plugins.channel_mark(&c.id);
         let mark_text = mark.map(|m| format!(" {}", m.text)).unwrap_or_default();
@@ -677,7 +671,7 @@ fn draw_search(f: &mut Frame, app: &App, area: Rect) {
         match row {
             Row::Channel(c) => {
                 let ch = &app.channels[*c];
-                spans.push(Span::styled(if ch.is_dm() { ch.label.clone() } else { format!("# {}", ch.label) }, Style::default().fg(crate::theme::get().accent).add_modifier(Modifier::BOLD)));
+                spans.push(Span::styled(format!("{} {}", ch.marker(), ch.label), Style::default().fg(crate::theme::get().accent).add_modifier(Modifier::BOLD)));
                 if app.is_archived(&ch.id) {
                     spans.push(Span::styled("  archived · Enter brings it back", dim()));
                 } else {
@@ -1138,7 +1132,7 @@ mod tests {
     }
 
     #[test]
-    fn the_channel_list_marks_private_channels_and_leaves_dms_alone() {
+    fn the_channel_list_marks_open_private_and_direct_channels() {
         use crate::model::Section::*;
         let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
         let mut app = App::new("me".into(), false, chrono_tz::UTC);
@@ -1149,7 +1143,7 @@ mod tests {
         let col: Vec<String> = s[1..8].iter().map(|l| l.chars().take(26).collect::<String>().trim().to_owned()).collect();
         assert!(col.iter().any(|r| r.ends_with("#general")), "an open channel is marked #\n{col:?}");
         assert!(col.iter().any(|r| r.ends_with("*dev-buzzr")), "a private channel is marked *\n{col:?}");
-        assert!(col.iter().any(|r| r.ends_with("DM") && !r.contains('#') && !r.contains('*')), "a DM gets no marker\n{col:?}");
+        assert!(col.iter().any(|r| r.ends_with("@DM")), "a DM is marked @, never a glyph a font may lack\n{col:?}");
     }
 
     #[test]

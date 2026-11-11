@@ -23,6 +23,8 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
 - A `… is typing` indicator was shown for the whole channel it arrived in: typing sent inside a thread was drawn in the channel
   timeline, and typing sent in the channel was drawn inside every thread. An indicator is now shown only in the channel or the
   thread it was sent in.
+- A DM row opened with `✉ ` (U+2709), an envelope that a terminal font without it draws as a box. A DM is now marked `@`, ASCII
+  like the `#` and `*` of an open and a private channel, and no line that names a DM carries the glyph any more.
 
 ## [0.2.0-rc.1] - 2026-11-09
 
