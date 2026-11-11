@@ -31,6 +31,8 @@
 
 - **Channels and DMs** with unread counts, in sections: Solo chats, Channels (private and open) and DMs. DMs are labelled with the other
   person; start one with `/dm name`, or from search. An open channel is marked `#` and a private one `*`.
+- **Archive a channel.** `x` takes the channel off the list without leaving it (leaving changes your membership on the relay);
+  Ctrl+F finds it again and Enter brings it back. Its unread is kept, but it no longer counts in the status line.
 - **Unread that survives a restart.** The last-read position is saved per channel and per thread, so the badges are right again
   next time and a `new messages` line shows where you left off. `u` marks a message unread until you `/read` the channel.
 - **Threads.** A channel shows top-level messages only, as the Buzz app does, each with its reply count and the time of the last reply;
@@ -131,6 +133,10 @@ The full behaviour, for when the feature list above is not enough.
   `/read all` clears every channel and its threads. `u` on a message goes the other way: it forces *that* message unread on
   this device, so the badge and the `new messages` line come back above it. Unlike the position, a mark is not moved on by
   reading: it works on a message of your own too, and only `/read` clears it.
+- **Archive a channel:** `x` on the list keeps a channel out of it, without leaving it — leaving changes your membership on the
+  relay and loses your place. An archived channel is still loaded and still counts unread, but it is left out of the status line's
+  unread total, so no badge points at a row you cannot see. Ctrl+F (or `/search`) still matches it; its row says `archived`, and
+  Enter brings it back and opens it. The set lives in `~/.config/buzzr/archived.json` and survives a restart.
 - **A channel shows only its top-level messages**, as the Buzz app does, each with `💬 3 replies · last Thu 13:33` when it has a
   thread. The relay supplies the counts and says whether older messages exist.
 - **Threads:** Enter or a click opens one, Esc returns to the same place. Opening a thread reads its replies, so a thread with
@@ -184,6 +190,7 @@ The full behaviour, for when the feature list above is not enough.
 | Up / Down | select a channel or message (Up at the top of a channel loads older messages) |
 | Up / Down, at the edges | nothing typed in the input, Up goes to the messages on the newest one; on the newest message, Down goes back to the input |
 | Enter | open the channel / open the thread (which reads it) / send |
+| x | archive the channel under the bar (it leaves the list; Ctrl+F or `/search` finds it again) |
 | r, c, u, e, d | reply in the thread, copy, mark unread, edit, delete the selected message (e and d: yours only) |
 | a | react to the selected message: pick an emoji, or type to search one (Enter sends, Esc closes) |
 | / | start a `/command`: a palette lists the commands above the input and narrows as you type (Enter runs the one on the cursor, Tab completes it) |
@@ -193,7 +200,7 @@ The full behaviour, for when the feature list above is not enough.
 | Ctrl+R, Ctrl+O | reload, load older |
 | Ctrl+Q, Ctrl+C | quit |
 
-Commands in the input (N is the number shown as `#N`): `/r N text`, `/t N`, `/c`, `/copy N`, `/edit N`, `/delete N`, `/search text`, `/whois NAME`, `/dm NAME`, `/new [private] name [about]`, `/plugins`, `/update`, `/read [all]`, `/more`, `/refresh`, `/help`, `/q`. Typing `/` lists them above the input and narrows the list as you type: Enter runs the command on the cursor line, Tab fills its name in for one that takes an argument. Plugin commands appear in the list too.
+Commands in the input (N is the number shown as `#N`): `/r N text`, `/t N`, `/c`, `/copy N`, `/edit N`, `/delete N`, `/search text`, `/whois NAME`, `/dm NAME`, `/new [private] name [about]`, `/plugins`, `/update`, `/read [all]`, `/archive`, `/more`, `/refresh`, `/help`, `/q`. Typing `/` lists them above the input and narrows the list as you type: Enter runs the command on the cursor line, Tab fills its name in for one that takes an argument. Plugin commands appear in the list too.
 
 ## Clipboard
 

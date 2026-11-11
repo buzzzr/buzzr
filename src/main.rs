@@ -245,6 +245,8 @@ async fn run_tui(relay: Arc<Relay>, read_only: bool, send_typing: bool, mouse: b
     app.update_source = update::InstallSource::detect();
     // Where each channel was left last time; the badge counts come back over the relay (see `Cmd::LoadUnread`).
     app.seed_read(config::load_read_state(&paths.read_state()));
+    // The channels archived on this device: they have no row in the channel list until a search brings one back.
+    app.seed_archived(config::load_archived(&paths.archived()));
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
     // The release feed: seed the notice from what the last check learned, and ask GitHub again only when that is stale. A failure
     // (offline, no release yet) is silent — see `release.rs`.
@@ -342,6 +344,11 @@ fn run(cmd: Cmd, relay: &Arc<Relay>, tx: &UnboundedSender<AppEvent>, subscriptio
             // Written here rather than spawned: each save is the whole map, and two writes racing in the runtime could land in
             // the order they were spawned, letting an older position overwrite a newer one. A small file is cheap to write.
             let _ = config::save_read_state(&paths.read_state(), &state);
+        }
+        Cmd::SaveArchived(ids) => {
+            // Written here for the same reason as the read positions: the whole set goes out each time, and a spawned write
+            // could race an older one.
+            let _ = config::save_archived(&paths.archived(), &ids);
         }
         Cmd::LoadWindow { channel, cursor } => {
             tokio::spawn(async move {

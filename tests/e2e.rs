@@ -488,6 +488,30 @@ fn ctrl_f_searches_channels_and_messages_and_esc_closes_the_overlay() {
     s.expect_gone("the overlay to close", "Search · Enter opens");
 }
 
+/// `x` archives the channel under the bar: its row leaves the list, and a search result is the way back. The
+/// cursor starts on the channel the app opened by itself (#design), so `x` archives what is on screen.
+#[test]
+fn x_archives_the_channel_under_the_bar_and_a_search_result_brings_it_back() {
+    let Some(relay) = relay_or_skip("x_archives_...") else { return };
+    let s = session(&relay);
+    assert_eq!(bar_on(&s.screen()).as_deref(), Some("#design"), "the bar starts on the open channel");
+    s.press("x");
+    let screen = s.until("#design to leave the sidebar", |sc| !sidebar(sc).iter().any(|n| n == "#design"));
+    assert!(sidebar(&screen).iter().any(|n| n == "#dev"), "the other channels are still listed:\n{screen}");
+    assert!(!header(&screen).contains("#design"), "the app stepped off the archived channel: {:?}", header(&screen));
+
+    // Ctrl+F still matches it: its row says so, and Enter brings it back and opens it.
+    s.press("ctrl+f");
+    s.expect("the search overlay", "Search · Enter opens");
+    s.type_text("design");
+    s.expect("the archived row in the search", "archived · Enter brings it back");
+    s.expect("the relay to answer the search", "hello from c-design");
+    s.press("enter");
+    let screen = s.until("#design to be back in the sidebar", |sc| sidebar(sc).iter().any(|n| n == "#design"));
+    assert!(sidebar(&screen).iter().any(|n| n == "#design"), "the row is back:\n{screen}");
+    assert!(header(&screen).contains("#design"), "and the channel was opened: {:?}", header(&screen));
+}
+
 #[test]
 fn f1_lists_the_keys_and_esc_closes_them() {
     let Some(relay) = relay_or_skip("f1_lists_the_keys_...") else { return };
