@@ -168,7 +168,7 @@ fn draw_channels(f: &mut Frame, app: &App, area: Rect) {
             (0, false) => String::new(),
             (n, false) => format!(" ({n})"),
             (0, true) => " ●".to_owned(),
-            (n, true) => format!(" ({n}) *"),
+            (n, true) => format!(" ({n}) ●"),
         };
         let mark = app.plugins.channel_mark(&c.id);
         let mark_text = mark.map(|m| format!(" {}", m.text)).unwrap_or_default();
@@ -1089,7 +1089,7 @@ mod tests {
         app.unread.insert("c1".into(), 1);
         term.draw(|f| draw(f, &mut app)).unwrap();
         let s = screen(&term).join("\n");
-        assert!(s.contains("#general (1) *"), "a channel with both shows the count and the mark:\n{s}");
+        assert!(s.contains("#general (1) ●"), "a channel with both shows the count and the circle:\n{s}");
     }
 
     #[test]

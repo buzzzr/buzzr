@@ -25,7 +25,7 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
   `definePlugin({ name, permissions, tickMs, ready, onTick, onCommand, … })` call, with `status`, `pane`, `panel`, `flash`, `draft`,
   `send` and `log` on the handle it gives back. `examples/plugins/clock` is written with it.
 - The **channel list tells the two kinds of unread apart**: a channel with unseen top-level messages shows their count (`(2)`),
-  one whose only unseen news is inside a thread shows `●`, and a channel with both shows `(2) *`. A thread reply still does not
+  one whose only unseen news is inside a thread shows `●`, and a channel with both shows `(2) ●`. A thread reply still does not
   add to the counted unread — a count for it could never be cleared by opening the channel, because a reply is not a timeline row.
 
 ### Changed
