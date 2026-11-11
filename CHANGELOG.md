@@ -14,6 +14,11 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
   offered, because a self-join needs an open one. `/join NAME` (a name, `#name` or a channel id) joins or opens one directly, and
   `/leave` asks first (`y` confirms) before it sends `kind:9022` and drops the channel from the list. The list and the membership are
   read again after a join or a leave.
+
+## [0.2.0-rc.2] - 2026-11-11
+
+### Added
+
 - `x` on the channel list archives the channel under the cursor (`/archive` archives the channel you are in): it drops out of the
   list without leaving it, so the relay membership and the read position are untouched. Ctrl+F or `/search` still matches it, its
   row says `archived`, and Enter brings it back and opens it. The archive set lives in `archived.json` next to the read positions
@@ -33,6 +38,12 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
   `y` invites them and sends, `n` sends without inviting, Esc keeps the message in the input. Mentioning a member never asks, and
   a DM never asks; nothing is offered before the channel's member list has loaded, and only names the profiles have given us are
   recognised this way.
+
+### Changed
+
+- The arrow keys move between the messages and the input: `Up` in an empty composer leaves it for the message list and lands on
+  the newest message with the bottom scrolled into view, and `Down` on the newest message goes back to the input. The channel
+  cursor is no longer dragged along, and with text in the input `Up`/`Down` still move inside what is being written.
 
 ### Fixed
 
@@ -117,7 +128,8 @@ First public version.
 - A notice in the UI when a newer version is published, with the upgrade command.
 - Release builds for Linux (musl, x86_64 and aarch64) and macOS (Apple silicon and Intel), published with `SHA256SUMS`.
 
-[Unreleased]: https://github.com/buzzzr/buzzr/compare/v0.2.0-rc.1...HEAD
+[Unreleased]: https://github.com/buzzzr/buzzr/compare/v0.2.0-rc.2...HEAD
+[0.2.0-rc.2]: https://github.com/buzzzr/buzzr/compare/v0.2.0-rc.1...v0.2.0-rc.2
 [0.2.0-rc.1]: https://github.com/buzzzr/buzzr/compare/v0.2.0-rc.0...v0.2.0-rc.1
 [0.2.0-rc.0]: https://github.com/buzzzr/buzzr/compare/v0.1.1...v0.2.0-rc.0
 [0.1.1]: https://github.com/buzzzr/buzzr/compare/v0.1.0...v0.1.1
