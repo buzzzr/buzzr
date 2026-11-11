@@ -475,6 +475,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         spans.extend(key_hint("↑↓", "Move"));
         spans.extend(key_hint("⏎", "Run"));
         spans.extend(key_hint("tab", "Complete"));
+        spans.extend(key_hint("esc", "Close"));
     } else if app.react.is_some() {
         spans.extend(key_hint("type", "Search"));
         spans.extend(key_hint("⏎", "Send"));
@@ -525,7 +526,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
 
 pub const KEYS: &[(&str, &str)] = &[
     ("Tab / Shift+Tab", "switch between channels, messages and the input"),
-    ("Esc", "close a panel, cancel a reply, leave a thread, then step back to the channels"),
+    ("Esc", "close the palette or a panel, cancel a reply, leave a thread, then step back to the channels"),
     ("F1", "this list of keys"),
     ("F2", "help: commands and how things work"),
     ("Ctrl+R", "reload the open channel or thread"),
@@ -557,6 +558,7 @@ pub const KEYS: &[(&str, &str)] = &[
     ("Up / Down", "move the highlight"),
     ("Enter", "run the command on the cursor line"),
     ("Tab", "complete its name into the input, ready for an argument"),
+    ("Esc", "close the list and keep the command in the input"),
     ("", ""),
     ("Reaction picker (from `a` on a message)", ""),
     ("type", "search the emoji by name, or type an emoji to send it as-is"),
@@ -631,7 +633,8 @@ pub const HELP: &[&str] = &[
     "Join button in place of the composer, and Enter there joins it. `/join NAME` joins (or opens) a channel by name,",
     "and `/leave` takes you out of the open channel (it asks first; `y` confirms).",
     "Typing `/` lists the commands above the input: keep typing to narrow them, Enter runs the one on the cursor, and Tab",
-    "fills its name in for a command that takes an argument (the list holds anything plugins added too).",
+    "fills its name in for a command that takes an argument (the list holds anything plugins added too). Esc closes the list",
+    "and leaves what was typed in the input, so a half-written command can be finished or corrected.",
     "Unread survives a restart: it comes from the last-read position per channel and per thread in",
     "~/.config/buzzr/read-state.json, and a \"new messages\" line marks where new messages start.",
     "A person is found by the name in their profile, or by their npub (hex or npub1…): /dm and /whois take either.",
@@ -1019,7 +1022,10 @@ mod tests {
 
     #[test]
     fn the_keys_overlay_names_both_new_line_keys_and_which_of_them_always_works() {
-        let mut term = Terminal::new(TestBackend::new(110, 60)).unwrap();
+        // The overlay is one plain paragraph with no scrolling, so a terminal shorter than the list clips its bottom rows off
+        // the screen. Size this one to the whole list (two header lines + one per entry, plus the box borders and the header
+        // and footer rows `draw` reserves) so the case sees every key it is about, however the list grows.
+        let mut term = Terminal::new(TestBackend::new(110, KEYS.len() as u16 + 6)).unwrap();
         let mut app = app();
         app.overlay = Overlay::Keys;
         term.draw(|f| draw(f, &mut app)).unwrap();

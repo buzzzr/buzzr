@@ -356,6 +356,10 @@ pub struct App {
     /// The slash-command palette's row under the cursor. The palette itself is derived from the editor text (`command_rows`);
     /// this is only where the highlight sits, reset to the first row every time the command word changes.
     pub cmd_cursor: usize,
+    /// The input text the palette was closed on with Esc: while the editor still holds exactly that, `palette_up` stays false,
+    /// so Esc hides the pane without losing the command word that was typed. Any edit changes the text and the palette comes
+    /// back; submitting clears it (see `key_input` and `submit`).
+    cmd_hidden: Option<String>,
     /// The channels we are a member of, from the relay's `kind:39002` (`Cmd::LoadRoster`): a channel we are not in offers to
     /// join it instead of the composer, and Enter opens one we are in.
     pub joined: HashSet<String>,
@@ -446,6 +450,7 @@ impl App {
             confirm_invite: None,
             react: None,
             cmd_cursor: 0,
+            cmd_hidden: None,
             joined: HashSet::new(),
             member_counts: HashMap::new(),
             confirm_leave: None,
@@ -573,6 +578,11 @@ impl App {
         if f != self.focus && (self.focus == Focus::Channels || f == Focus::Channels) {
             self.chan_cursor = self.cur.unwrap_or(0);
             self.clamp_cursor();
+        }
+        if f != self.focus {
+            // The palette is a function of the input having the keyboard, so leaving the composer and coming back shows it
+            // again, whatever Esc last closed on (see `palette_up`).
+            self.cmd_hidden = None;
         }
         self.focus = f;
     }
@@ -1923,7 +1933,12 @@ impl App {
             KeyCode::Enter if self.palette_up() => return self.palette_run(),
             KeyCode::Enter => return self.submit(),
             KeyCode::Esc => {
-                if self.editing.take().is_some() {
+                if self.palette_up() {
+                    // Esc closes the palette and keeps the command word in the input, so it can be finished or corrected:
+                    // the text is what holds the pane up, so remembering it is the whole state (`palette_up`). Esc again
+                    // then goes on to the next thing, and any edit brings the palette back.
+                    self.cmd_hidden = Some(self.editor.text());
+                } else if self.editing.take().is_some() {
                     self.editor.clear();
                     self.cmd_cursor = 0;
                     self.flash("edit cancelled");
@@ -2000,6 +2015,8 @@ impl App {
     // ---- sending and commands --------------------------------------------------------------------------------------------
 
     fn submit(&mut self) -> Vec<Cmd> {
+        // Anything typed is settled here, so an Esc-closed palette starts fresh next time a `/` is typed.
+        self.cmd_hidden = None;
         let text = self.editor.text().trim().to_owned();
         if let Some(id) = self.editing.clone() {
             return self.finish_edit(id, text);
@@ -2150,10 +2167,14 @@ impl App {
         Some(rest.to_owned())
     }
 
-    /// The palette is up while the input holds `/command` (see `command_query`), nothing is covering the screen, and the
-    /// keyboard is in the input. It is derived from that state: it needs no open/close of its own.
+    /// The palette is up while the input holds `/command` (see `command_query`), nothing is covering the screen, the keyboard
+    /// is in the input, and Esc has not closed it on exactly this text. It is derived from that state: it needs no open/close
+    /// of its own, and closing it leaves the command word in the input where it can be finished or corrected.
     pub fn palette_up(&self) -> bool {
-        self.focus == Focus::Input && self.overlay == Overlay::None && self.command_query().is_some()
+        self.focus == Focus::Input
+            && self.overlay == Overlay::None
+            && self.command_query().is_some()
+            && self.cmd_hidden.as_deref() != Some(self.editor.text().as_str())
     }
 
     /// The rows the palette shows: the built-ins whose name starts with what has been typed, then the commands loaded
