@@ -146,7 +146,7 @@ const SOLO_LABEL: &str = "buzz.solo";
 pub struct Channel {
     pub id: String,
     pub name: String,
-    /// What the group metadata says the channel is for (`about`); shown in the channel browser (`/channels`).
+    /// What the group metadata says the channel is for (`about`); shown in a search result for the channel.
     pub about: String,
     #[allow(dead_code)]
     pub created_at: u64,

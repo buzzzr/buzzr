@@ -1,7 +1,7 @@
 //! Drawing the screen. Everything here reads `App`; the only thing it changes is the geometry it reports back (so that clicks
 //! can be mapped to what is on screen).
 
-use crate::app::{App, BrowseRow, Conn, Focus, Overlay, ReactRow, Row, SideRow, View};
+use crate::app::{App, Conn, Focus, Overlay, ReactRow, Row, SideRow, View};
 use crate::list;
 use ratatui::layout::{Alignment, Constraint, Layout, Position, Rect};
 use ratatui::style::{Modifier, Style};
@@ -53,9 +53,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let cols = Layout::horizontal([Constraint::Length(CHANNELS_W.min(body.width / 3)), Constraint::Min(10)]).split(body);
     let (chans, right) = (cols[0], cols[1]);
 
-    // the input box grows with its text, up to 10 lines
+    // the composer grows with its text, up to 10 lines; a channel we are not in shows a one-line Join button instead
     let input_inner_w = right.width.saturating_sub(4).max(4) as usize;
-    let input_rows = app.editor.rows(input_inner_w).len().clamp(1, 10) as u16;
+    let input_rows = if app.open_channel_not_joined() { 1 } else { app.editor.rows(input_inner_w).len().clamp(1, 10) as u16 };
     let rr = Layout::vertical([Constraint::Min(2), Constraint::Length(1), Constraint::Length(1), Constraint::Length(input_rows + 2)]).split(right);
     let (msgs, typing, status, input) = (rr[0], rr[1], rr[2], rr[3]);
 
@@ -84,7 +84,6 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Overlay::Help => draw_help(f, area),
         Overlay::Search => draw_search(f, app, area),
         Overlay::Whois => draw_whois(f, app, area),
-        Overlay::Channels => draw_browse(f, app, area),
         Overlay::Panel => draw_panel(f, app, area),
         Overlay::None => {}
     }
@@ -391,9 +390,14 @@ fn draw_command_palette(f: &mut Frame, app: &App, input: Rect) {
     f.render_widget(Paragraph::new(lines), inner);
 }
 
+/// The composer. In a channel we are not in it is not a text field at all: it is a Join button, reached with Tab like the input
+/// is, and Enter joins the channel — the relay's answer turns it back into the composer.
 fn draw_input(f: &mut Frame, app: &App, area: Rect, inner_w: usize) {
     let focused = app.focus == Focus::Input;
-    let title = if app.editing.is_some() {
+    let join = app.open_channel_not_joined();
+    let title = if join {
+        " join this channel "
+    } else if app.editing.is_some() {
         " edit message "
     } else if app.reply_target.is_some() || app.in_thread() {
         " reply in thread "
@@ -403,6 +407,15 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect, inner_w: usize) {
     let block = Block::default().borders(Borders::ALL).border_style(if focused { Style::default().fg(crate::theme::get().accent) } else { faint() }).title(title);
     let inner = block.inner(area);
     f.render_widget(block, area);
+    if join {
+        let style = if focused {
+            Style::default().fg(crate::theme::get().accent).bg(crate::theme::get().sel_bg).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(crate::theme::get().accent)
+        };
+        f.render_widget(Paragraph::new(Line::from(Span::styled("[ Join ]", style))).alignment(Alignment::Center), inner);
+        return;
+    }
     if app.editor.is_empty() {
         let hint = if app.read_only {
             "read-only: nothing will be sent"
@@ -433,10 +446,6 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         spans.extend(key_hint("type", "Search"));
         spans.extend(key_hint("⏎", "Send"));
         spans.extend(key_hint("esc", "Close"));
-    } else if app.overlay == Overlay::Channels {
-        spans.extend(key_hint("↑↓", "Move"));
-        spans.extend(key_hint("⏎", "Open or join"));
-        spans.extend(key_hint("esc", "Close"));
     } else {
         match app.focus {
             Focus::Channels => {
@@ -456,6 +465,10 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
                 if app.in_thread() {
                     spans.extend(key_hint("esc", "Back"));
                 }
+            }
+            Focus::Input if app.open_channel_not_joined() => {
+                spans.extend(key_hint("⏎", "Join"));
+                spans.extend(key_hint("esc", "Messages"));
             }
             Focus::Input => {
                 spans.extend(key_hint("⏎", "Send"));
@@ -488,7 +501,7 @@ pub const KEYS: &[(&str, &str)] = &[
     ("", ""),
     ("Channels", ""),
     ("Up / Down, Home / End", "move"),
-    ("Enter", "open the channel; in /channels, open or join the row"),
+    ("Enter", "open the channel; one you are not in opens with a Join button"),
     ("x", "archive the channel (it leaves the list; search finds it again)"),
     ("", ""),
     ("Messages", ""),
@@ -527,7 +540,7 @@ pub const KEYS: &[(&str, &str)] = &[
     ("Esc", "close"),
     ("", ""),
     ("Writing", ""),
-    ("Enter", "send"),
+    ("Enter", "send; in a channel you are not in, join it (the composer is a Join button)"),
     ("/", "start a `/command`: a palette lists the commands and narrows as you type"),
     ("Up, nothing typed", "back to the messages, on the newest one"),
     ("Alt+Enter, Ctrl+J", "new line, in any terminal"),
@@ -567,22 +580,21 @@ pub const HELP: &[&str] = &[
     "  /edit N     edit your message N        /delete N   delete your message N (asks first)",
     "  /whois NAME their profile             /dm NAME   start (or open) a DM",
     "  /search text   search                  /new [private] name [about]   create a channel",
-    "  /channels   browse the channels, and join one   /join NAME   join (or open) a channel",
-    "  /leave      leave this channel (asks first, y confirms)",
+    "  /join NAME  join (or open) a channel   /leave   leave this channel (asks first, y confirms)",
     "  /plugins    what is loaded, and the commands plugins added",
     "  /update     how to upgrade this copy (brew, cargo or the release page)",
     "A newer release shows up in the status line (BUZZR_NO_UPDATE_CHECK=1 turns the once-a-day check off).",
     "  /read       mark this channel read     /read all   mark every channel read",
     "  /archive    archive this channel (`x` in the list): it leaves the list, and Ctrl+F or /search finds it again",
     "An archived channel is still loaded and still counts unread; only the list hides it. Enter on its search result brings it back.",
-    "`/channels` browses every channel the relay shows — open or private, joined or not — with what it is for and",
-    "how many people are in it. Enter opens a channel you are in, and joins an open one you are not (a private one",
-    "needs an invitation). `/leave` takes you out of the open channel; it asks first, and `y` confirms.",
+    "Search (Ctrl+F) finds channel names, people and every message. A channel row says what it is for, how many people",
+    "are in it and whether you are one of them, and Enter opens it — a channel you are not in opens read-only, with a",
+    "Join button in place of the composer, and Enter there joins it. `/join NAME` joins (or opens) a channel by name,",
+    "and `/leave` takes you out of the open channel (it asks first; `y` confirms).",
     "Typing `/` lists the commands above the input: keep typing to narrow them, Enter runs the one on the cursor, and Tab",
     "fills its name in for a command that takes an argument (the list holds anything plugins added too).",
     "Unread survives a restart: it comes from the last-read position per channel and per thread in",
     "~/.config/buzzr/read-state.json, and a \"new messages\" line marks where new messages start.",
-    "Search (Ctrl+F): channel names, people and full-text message search; Enter opens the result — a person starts a DM.",
     "A person is found by the name in their profile, or by their npub (hex or npub1…): /dm and /whois take either.",
     "Others see \"typing…\" while you write (start with --no-typing to turn that off).",
     "`a` opens the reaction picker on the selected message: pick an emoji from the list, or type a name to search it (or an",
@@ -687,11 +699,28 @@ fn draw_search(f: &mut Frame, app: &App, area: Rect) {
         match row {
             Row::Channel(c) => {
                 let ch = &app.channels[*c];
-                spans.push(Span::styled(if ch.is_dm() { ch.label.clone() } else { format!("# {}", ch.label) }, Style::default().fg(crate::theme::get().accent).add_modifier(Modifier::BOLD)));
+                let dm = ch.is_dm();
+                spans.push(Span::styled(if dm { ch.label.clone() } else { format!("# {}", ch.label) }, Style::default().fg(crate::theme::get().accent).add_modifier(Modifier::BOLD)));
                 if app.is_archived(&ch.id) {
                     spans.push(Span::styled("  archived · Enter brings it back", dim()));
+                } else if dm {
+                    spans.push(Span::styled("  direct message · Enter opens it", dim()));
                 } else {
-                    spans.push(Span::styled("  channel", dim()));
+                    // What the channel is for, how many people are in it and whether we are one of them — the detail that says
+                    // whether Enter opens a channel we are in or one we are not (which opens with a Join button).
+                    let state = match app.member_counts.get(&ch.id) {
+                        Some(n) => format!("{n} {} · {} · Enter opens", if *n == 1 { "member" } else { "members" }, if app.is_member(&ch.id) { "joined" } else { "not joined" }),
+                        None => "channel · Enter opens".to_owned(),
+                    };
+                    spans.push(Span::styled(format!("  {state}"), dim()));
+                    let about = crate::markdown::strip_controls(&ch.about).split_whitespace().collect::<Vec<_>>().join(" ");
+                    if !about.is_empty() {
+                        let used = 2 + state.width() + if dm { 0 } else { 2 } + ch.label.width();
+                        let room = (list_area.width as usize).saturating_sub(used + 4);
+                        if room > 8 {
+                            spans.push(Span::styled(format!("  {}", clipped(&about, room)), Style::default()));
+                        }
+                    }
                 }
             }
             Row::Person(pk) => {
@@ -740,76 +769,6 @@ fn clipped(text: &str, room: usize) -> String {
     }
     out.push('…');
     out
-}
-
-/// The channel browser (`/channels`): every channel the relay shows us except the DMs, grouped by section, with the count of
-/// people in it, whether we are one of them, and what the channel says it is for. Enter opens the channel on the cursor, or joins
-/// it when it is an open one we are not in. Everything from a channel's name or about line is stripped of control characters and
-/// clipped before it reaches a `Span`: a channel name is as hostile as a message.
-fn draw_browse(f: &mut Frame, app: &App, area: Rect) {
-    let w = 110.min(area.width.saturating_sub(4)).max(20);
-    let h = 26.min(area.height.saturating_sub(2)).max(6);
-    let r = Rect::new(area.x + (area.width.saturating_sub(w)) / 2, area.y + (area.height.saturating_sub(h)) / 2, w, h);
-    clear_popup(f, r);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(crate::theme::get().accent))
-        .title(" Channels · Enter opens or joins · Esc closes ");
-    let inner = block.inner(r);
-    f.render_widget(block, r);
-    if inner.height < 2 || inner.width < 10 {
-        return;
-    }
-    let rows = app.browse_rows();
-    let vis = inner.height as usize;
-    let start = app.browse_cursor.saturating_sub(vis.saturating_sub(1) / 2).min(rows.len().saturating_sub(vis));
-    let mut lines = Vec::new();
-    for (i, row) in rows.iter().enumerate().skip(start).take(vis) {
-        match row {
-            BrowseRow::Title(section) => {
-                lines.push(Line::from(Span::styled(format!(" {}", section.title()), dim().add_modifier(Modifier::BOLD))));
-                continue;
-            }
-            BrowseRow::Channel(c) => {
-                let ch = &app.channels[*c];
-                let joined = app.is_member(&ch.id);
-                // `#` for an open channel, `*` for a private one, as in the channel list.
-                let glyph = if ch.is_private { "*" } else { "#" };
-                let room = (inner.width as usize).saturating_sub(2 + glyph.width()).max(8);
-                let name = clipped(&crate::markdown::strip_controls(&ch.label), room.min(inner.width as usize / 2));
-                // What the row says about membership: a count when the relay gave one, and what Enter would do.
-                let state = match (app.member_counts.get(&ch.id), joined) {
-                    (Some(n), true) => format!("{n} members · joined"),
-                    (Some(n), false) => format!("{n} members · not joined · Enter joins"),
-                    (None, true) => "joined".to_owned(),
-                    (None, false) => "not joined · Enter joins".to_owned(),
-                };
-                let mut spans = vec![Span::raw(if i == app.browse_cursor { "▌" } else { " " })];
-                let mut used = 2 + glyph.width() + name.width();
-                spans.push(Span::styled(format!("{glyph} {name}"), Style::default().fg(crate::theme::get().accent).add_modifier(Modifier::BOLD)));
-                if app.is_archived(&ch.id) {
-                    spans.push(Span::styled("  archived · Enter brings it back", dim()));
-                    used += 2 + "archived · Enter brings it back".width();
-                } else {
-                    spans.push(Span::styled(format!("  {state}"), dim()));
-                    used += 2 + state.width();
-                }
-                let about = crate::markdown::strip_controls(&ch.about).split_whitespace().collect::<Vec<_>>().join(" ");
-                if !about.is_empty() && used + 6 < inner.width as usize {
-                    spans.push(Span::styled(format!("  {}", clipped(&about, inner.width as usize - used - 2)), Style::default()));
-                }
-                let mut line = Line::from(spans);
-                if i == app.browse_cursor {
-                    line = line.style(Style::default().bg(crate::theme::get().sel_bg));
-                }
-                lines.push(line);
-            }
-        }
-    }
-    if rows.is_empty() {
-        lines.push(Line::from(Span::styled(" no channel to show yet", dim())));
-    }
-    f.render_widget(Paragraph::new(lines), inner);
 }
 
 /// Somebody's profile card (`/whois NAME`): the name, the npub, and what they wrote about themselves. Everything from the
@@ -1368,34 +1327,40 @@ mod tests {
     }
 
     #[test]
-    fn the_channel_browser_draws_the_membership_count_and_what_enter_does() {
+    fn a_search_row_for_a_channel_says_who_is_in_it_and_what_enter_does() {
         let mut term = Terminal::new(TestBackend::new(110, 26)).unwrap();
         let mut app = app();
         app.joined.insert("c1".into());
         app.member_counts.insert("c1".into(), 4);
         app.member_counts.insert("c2".into(), 9);
-        app.overlay = Overlay::Channels;
-        app.browse_cursor = 1; // the first channel row, under the section title
+        app.channels[1].about = "off-topic, mostly".into();
+        app.overlay = Overlay::Search;
+        app.search.query.insert_str("r"); // "r" matches both general and random
         term.draw(|f| draw(f, &mut app)).unwrap();
         let s = screen(&term).join("\n");
-        assert!(s.contains("Channels · Enter opens or joins · Esc closes"), "the browser names its keys\n{s}");
-        assert!(s.contains("general") && s.contains("4 members · joined"), "a channel you are in, with its count\n{s}");
-        assert!(s.contains("random") && s.contains("9 members · not joined · Enter joins"), "and one you are not\n{s}");
+        assert!(s.contains("# general") && s.contains("4 members · joined · Enter opens"), "a channel you are in, with its count\n{s}");
+        assert!(s.contains("# random") && s.contains("9 members · not joined · Enter opens"), "and one you are not\n{s}");
+        assert!(s.contains("off-topic, mostly"), "what the channel is for\n{s}");
     }
 
     #[test]
-    fn the_browser_strips_control_characters_from_a_name_and_clips_a_long_one() {
+    fn the_composer_is_a_join_button_in_a_channel_you_are_not_in() {
         let mut term = Terminal::new(TestBackend::new(110, 26)).unwrap();
         let mut app = app();
-        app.channels[0].label = "gene\u{7}ral".into();
-        app.channels[1].label = "a".repeat(200);
-        app.overlay = Overlay::Channels;
-        app.browse_cursor = 1;
+        app.member_counts.insert("c1".into(), 4); // the relay answered for c1, and we are not one of the four
+        app.focus = Focus::Input;
         term.draw(|f| draw(f, &mut app)).unwrap();
         let s = screen(&term).join("\n");
-        assert!(!s.contains('\u{7}'), "a channel name is stripped like a message\n{s}");
-        assert!(s.contains("general"), "and shown without the control character\n{s}");
-        assert!(s.contains('…'), "a name too long for its room is clipped\n{s}");
+        assert!(s.contains("join this channel"), "the composer says what it is\n{s}");
+        assert!(s.contains("[ Join ]"), "and is a button\n{s}");
+        assert!(!s.contains("Type a message"), "there is no text field\n{s}");
+        assert!(s.contains("Join"), "the footer names the key\n{s}");
+
+        // Once the relay has us in the channel, the composer comes back.
+        app.joined.insert("c1".into());
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(!s.contains("[ Join ]") && s.contains("Type a message"), "the text field is back\n{s}");
     }
 
     #[test]

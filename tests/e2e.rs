@@ -512,21 +512,35 @@ fn x_archives_the_channel_under_the_bar_and_a_search_result_brings_it_back() {
     assert!(header(&screen).contains("#design"), "and the channel was opened: {:?}", header(&screen));
 }
 
-/// `/channels` browses what the relay offers: a channel we are not in says what Enter would do, and Esc closes it.
+/// A channel we are not in opens read-only: its composer is a Join button, not a text field. Ctrl+F says the
+/// same about the channel first (the relay's roster), and Enter on the button sends the join.
 #[test]
-fn the_channels_browser_lists_what_the_relay_offers_and_esc_closes_it() {
-    let Some(relay) = relay_or_skip("the_channels_browser_...") else { return };
+fn a_channel_we_are_not_in_opens_with_a_join_button_in_place_of_the_composer() {
+    let Some(relay) = relay_or_skip("a_channel_we_are_not_in_opens_...") else { return };
     let s = session(&relay);
-    s.press_all(&["tab", "tab"]); // channels -> messages -> input
-    s.expect("the input box to take focus", "Send");
-    s.type_text("/channels");
+    // Ctrl+F finds #random; its row carries the relay's roster (who is in it) and says what Enter does.
+    s.press("ctrl+f");
+    s.expect("the search overlay", "Search · Enter opens");
+    s.type_text("random");
+    s.expect("the channel row to count the members the relay named", "2 members");
+    s.expect("and to say we are not one of them", "not joined · Enter opens");
+    // Enter opens it read-only: the composer is a Join button, and there is no text field.
     s.press("enter");
-    s.expect("the channel browser", "Channels · Enter opens or joins · Esc closes");
-    s.expect("a channel the relay offers", "# general");
-    s.expect("what Enter would do for a channel we are not in", "not joined · Enter joins");
-    s.expect("the footer to follow the browser", "Open or join");
+    let screen = s.until("the channel to open", |sc| header(sc).contains("#random"));
+    assert!(screen.contains("[ Join ]"), "the composer is a Join button:\n{screen}");
+    assert!(screen.contains("join this channel"), "and says what it is:\n{screen}");
+    assert!(!screen.contains("Type a message"), "there is no text field to type into:\n{screen}");
+    // The button takes the focus the way the input does, and the footer names it.
+    s.press("tab"); // messages -> input
+    s.expect("the footer to name the join key", "Join  esc  Messages");
+    // Enter on the button sends the join. The relay's rooms carry placeholder ids, not the UUIDs the protocol
+    // uses, so the send is refused and reported; the point here is that the button is wired to the join at all.
+    s.press("enter");
+    s.expect("the join to be attempted and its refusal reported", "could not join the channel");
+    // The channel is still not ours, so the button is still there, and Esc leaves it for the messages.
+    s.expect("the join button to stay", "join this channel");
     s.press("esc");
-    s.expect_gone("the browser to close", "Channels · Enter opens or joins");
+    s.expect("the messages footer", "Open thread");
 }
 
 #[test]
