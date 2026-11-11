@@ -125,7 +125,7 @@ fn a_dm_is_labelled_with_the_other_person() {
     let mut app = app_with(1);
     app.handle(AppEvent::Members { channel: "dm1".into(), result: Ok(vec![(ME.into(), "member".into()), ("alice".into(), "member".into())]) });
     app.handle(AppEvent::Names(Ok([("alice".to_string(), "Alice".to_string())].into())));
-    assert_eq!(app.channels.iter().find(|c| c.id == "dm1").unwrap().label, "✉ Alice");
+    assert_eq!(app.channels.iter().find(|c| c.id == "dm1").unwrap().label, "Alice");
 }
 
 #[test]
@@ -1800,7 +1800,7 @@ fn dm_labels_resolving_later_keep_dms_in_their_own_section_and_sorted() {
     app.handle(AppEvent::Members { channel: "dm1".into(), result: Ok(vec![(ME.into(), "member".into()), ("zed".into(), "member".into())]) });
     app.handle(AppEvent::Members { channel: "dm2".into(), result: Ok(vec![(ME.into(), "member".into()), ("alice".into(), "member".into())]) });
     app.handle(AppEvent::Names(Ok([("zed".to_string(), "Zed".to_string()), ("alice".to_string(), "Alice".to_string())].into())));
-    assert_eq!(side(&app), ["# Solo", "chat", "# Channels", "general", "# DMs", "✉ Alice", "✉ Zed"]);
+    assert_eq!(side(&app), ["# Solo", "chat", "# Channels", "general", "# DMs", "Alice", "Zed"]);
     assert_eq!(app.channels[app.chan_cursor].id, "dm2", "the cursor stays on the channel it was on");
     assert_eq!(app.channel().map(|c| c.id.as_str()), Some("s1"), "so does the open channel");
 }

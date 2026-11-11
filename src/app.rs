@@ -1227,14 +1227,14 @@ impl App {
             }
             let others: Vec<String> = self.members.get(&self.channels[i].id).map(|m| m.iter().filter(|(p, _)| *p != me).map(|(p, _)| self.name_of(p)).collect()).unwrap_or_default();
             if !others.is_empty() {
-                self.channels[i].label = format!("✉ {}", others.join(", "));
+                self.channels[i].label = others.join(", ");
             }
         }
         self.sort_channels();
     }
 
-    /// Sections first, then by label. Run after every label change: DMs all arrive named "DM" and only get their
-    /// "✉ name" label later, so sorting once on arrival would leave them out of order. The open channel and the keyboard
+    /// Sections first, then by label. Run after every label change: DMs all arrive named "DM" and only get the other
+    /// member's name as their label later, so sorting once on arrival would leave them out of order. The open channel and the keyboard
     /// cursor follow their channel, not their index.
     fn sort_channels(&mut self) {
         let open_id = self.channel().map(|c| c.id.clone());

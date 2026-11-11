@@ -313,7 +313,7 @@ fn key_bytes(key: &str) -> (Vec<u8>, Duration) {
 
 /// The sidebar, top to bottom, as the app draws it: the rows in the channel pane (the pane is 28
 /// columns wide, and a `▌` marks the row the channel cursor is on). Every row is returned, including
-/// the section titles: a channel row starts with `#` (or `*` when private) and a DM row with `✉ `.
+/// the section titles: a channel row starts with `#` (or `*` when private) and a DM row with `@`.
 fn sidebar_marked(screen: &str) -> Vec<(bool, String)> {
     screen
         .lines()
@@ -395,14 +395,14 @@ fn the_sidebar_lists_the_channels_the_relay_serves_and_opens_the_first_one() {
     // member, but only once the room's member list and those members' profiles have arrived — which
     // is after the first screen. Wait for that, or the assertion below races the relabelling.
     let screen = s.until("the three DMs to be named after the other member", |sc| {
-        sidebar(sc).iter().filter(|n| n.starts_with("✉ ")).count() == 3
+        sidebar(sc).iter().filter(|n| n.starts_with("@")).count() == 3
     });
     let names = sidebar(&screen);
     for want in ["#design", "#dev", "#general", "#ops", "#random"] {
         assert!(names.iter().any(|n| n == want), "the sidebar is missing {want:?}. It lists {names:?}");
     }
     assert_eq!(names.iter().filter(|n| n.starts_with('#')).count(), 5, "five channels. The sidebar lists {names:?}");
-    assert_eq!(names.iter().filter(|n| n.starts_with("✉ ")).count(), 3, "three DMs. The sidebar lists {names:?}");
+    assert_eq!(names.iter().filter(|n| n.starts_with("@")).count(), 3, "three DMs. The sidebar lists {names:?}");
     assert!(!names.iter().any(|n| n == "DM"), "every DM row is named after a member: {names:?}");
     let h = header(&s.screen());
     assert!(h.contains("#design"), "the first channel opens by itself; the header is {h:?}");

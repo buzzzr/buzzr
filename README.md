@@ -121,8 +121,8 @@ values and skip the questions (for scripts and containers; the key is never acce
 
 The full behaviour, for when the feature list above is not enough.
 
-- **Channels and DMs** on the left (DMs are labelled with the other person, `✉ name`), with unread counts. An open channel is
-  marked `#` and a private (restricted) one `*`; DMs get no marker. The selected channel has a full-width grey tint and a bar on
+- **Channels and DMs** on the left (a DM is labelled with the other person, `@name`), with unread counts. An open channel is
+  marked `#`, a private (restricted) one `*` and a DM `@`; all three are ASCII, so no terminal font can fail to draw them. The selected channel has a full-width grey tint and a bar on
   the left, like the selected message; the bar is the accent colour while the list has focus and grey when it does not, so the accent
   marks where the focus is. The bar sits on the channel on screen; while the list has focus it follows the cursor, and leaving the
   list without opening a channel puts it back. The keyboard starts on the channel list, so Up/Down and Enter work as soon as buzzr opens.
