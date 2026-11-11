@@ -369,7 +369,7 @@ pub struct App {
     pub whois: Option<Whois>,
     /// The person a fresh DM was asked for: the channel is opened as soon as the reloaded list has it.
     pending_dm: Option<String>,
-    /// What loaded plugins put on the screen: status items, badges, marks and `/commands`.
+    /// What loaded plugins put on the screen: status items, badges, marks, a pane and `/commands`.
     pub plugins: Registry,
     /// How this copy of buzzr was installed, for `/update`; the loop fills it in, tests set it directly.
     pub update_source: InstallSource,
@@ -3082,6 +3082,11 @@ impl App {
             PluginEvent::Status { id, segments } => {
                 // A status for a plugin that is not registered (gone, or not ready) is dropped: the plugin list says why.
                 self.plugins.set_status(&id, segments);
+                Vec::new()
+            }
+            PluginEvent::Pane { id, pane } => {
+                // Same rule as status: a pane for a plugin that is not registered is dropped, and the next draw shows it.
+                self.plugins.set_pane(&id, pane);
                 Vec::new()
             }
             PluginEvent::Panel { plugin, panel } => {

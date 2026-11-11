@@ -51,7 +51,13 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(3), Constraint::Length(1)]).split(area);
     let (header, body, footer) = (rows[0], rows[1], rows[2]);
     let cols = Layout::horizontal([Constraint::Length(CHANNELS_W.min(body.width / 3)), Constraint::Min(10)]).split(body);
-    let (chans, right) = (cols[0], cols[1]);
+    let (sidebar, right) = (cols[0], cols[1]);
+    // A plugin pane is always on screen, so it takes the bottom of the channel column and the channel list gives up
+    // those rows — but not all of them: a list with nothing left to scroll is worse than a pane that is not drawn.
+    let pane_wanted: u16 = app.plugins.panes().iter().map(|(_, p)| p.height() as u16).sum();
+    let pane_h = pane_wanted.min(sidebar.height.saturating_sub(2));
+    let side = Layout::vertical([Constraint::Min(1), Constraint::Length(pane_h)]).split(sidebar);
+    let (chans, panes) = (side[0], side[1]);
 
     // the composer grows with its text, up to 10 lines; a channel we are not in shows a one-line Join button instead
     let input_inner_w = right.width.saturating_sub(4).max(4) as usize;
@@ -68,6 +74,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     draw_header(f, app, header);
     draw_channels(f, app, chans);
+    draw_plugin_panes(f, app, panes);
     draw_messages(f, app, msgs);
     draw_typing(f, app, typing);
     draw_status(f, app, status);
@@ -180,6 +187,33 @@ fn draw_channels(f: &mut Frame, app: &App, area: Rect) {
         lines.push(line);
     }
     f.render_widget(Paragraph::new(lines), inner);
+}
+
+/// The panes plugins asked for, stacked under the channel list in plugin-id order. Display-only: a pane takes no focus,
+/// no key and no click, and its rows are clipped to the column (plugin text is hostile like any other).
+fn draw_plugin_panes(f: &mut Frame, app: &App, area: Rect) {
+    if area.height == 0 {
+        return;
+    }
+    let bottom = area.y + area.height;
+    let mut top = area.y;
+    for (_, pane) in app.plugins.panes() {
+        if top >= bottom {
+            break;
+        }
+        // The rule on top carries the title; a pane that does not fit here is clipped, not scrolled.
+        let h = (pane.height() as u16).min(bottom - top);
+        let rect = Rect::new(area.x, top, area.width, h);
+        // The right border continues the channel list's, so the message pane stays separated all the way down.
+        let block = Block::default().borders(Borders::TOP | Borders::RIGHT).border_style(faint());
+        let block = if pane.title.is_empty() { block } else { block.title(Span::styled(format!(" {} ", pane.title), dim())) };
+        let inner = block.inner(rect);
+        f.render_widget(block, rect);
+        let lines: Vec<Line> =
+            pane.rows.iter().take(inner.height as usize).map(|row| Line::from(spans(std::slice::from_ref(row), inner.width as usize))).collect();
+        f.render_widget(Paragraph::new(lines), inner);
+        top += h;
+    }
 }
 
 fn draw_messages(f: &mut Frame, app: &App, area: Rect) {
@@ -903,6 +937,48 @@ mod tests {
         assert!(s.contains("Open thread") && s.contains("Switch pane"), "footer hints\n{s}");
         assert!(s.contains("Mark unread"), "the message pane advertises the unread key\n{s}");
         assert!(!s.contains("**"), "markdown is rendered, not shown");
+    }
+
+    #[test]
+    fn a_plugin_pane_is_drawn_in_the_channel_column_and_the_list_gives_up_the_rows() {
+        let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        let mut app = app();
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let before = screen(&term);
+        assert!(!before.join("\n").contains("Clock"), "no plugin has asked for a pane:\n{}", before.join("\n"));
+
+        app.plugins.set(
+            "clock",
+            "Clock",
+            crate::contrib::Contributions {
+                pane: Some(crate::contrib::Pane { title: "Clock".into(), rows: vec![crate::contrib::Segment::new("12:34", crate::contrib::Tone::Accent)] }),
+                ..Default::default()
+            },
+        );
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let rows = screen(&term);
+        let s = rows.join("\n");
+        let title = rows.iter().position(|l| l.contains("Clock")).expect("the pane's title rule");
+        let row = rows.iter().position(|l| l.contains("12:34")).expect("the pane's row");
+        let last_channel = rows.iter().rposition(|l| l.contains("#random")).expect("a channel row");
+        assert!(title > last_channel, "the pane is under the channel list:\n{s}");
+        assert_eq!(row, title + 1, "the row is drawn right under the title rule:\n{s}");
+        assert!(rows[row].contains('│'), "the column's right border runs past the pane:\n{s}");
+        assert!(s.contains("Hello there, see docs"), "the message pane keeps its rows:\n{s}");
+    }
+
+    #[test]
+    fn a_pane_never_takes_the_whole_channel_list() {
+        // A 20-row pane in a short terminal: it is clipped, and the channel list keeps enough rows to be read.
+        let mut term = Terminal::new(TestBackend::new(100, 8)).unwrap();
+        let mut app = app();
+        let rows = (0..20).map(|i| crate::contrib::Segment::new(format!("row {i}"), crate::contrib::Tone::Accent)).collect();
+        app.plugins.set("clock", "Clock", crate::contrib::Contributions { pane: Some(crate::contrib::Pane { title: "Clock".into(), rows }), ..Default::default() });
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(s.contains("#general"), "the channel list keeps its rows:\n{s}");
+        assert!(s.contains("Clock") && s.contains("row 0"), "and the pane is drawn, clipped:\n{s}");
+        assert!(!s.contains("row 19"), "not all of it fits, so the rest is dropped rather than scrolled:\n{s}");
     }
 
     #[test]

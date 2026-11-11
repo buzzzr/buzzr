@@ -14,6 +14,9 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
   offered, because a self-join needs an open one. `/join NAME` (a name, `#name` or a channel id) joins or opens one directly, and
   `/leave` asks first (`y` confirms) before it sends `kind:9022` and drops the channel from the list. The list and the membership are
   read again after a join or a leave.
+- A plugin can keep a **pane** under the channel list: a small block that is always on screen and takes no focus, key or click. A
+  manifest can also ask for an opt-in heartbeat (`tickMs`) so the plugin redraws something time-based without a timer of its own.
+  `examples/plugins/clock` shows the time in large digits with both.
 
 ## [0.2.0-rc.2] - 2026-11-11
 

@@ -23,6 +23,9 @@ pub const HANDSHAKE: Duration = Duration::from_secs(2);
 pub const POLL: Duration = Duration::from_secs(2);
 /// An editor writing a file twice must not start two revisions.
 pub const DEBOUNCE: Duration = Duration::from_millis(300);
+/// How often the runtime looks at which plugins are due a heartbeat. A manifest's `tickMs` is honoured to this
+/// granularity, so it is the same number as `manifest::MIN_TICK_MS`.
+pub const TICK_CHECK: Duration = Duration::from_millis(manifest::MIN_TICK_MS);
 /// A plugin may post this often, no more. The user always sees it happen.
 const SEND_INTERVAL: Duration = Duration::from_secs(1);
 const SENDS_PER_MINUTE: usize = 20;
@@ -108,6 +111,9 @@ struct Runtime {
     last_snapshot: Option<Projection>,
     seq: u64,
     invoke: u64,
+    /// When each running plugin last got a heartbeat, and the number to put on the next one.
+    ticks: HashMap<String, Instant>,
+    tick_seq: u64,
     sends: HashMap<String, Vec<Instant>>,
     published: Vec<PluginMeta>,
 }
@@ -127,6 +133,8 @@ impl Runtime {
             last_snapshot: None,
             seq: 0,
             invoke: 0,
+            ticks: HashMap::new(),
+            tick_seq: 0,
             sends: HashMap::new(),
             published: Vec::new(),
         }
@@ -138,6 +146,9 @@ impl Runtime {
         self.publish();
         let mut poll = tokio::time::interval(POLL);
         poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // A separate, faster timer: only a plugin whose manifest asked for a heartbeat is woken by it.
+        let mut heartbeat = tokio::time::interval(TICK_CHECK);
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
                 Some(msg) = rx.recv() => match msg {
@@ -151,6 +162,7 @@ impl Runtime {
                     self.check_deadlines();
                     self.scan_for_changes();
                 }
+                _ = heartbeat.tick() => self.send_ticks(),
             }
         }
         self.stop_all();
@@ -323,6 +335,7 @@ impl Runtime {
     }
 
     fn stop(&mut self, id: &str) {
+        self.ticks.remove(id);
         for proc in [self.running.remove(id), self.pending.remove(id)].into_iter().flatten() {
             let mut proc = proc;
             let _ = proc.stdin.send(ToPlugin::Bye.line());
@@ -394,6 +407,8 @@ impl Runtime {
                     let _ = proc.stdin.send(ToPlugin::Snapshot { seq: self.seq, projection: snapshot }.line());
                 }
                 self.running.insert(plugin.to_owned(), proc);
+                // The first heartbeat comes one interval after `ready`, not the moment the plugin loaded.
+                self.ticks.insert(plugin.to_owned(), Instant::now());
                 self.publish();
             }
             other => {
@@ -404,6 +419,7 @@ impl Runtime {
                 }
                 match other {
                     FromPlugin::Status { segments } => self.emit(PluginEvent::Status { id: plugin.to_owned(), segments }),
+                    FromPlugin::Pane(pane) => self.emit(PluginEvent::Pane { id: plugin.to_owned(), pane }),
                     FromPlugin::Panel(panel) => self.emit(PluginEvent::Panel { plugin: plugin.to_owned(), panel }),
                     FromPlugin::Flash { text } => self.emit(PluginEvent::Flash { text }),
                     FromPlugin::Draft { text } => self.emit(PluginEvent::Draft { plugin: plugin.to_owned(), text }),
@@ -430,6 +446,7 @@ impl Runtime {
         if let Some(proc) = self.running.remove(plugin) {
             if proc.rev == rev {
                 gone = true;
+                self.ticks.remove(plugin);
                 if let Some(info) = self.plugins.get_mut(plugin) {
                     info.state = PluginState::Failed;
                     info.detail = why.clone();
@@ -466,6 +483,35 @@ impl Runtime {
         }
         times.push(now);
         self.emit(PluginEvent::Send { plugin: plugin.to_owned(), channel, text });
+    }
+
+    // ---- heartbeats ------------------------------------------------------------------------------------------------------
+
+    /// A running plugin whose manifest set `tickMs` is sent a `tick` on that interval, no faster than `TICK_CHECK`. It is
+    /// how a pane that shows something time-based (a clock, a build) redraws without the plugin running its own timer.
+    fn send_ticks(&mut self) {
+        if self.running.is_empty() {
+            return;
+        }
+        let now = Instant::now();
+        let mut due: Vec<String> = Vec::new();
+        for id in self.running.keys() {
+            let every = self.plugins.get(id).and_then(|i| i.manifest.as_ref()).map(|m| m.tick_ms).unwrap_or(0);
+            if every == 0 {
+                continue;
+            }
+            let last = *self.ticks.entry(id.clone()).or_insert(now);
+            if now.duration_since(last) >= Duration::from_millis(every) {
+                due.push(id.clone());
+            }
+        }
+        for id in due {
+            self.ticks.insert(id.clone(), now);
+            self.tick_seq += 1;
+            if let Some(proc) = self.running.get(&id) {
+                let _ = proc.stdin.send(ToPlugin::Tick { seq: self.tick_seq }.line());
+            }
+        }
     }
 
     fn failed(&mut self, id: &str, why: String, flash: bool) {
@@ -670,6 +716,49 @@ done
         std::fs::remove_dir_all(root).ok();
     }
 
+    const TICKER: &str = r#"#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    *'"type":"hello"'*) printf '%s\n' '{"type":"ready","contributions":{"pane":{"title":"Clock","rows":[{"text":"one","tone":"accent"}]}}}' ;;
+    *'"type":"tick"'*) printf '%s\n' '{"type":"pane","title":"Clock","rows":[{"text":"two","tone":"accent"}]}' ;;
+  esac
+done
+"#;
+
+    /// A manifest may ask for a heartbeat; the plugin then gets a `tick` and can replace its pane from it.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn a_manifest_that_asks_for_a_heartbeat_gets_ticks_and_can_refresh_its_pane() {
+        let root = temp("ticker");
+        let dir = root.join("ticker");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("plugin.sh"), TICKER).unwrap();
+        std::fs::write(
+            dir.join("plugin.json"),
+            r#"{"id":"ticker","name":"Ticker","apiVersion":1,"entry":["sh","plugin.sh"],"permissions":["read:visible"],"tickMs":250}"#,
+        )
+        .unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let host = Host::start(root.clone(), root.join("logs"), tx, false);
+
+        loop {
+            if let PluginEvent::Ready { contributions, .. } = next_plugin(&mut rx).await {
+                let pane = contributions.pane.expect("the ticker declared a pane");
+                assert_eq!(pane.rows[0].text, "one");
+                break;
+            }
+        }
+        loop {
+            if let PluginEvent::Pane { id, pane: Some(pane) } = next_plugin(&mut rx).await {
+                assert_eq!(id, "ticker");
+                assert_eq!(pane.rows[0].text, "two", "the heartbeat reached the plugin");
+                break;
+            }
+        }
+        host.shutdown();
+        std::fs::remove_dir_all(root).ok();
+    }
+
     #[tokio::test]
     #[cfg(unix)]
     async fn a_plugin_is_reloaded_when_its_files_change_and_a_broken_one_keeps_the_old() {
@@ -696,6 +785,43 @@ done
             }
         }
         assert!(reloaded, "the edited plugin was not reloaded");
+        host.shutdown();
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// The demo in `examples/plugins/clock` declares a pane and refreshes it from the heartbeat it asked for.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn the_clock_example_declares_a_pane_and_refreshes_it_on_the_heartbeat() {
+        let root = temp("clock");
+        let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/plugins/clock");
+        let dst = root.join("clock");
+        std::fs::create_dir_all(&dst).unwrap();
+        for file in ["plugin.json", "main.sh"] {
+            std::fs::copy(src.join(file), dst.join(file)).unwrap();
+        }
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let host = Host::start(root.clone(), root.join("logs"), tx, false);
+
+        loop {
+            if let PluginEvent::Ready { id, contributions, .. } = next_plugin(&mut rx).await {
+                assert_eq!(id, "clock");
+                let pane = contributions.pane.expect("the clock declares a pane");
+                assert_eq!(pane.title, "Clock");
+                assert_eq!(pane.rows.len(), 5, "the time is five rows of block digits");
+                let top = &pane.rows[0].text;
+                assert!(top.contains('█'), "the digits are drawn with block characters: {top:?}");
+                assert!(top.chars().count() <= 28, "and fit the channel column: {top:?}");
+                break;
+            }
+        }
+        loop {
+            if let PluginEvent::Pane { id, pane: Some(pane) } = next_plugin(&mut rx).await {
+                assert_eq!(id, "clock");
+                assert_eq!(pane.rows.len(), 5, "the heartbeat redrew the clock");
+                break;
+            }
+        }
         host.shutdown();
         std::fs::remove_dir_all(root).ok();
     }
