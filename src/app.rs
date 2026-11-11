@@ -116,6 +116,7 @@ pub enum Row {
 /// source of truth for what a `/command` does; this table only names them, and `the_palette_names_every_command_that_is_handled`
 /// keeps the two from drifting apart.
 pub const COMMANDS: &[(&str, &str)] = &[
+    ("archive", "archive this channel (search finds it again)"),
     ("c", "back to the channel"),
     ("copy", "copy message N to the clipboard"),
     ("delete", "delete your own message N (asks first)"),
@@ -194,6 +195,8 @@ pub enum Cmd {
     Search { query: String, seq: u64 },
     /// Write the last-read positions (channels and threads) to disk (the loop owns the file).
     SaveRead(ReadState),
+    /// Write the archived channel ids to disk (the loop owns the file).
+    SaveArchived(HashSet<String>),
     /// Work for the plugin runtime (start, reload, or send a command to a plugin process).
     Plugin(PluginCmd),
 }
@@ -261,6 +264,9 @@ pub struct App {
     /// Messages the reader forced unread with `u`, per channel: the message ids, kept apart from the frontiers because a mark is
     /// intent rather than a position — it survives the frontier moving past it and only `/read` clears it. Device-local.
     pub marks: HashMap<String, BTreeSet<String>>,
+    /// The channel ids the reader archived: kept out of the channel list, and brought back only from a search result. Like the
+    /// read positions this is per-user view state, not a relay concept, so it lives on this device (`archived.json`).
+    pub archived: HashSet<String>,
     /// Where each channel's last visit stopped, for the "new messages" line: taken from `read` as a channel is opened and kept
     /// while we stay in it, so reading on does not move the line under the reader.
     new_since: HashMap<String, u64>,
@@ -355,6 +361,7 @@ impl App {
             read: HashMap::new(),
             thread_read: HashMap::new(),
             marks: HashMap::new(),
+            archived: HashSet::new(),
             new_since: HashMap::new(),
             typing: HashMap::new(),
             flash: None,
@@ -414,23 +421,72 @@ impl App {
         matches!(self.view, View::Thread(_))
     }
 
-    /// The channel row the selection bar is on: the keyboard cursor while the channel list has focus, the channel on
-    /// screen otherwise. So the bar moves with the cursor and comes back to the open channel on leaving the list
-    /// without opening another one (see `set_focus`).
-    pub fn channel_bar(&self) -> Option<usize> {
-        if self.focus == Focus::Channels {
-            Some(self.chan_cursor)
-        } else {
-            self.cur
+    /// Whether a channel is archived: out of the channel list, and found again only by a search. `index` is a position in
+    /// `channels`, which still holds every channel, archived or not.
+    pub fn archived_at(&self, index: usize) -> bool {
+        self.channels.get(index).map(|c| self.archived.contains(&c.id)).unwrap_or(false)
+    }
+
+    /// Whether a channel is archived, by id.
+    pub fn is_archived(&self, id: &str) -> bool {
+        self.archived.contains(id)
+    }
+
+    /// The next channel index after `from` that the list draws, or `from` when there is none.
+    fn next_visible(&self, from: usize) -> usize {
+        (from + 1..self.channels.len()).find(|i| !self.archived_at(*i)).unwrap_or(from)
+    }
+
+    /// The previous channel index before `from` that the list draws, or `from` when there is none.
+    fn prev_visible(&self, from: usize) -> usize {
+        (0..from).rev().find(|i| !self.archived_at(*i)).unwrap_or(from)
+    }
+
+    /// The first channel index the list draws; 0 when it draws none.
+    fn first_visible(&self) -> usize {
+        (0..self.channels.len()).find(|i| !self.archived_at(*i)).unwrap_or(0)
+    }
+
+    /// The last channel index the list draws; 0 when it draws none.
+    fn last_visible(&self) -> usize {
+        (0..self.channels.len()).rev().find(|i| !self.archived_at(*i)).unwrap_or(0)
+    }
+
+    /// Keep the channel cursor on a row the list draws: when the channel under it is archived the cursor moves on to the
+    /// nearest one that is still there, so Up/Down and Enter keep working on what is on screen.
+    fn clamp_cursor(&mut self) {
+        if self.channels.is_empty() {
+            self.chan_cursor = 0;
+            return;
+        }
+        self.chan_cursor = self.chan_cursor.min(self.channels.len() - 1);
+        if self.archived_at(self.chan_cursor) {
+            let next = self.next_visible(self.chan_cursor);
+            self.chan_cursor = if next != self.chan_cursor { next } else { self.prev_visible(self.chan_cursor) };
+            if self.archived_at(self.chan_cursor) {
+                self.chan_cursor = self.first_visible();
+            }
         }
     }
 
+    /// The channel row the selection bar is on: the keyboard cursor while the channel list has focus, the channel on
+    /// screen otherwise. So the bar moves with the cursor and comes back to the open channel on leaving the list
+    /// without opening another one (see `set_focus`). An archived channel has no row, so it has no bar either.
+    pub fn channel_bar(&self) -> Option<usize> {
+        let bar = if self.focus == Focus::Channels { self.chan_cursor } else { self.cur? };
+        (!self.archived_at(bar)).then_some(bar)
+    }
+
     /// The channel list as drawn: `channels` is sorted by section, so a title goes in front of the first channel of each
-    /// non-empty section. Titles are not selectable: the cursor and `open_channel` only deal in channel indices.
+    /// non-empty section. Titles are not selectable: the cursor and `open_channel` only deal in channel indices. An archived
+    /// channel has no row, and a section whose channels are all archived has no title either.
     pub fn sidebar_rows(&self) -> Vec<SideRow> {
         let mut rows = Vec::with_capacity(self.channels.len() + 4);
         let mut last = None;
         for (i, c) in self.channels.iter().enumerate() {
+            if self.archived.contains(&c.id) {
+                continue;
+            }
             if last != Some(c.section) {
                 rows.push(SideRow::Title(c.section));
                 last = Some(c.section);
@@ -453,6 +509,7 @@ impl App {
     fn set_focus(&mut self, f: Focus) {
         if f != self.focus && (self.focus == Focus::Channels || f == Focus::Channels) {
             self.chan_cursor = self.cur.unwrap_or(0);
+            self.clamp_cursor();
         }
         self.focus = f;
     }
@@ -494,8 +551,10 @@ impl App {
         v.into_iter().map(|(pk, _)| self.name_of(pk)).collect()
     }
 
+    /// The unread badge total in the status bar. An archived channel has no row to show a count on, so it is left out of the
+    /// total too; its own count is kept, so bringing the channel back shows the unread it had.
     pub fn total_unread(&self) -> u32 {
-        self.unread.values().sum()
+        self.unread.iter().filter(|(id, _)| !self.archived.contains(*id)).map(|(_, n)| *n).sum()
     }
 
     // ---- read state ------------------------------------------------------------------------------------------------------
@@ -512,6 +571,11 @@ impl App {
         for id in channels {
             self.sync_mark_badge(&id);
         }
+    }
+
+    /// Take the archived channel ids loaded from disk; the loop fills this in before the first event, tests set it directly.
+    pub fn seed_archived(&mut self, ids: HashSet<String>) {
+        self.archived = ids;
     }
 
     /// The whole read state (the frontiers and the marks), for `Cmd::SaveRead`.
@@ -942,6 +1006,44 @@ impl App {
         cmds
     }
 
+    /// Archive a channel: it loses its row in the channel list (`sidebar_rows`), and only a search finds it again. Archiving
+    /// the channel on screen steps off it onto the next one the list still draws, so nothing open is left without a row.
+    fn archive(&mut self, index: usize) -> Vec<Cmd> {
+        let Some(id) = self.channels.get(index).map(|c| c.id.clone()) else { return Vec::new() };
+        if !self.archived.insert(id) {
+            return Vec::new();
+        }
+        let label = self.channels[index].label.clone();
+        let mut cmds = vec![Cmd::SaveArchived(self.archived.clone())];
+        self.flash(format!("archived {label} — Ctrl+F or /search finds it again"));
+        if self.cur == Some(index) {
+            let next = self.next_visible(index);
+            let target = if next != index { Some(next) } else { let prev = self.prev_visible(index); (prev != index).then_some(prev) };
+            match target {
+                Some(j) => cmds.extend(self.open_channel(j)),
+                None => {
+                    // The last channel there was: nothing left to open, and no row to keep the bar on.
+                    self.cur = None;
+                    self.layout = None;
+                    self.state = ListState::default();
+                }
+            }
+        }
+        self.clamp_cursor();
+        cmds
+    }
+
+    /// Bring an archived channel back into the list, from its search result; `None` when it was not archived.
+    fn unarchive(&mut self, index: usize) -> Option<Cmd> {
+        let id = self.channels.get(index)?.id.clone();
+        if !self.archived.remove(&id) {
+            return None;
+        }
+        let label = self.channels[index].label.clone();
+        self.flash(format!("{label} is back in the channel list"));
+        Some(Cmd::SaveArchived(self.archived.clone()))
+    }
+
     fn open_thread(&mut self, root: String) -> Vec<Cmd> {
         let Some(c) = self.channel() else { return Vec::new() };
         let channel = c.id.clone();
@@ -1176,6 +1278,7 @@ impl App {
         self.channels = list;
         self.cur = open_id.and_then(|id| self.channels.iter().position(|c| c.id == id));
         self.chan_cursor = cursor_id.and_then(|id| self.channels.iter().position(|c| c.id == id)).unwrap_or(0).min(self.channels.len().saturating_sub(1));
+        self.clamp_cursor();
         let ids: Vec<String> = self.channels.iter().map(|c| c.id.clone()).collect();
         let mut cmds = Vec::new();
         if ids != old_ids {
@@ -1195,11 +1298,15 @@ impl App {
             }
         }
         if self.cur.is_none() && !self.channels.is_empty() {
-            let first = self.channels.iter().position(|c| !c.is_dm()).unwrap_or(0);
-            cmds.extend(self.open_channel(first));
-            // the first channel is opened so its messages are on screen, but the keyboard stays on the channel list:
-            // that is where a fresh start is expected to be, and Escape comes back here from the message list.
-            self.set_focus(Focus::Channels);
+            // The first channel the list still draws: an archived one has no row to open from, so it is not picked here.
+            let visible = |c: &Channel| !self.archived.contains(&c.id);
+            let first = self.channels.iter().position(|c| !c.is_dm() && visible(c)).or_else(|| self.channels.iter().position(visible));
+            if let Some(first) = first {
+                cmds.extend(self.open_channel(first));
+                // the first channel is opened so its messages are on screen, but the keyboard stays on the channel list:
+                // that is where a fresh start is expected to be, and Escape comes back here from the message list.
+                self.set_focus(Focus::Channels);
+            }
         }
         // The stored read position says where each channel was left; ask the relay how much arrived since, once per run. The
         // open channel's own position was advanced by opening it, so only the others are asked: its count would be thrown away.
@@ -1448,15 +1555,17 @@ impl App {
 
     fn key_channels(&mut self, k: KeyEvent) -> Vec<Cmd> {
         match k.code {
-            KeyCode::Up => self.chan_cursor = self.chan_cursor.saturating_sub(1),
-            KeyCode::Down => self.chan_cursor = (self.chan_cursor + 1).min(self.channels.len().saturating_sub(1)),
-            KeyCode::Home => self.chan_cursor = 0,
-            KeyCode::End => self.chan_cursor = self.channels.len().saturating_sub(1),
+            KeyCode::Up => self.chan_cursor = self.prev_visible(self.chan_cursor),
+            KeyCode::Down => self.chan_cursor = self.next_visible(self.chan_cursor),
+            KeyCode::Home => self.chan_cursor = self.first_visible(),
+            KeyCode::End => self.chan_cursor = self.last_visible(),
             KeyCode::Enter => {
                 let cmds = self.open_channel(self.chan_cursor);
                 self.set_focus(Focus::Messages);
                 return cmds;
             }
+            // Archive the channel under the bar; search is how it comes back.
+            KeyCode::Char('x') => return self.archive(self.chan_cursor),
             _ => {}
         }
         Vec::new()
@@ -1749,6 +1858,13 @@ impl App {
             "refresh" => self.refresh(),
             "more" => self.load_older(),
             "read" => self.mark_read_command(arg),
+            "archive" => match self.cur {
+                Some(i) => self.archive(i),
+                None => {
+                    self.flash("usage: /archive (open the channel you want to archive first)");
+                    Vec::new()
+                }
+            },
             "search" => {
                 self.open_search(arg.to_owned());
                 if arg.chars().count() >= 2 {
@@ -2473,7 +2589,12 @@ impl App {
         self.overlay = Overlay::None;
         match row {
             Row::Channel(i) => {
-                let cmds = self.open_channel(i);
+                // An archived channel's row is its unarchive: Enter brings it back, then opens it.
+                let mut cmds = Vec::new();
+                if let Some(cmd) = self.unarchive(i) {
+                    cmds.push(cmd);
+                }
+                cmds.extend(self.open_channel(i));
                 self.set_focus(Focus::Messages);
                 cmds
             }

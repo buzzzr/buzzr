@@ -7,6 +7,10 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
 
 ### Added
 
+- `x` on the channel list archives the channel under the cursor (`/archive` archives the channel you are in): it drops out of the
+  list without leaving it, so the relay membership and the read position are untouched. Ctrl+F or `/search` still matches it, its
+  row says `archived`, and Enter brings it back and opens it. The archive set lives in `archived.json` next to the read positions
+  and survives a restart; an archived channel keeps its unread count but is left out of the status line's total.
 - Typing `/` in the input shows a slash-command palette above it: the list narrows to the commands whose name starts with
   what has been typed, Enter runs the command on the cursor line, and Tab fills its name in for one that takes an argument.
   The commands loaded plugins registered appear in the list too.

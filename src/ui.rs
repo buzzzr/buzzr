@@ -468,7 +468,10 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         spans.extend(key_hint("esc", "Close"));
     } else {
         match app.focus {
-            Focus::Channels => spans.extend(key_hint("⏎", "Open channel")),
+            Focus::Channels => {
+                spans.extend(key_hint("⏎", "Open channel"));
+                spans.extend(key_hint("x", "Archive"));
+            }
             Focus::Messages => {
                 spans.extend(key_hint("⏎", if app.in_thread() { "Reply" } else { "Open thread" }));
                 spans.extend(key_hint("r", "Reply"));
@@ -515,6 +518,7 @@ pub const KEYS: &[(&str, &str)] = &[
     ("Channels", ""),
     ("Up / Down, Home / End", "move"),
     ("Enter", "open the channel"),
+    ("x", "archive the channel (it leaves the list; search finds it again)"),
     ("", ""),
     ("Messages", ""),
     ("Up / Down", "select a message (Up at the top loads older)"),
@@ -596,6 +600,8 @@ pub const HELP: &[&str] = &[
     "  /update     how to upgrade this copy (brew, cargo or the release page)",
     "A newer release shows up in the status line (BUZZR_NO_UPDATE_CHECK=1 turns the once-a-day check off).",
     "  /read       mark this channel read     /read all   mark every channel read",
+    "  /archive    archive this channel (`x` in the list): it leaves the list, and Ctrl+F or /search finds it again",
+    "An archived channel is still loaded and still counts unread; only the list hides it. Enter on its search result brings it back.",
     "Typing `/` lists the commands above the input: keep typing to narrow them, Enter runs the one on the cursor, and Tab",
     "fills its name in for a command that takes an argument (the list holds anything plugins added too).",
     "Unread survives a restart: it comes from the last-read position per channel and per thread in",
@@ -706,7 +712,11 @@ fn draw_search(f: &mut Frame, app: &App, area: Rect) {
             Row::Channel(c) => {
                 let ch = &app.channels[*c];
                 spans.push(Span::styled(if ch.is_dm() { ch.label.clone() } else { format!("# {}", ch.label) }, Style::default().fg(crate::theme::get().accent).add_modifier(Modifier::BOLD)));
-                spans.push(Span::styled("  channel", dim()));
+                if app.is_archived(&ch.id) {
+                    spans.push(Span::styled("  archived · Enter brings it back", dim()));
+                } else {
+                    spans.push(Span::styled("  channel", dim()));
+                }
             }
             Row::Person(pk) => {
                 spans.push(Span::styled(app.name_of(pk), Style::default().fg(crate::theme::get().accent).add_modifier(Modifier::BOLD)));
@@ -1237,6 +1247,28 @@ mod tests {
     }
 
     #[test]
+    fn an_archived_channel_leaves_the_sidebar_and_its_search_row_offers_it_back() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        let mut app = app();
+        app.seed_archived(["c2".to_owned()].into_iter().collect());
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(s.contains("general"), "the channel that is not archived is still listed\n{s}");
+        assert!(!s.contains("random"), "an archived channel has no row in the list\n{s}");
+
+        // Ctrl+F still finds it, and its row says what Enter does
+        app.handle(AppEvent::Key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL)));
+        for c in "ran".chars() {
+            app.handle(AppEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)));
+        }
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(s.contains("# random"), "search still finds it\n{s}");
+        assert!(s.contains("archived · Enter brings it back"), "and its row offers it back\n{s}");
+    }
+
+    #[test]
     fn it_survives_tiny_terminals() {
         for (w, h) in [(20, 6), (1, 1), (40, 3), (200, 5)] {
             let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
@@ -1300,7 +1332,7 @@ mod tests {
         let s = screen(&term).join("\n");
         assert!(s.contains("Commands · Enter runs · Tab completes"), "the palette opens with a title that names the keys\n{s}");
         assert!(s.contains("/help") && s.contains("the commands and how things work"), "and lists a command with what it does\n{s}");
-        assert!(s.contains("/q") && s.contains("quit buzzr"), "the list is scrolled from the first row\n{s}");
+        assert!(s.contains("/archive") && s.contains("archive this channel"), "the list is scrolled from the first row\n{s}");
         assert!(s.contains("Run") && s.contains("Complete"), "the footer follows the palette\n{s}");
 
         // typing narrows the list to the commands that still match

@@ -1367,6 +1367,147 @@ fn opening_a_search_hit_goes_to_its_channel_and_selects_the_message() {
     assert_eq!(app.overlay, Overlay::Search);
 }
 
+// ---- archiving a channel -----------------------------------------------------------------------------------------------------
+
+#[test]
+fn archiving_takes_the_channel_out_of_the_list_and_saves_the_set() {
+    let mut app = app_with(1);
+    app.set_focus(Focus::Channels);
+    while app.channels[app.chan_cursor].id != "c1" {
+        app.handle(key(KeyCode::Down));
+    }
+    let cmds = app.handle(key(KeyCode::Char('x')));
+    assert!(app.is_archived("c1"));
+    assert!(cmds.iter().any(|c| matches!(c, Cmd::SaveArchived(ids) if ids.contains("c1"))), "the set goes to disk: {cmds:?}");
+    assert_eq!(side(&app), ["# Channels", "random", "# DMs", "DM"], "the row is gone");
+    assert!(app.channels.iter().any(|c| c.id == "c1"), "but the channel is still loaded");
+}
+
+#[test]
+fn a_section_whose_channels_are_all_archived_keeps_no_title() {
+    let mut app = sectioned_app();
+    app.seed_archived(["s1".to_owned(), "s2".to_owned()].into_iter().collect());
+    assert_eq!(side(&app), ["# Channels", "general", "random", "team", "# DMs", "DM"], "the emptied Solo section is gone too");
+}
+
+#[test]
+fn x_archives_the_channel_under_the_bar_not_the_open_one() {
+    let mut app = app_with(1);
+    assert_eq!(app.channel().map(|c| c.id.as_str()), Some("c1"), "general is open");
+    app.set_focus(Focus::Channels);
+    app.handle(key(KeyCode::End)); // the DM
+    assert_eq!(app.channels[app.chan_cursor].id, "dm1");
+    app.handle(key(KeyCode::Char('x')));
+    assert!(app.is_archived("dm1"));
+    assert!(!app.is_archived("c1"), "the open channel is untouched");
+    assert_eq!(app.channel().map(|c| c.id.as_str()), Some("c1"));
+    assert_eq!(app.channels[app.chan_cursor].id, "c2", "the cursor steps off the row it removed");
+}
+
+#[test]
+fn archiving_the_open_channel_opens_the_next_one_the_list_still_draws() {
+    let mut app = app_with(3);
+    assert_eq!(app.channel().map(|c| c.id.as_str()), Some("c1"), "general is open");
+    let cmds = app.archive(0);
+    assert!(app.is_archived("c1"));
+    assert_eq!(app.channel().map(|c| c.id.as_str()), Some("c2"), "random takes over");
+    assert!(cmds.contains(&Cmd::LoadWindow { channel: "c2".into(), cursor: None }));
+    assert_eq!(app.channel_bar(), Some(1));
+}
+
+#[test]
+fn archiving_the_last_channel_leaves_nothing_open() {
+    let mut app = App::new(ME.into(), false, chrono_tz::UTC);
+    app.handle(AppEvent::Channels(Ok(vec![chan("c1", "general")])));
+    assert_eq!(app.channel().map(|c| c.id.as_str()), Some("c1"));
+    app.set_focus(Focus::Channels);
+    let cmds = app.handle(key(KeyCode::Char('x')));
+    assert!(app.is_archived("c1"));
+    assert!(app.channel().is_none(), "nothing is left to show");
+    assert_eq!(app.channel_bar(), None, "and no row to keep the bar on");
+    assert!(cmds.iter().any(|c| matches!(c, Cmd::SaveArchived(_))));
+}
+
+#[test]
+fn an_archived_channel_is_left_out_of_the_unread_total_but_keeps_its_count() {
+    let mut app = app_with(2);
+    app.handle(AppEvent::Live(Live::Event(msg("x1", 9000, "alice", "hey", &[&["h", "c2"]]))));
+    assert_eq!(app.total_unread(), 1);
+    app.seed_archived(["c2".to_owned()].into_iter().collect());
+    assert_eq!(app.total_unread(), 0, "no row to show it on, so it is not in the total");
+    assert_eq!(app.unread.get("c2"), Some(&1), "the count is kept for when it comes back");
+}
+
+#[test]
+fn a_search_result_brings_an_archived_channel_back_and_opens_it() {
+    let mut app = app_with(1);
+    app.seed_archived(["c2".to_owned()].into_iter().collect());
+    assert!(side(&app).iter().all(|r| r != "random"), "its row is gone");
+    app.handle(AppEvent::Key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL)));
+    for c in "rand".chars() {
+        app.handle(key(KeyCode::Char(c)));
+    }
+    let rows = app.search_rows();
+    assert!(matches!(rows.as_slice(), [Row::Channel(i)] if app.channels[*i].id == "c2"), "search still finds it");
+    app.search.asked = "rand".into(); // it has been searched: Enter opens the row
+    let cmds = app.handle(key(KeyCode::Enter));
+    assert!(!app.is_archived("c2"), "Enter brings it back");
+    assert_eq!(app.channel().map(|c| c.id.as_str()), Some("c2"), "and opens it");
+    assert!(cmds.iter().any(|c| matches!(c, Cmd::SaveArchived(_))), "the change is written: {cmds:?}");
+    assert!(side(&app).iter().any(|r| r == "random"), "its row is back");
+}
+
+#[test]
+fn the_search_row_opens_on_enter_after_a_real_relay_search() {
+    // The whole path the user takes: Ctrl+F, type a name, let the debounce ask the relay, then Enter. The
+    // first Enter after a fresh query asks the relay instead of opening, so this checks the row opens once
+    // the answer is in.
+    let mut app = app_with(1);
+    app.seed_archived(["c2".to_owned()].into_iter().collect());
+    app.handle(AppEvent::Key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL)));
+    for c in "rand".chars() {
+        app.handle(key(KeyCode::Char(c)));
+    }
+    app.search.edited_at -= Duration::from_secs(1);
+    let cmds = app.handle(AppEvent::Tick);
+    assert!(matches!(cmds.as_slice(), [Cmd::Search { query, .. }] if query == "rand"), "the debounce asks: {cmds:?}");
+    app.handle(AppEvent::Search { seq: 1, result: Ok(vec![]) });
+    let cmds = app.handle(key(KeyCode::Enter));
+    assert_eq!(app.overlay, Overlay::None, "Enter opens the row rather than asking again");
+    assert!(!app.is_archived("c2"));
+    assert_eq!(app.channel().map(|c| c.id.as_str()), Some("c2"));
+    assert!(cmds.iter().any(|c| matches!(c, Cmd::SaveArchived(_))));
+}
+
+#[test]
+fn the_archive_command_archives_the_channel_you_are_in() {
+    let mut app = at_input(1);
+    type_text(&mut app, "/archive");
+    let cmds = press(&mut app, KeyCode::Enter);
+    assert!(app.is_archived("c1"), "the channel on screen is archived");
+    assert!(cmds.iter().any(|c| matches!(c, Cmd::SaveArchived(_))));
+}
+
+#[test]
+fn archive_with_no_channel_open_says_what_to_do() {
+    let mut app = App::new(ME.into(), false, chrono_tz::UTC);
+    app.focus = Focus::Input;
+    type_text(&mut app, "/archive");
+    let cmds = press(&mut app, KeyCode::Enter);
+    assert!(cmds.is_empty());
+    assert!(app.flash_text().unwrap().contains("open the channel you want to archive first"));
+}
+
+#[test]
+fn a_fresh_start_opens_the_first_channel_that_is_not_archived() {
+    let mut app = App::new(ME.into(), false, chrono_tz::UTC);
+    app.seed_archived(["c1".to_owned()].into_iter().collect());
+    app.handle(AppEvent::Channels(Ok(vec![chan("c1", "general"), chan("c2", "random")])));
+    assert_eq!(app.channel().map(|c| c.id.as_str()), Some("c2"), "the archived first channel is skipped");
+    assert_eq!(app.chan_cursor, 1, "and the cursor never rests on an archived row");
+    assert_eq!(app.focus, Focus::Channels);
+}
+
 // ---- plugins ------------------------------------------------------------------------------------------------------------
 
 fn ready(id: &str, name: &str, cmd: &str) -> AppEvent {
