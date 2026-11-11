@@ -41,6 +41,8 @@
   next time and a `new messages` line shows where you left off. `u` marks a message unread until you `/read` the channel.
 - **Threads.** A channel shows top-level messages only, as the Buzz app does, each with its reply count and the time of the last reply;
   a thread with replies since you last opened it shows `● 2 new`. Enter opens a thread (and reads it), Esc returns to the same place.
+  The channel list keeps the two kinds of unread apart as well: unseen messages count as `(2)`, unseen replies inside a thread show as
+  `●`, and a channel with both shows `(2) *`.
 - **Live.** New messages, edits, deletions, reactions, reply counts and `Bob is typing…` arrive as they happen. If the connection
   drops, buzzr reconnects and reloads.
 - **Reads like a chat.** Markdown (bold, italic, lists, code, quotes, headings), clickable links, reactions, and edited messages say so.
@@ -141,7 +143,10 @@ values and skip the questions (for scripts and containers; the key is never acce
 The full behaviour, for when the feature list above is not enough.
 
 - **Channels and DMs** on the left (a DM is labelled with the other person, `@name`), with unread counts. An open channel is
-  marked `#`, a private (restricted) one `*` and a DM `@`; all three are ASCII, so no terminal font can fail to draw them. The selected channel has a full-width grey tint and a bar on
+  marked `#`, a private (restricted) one `*` and a DM `@`; all three are ASCII, so no terminal font can fail to draw them. A
+  channel with unseen messages shows their count (`(2)`); one whose only unseen news is inside a thread shows `●` instead, since
+  a reply is not a timeline row and a count for it could never be cleared by opening the channel; a channel with both shows
+  `(2) *`. The selected channel has a full-width grey tint and a bar on
   the left, like the selected message; the bar is the accent colour while the list has focus and grey when it does not, so the accent
   marks where the focus is. The bar sits on the channel on screen; while the list has focus it follows the cursor, and leaving the
   list without opening a channel puts it back. The keyboard starts on the channel list, so Up/Down and Enter work as soon as buzzr opens.
@@ -151,7 +156,10 @@ The full behaviour, for when the feature list above is not enough.
   and a `new messages` line marks where the unseen ones begin. Opening a channel marks it read; `/read` does it again and
   `/read all` clears every channel and its threads. `u` on a message goes the other way: it forces *that* message unread on
   this device, so the badge and the `new messages` line come back above it. Unlike the position, a mark is not moved on by
-  reading: it works on a message of your own too, and only `/read` clears it.
+  reading: it works on a message of your own too, and only `/read` clears it. The channel list tells the two kinds of unread
+  apart: `(2)` is unseen top-level messages, `●` is unseen replies inside a thread, and `(2) *` is both. The `●` needs the
+  channel's messages loaded, because the news it stands for is inside a thread — the count a relay answers on startup is about
+  the timeline only.
 - **Archive a channel:** `x` on the list keeps a channel out of it, without leaving it — leaving changes your membership on the
   relay and loses your place. An archived channel is still loaded and still counts unread, but it is left out of the status line's
   unread total, so no badge points at a row you cannot see. Ctrl+F (or `/search`) still matches it; its row says `archived`, and

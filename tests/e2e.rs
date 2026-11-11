@@ -954,22 +954,27 @@ fn a_thread_with_replies_since_the_last_visit_is_marked_unread_on_its_message() 
 }
 
 #[test]
-fn a_thread_reply_is_not_counted_as_a_channel_unread() {
-    let Some(relay) = relay_or_skip("a_thread_reply_is_not_counted_...") else { return };
-    // #general carries a thread with two replies, both newer than its own message. Open the channel once,
-    // which reads its timeline and stores where the channel was left, then restart on that state.
+fn a_thread_reply_marks_its_channel_with_a_circle_not_a_count() {
+    let Some(relay) = relay_or_skip("a_thread_reply_marks_its_channel_...") else { return };
+    // #general carries a thread with two replies, both newer than its own message. Read the channel and its
+    // thread once (so both positions are stored), then restart with the thread position far in the past: only
+    // the replies are unread, and nothing on the channel's own timeline is.
     let first = session(&relay);
     first.press_all(&["down", "down", "enter"]);
     first.expect("the general channel", "hello from c-general");
+    first.press("enter"); // open the thread, which records its own read position
+    first.expect("the thread view", "the sidebar keeps a fixed order");
     let stored = wait_for_stored_channel(&first.config.join("read-state.json"), "c-general");
+    let root = wait_for_stored_thread(&first.config.join("read-state.json"));
+    let at = stored_position(&stored, "c-general");
     let config = first.config.clone();
     drop(first); // kills the app and clears the config directory
     std::fs::create_dir_all(&config).unwrap();
-    std::fs::write(config.join("read-state.json"), stored).unwrap();
+    std::fs::write(config.join("read-state.json"), format!("{{\"channels\":{{\"c-general\":{at}}},\"threads\":{{\"{root}\":1}}}}")).unwrap();
 
     let s = session_in(&relay, config);
-    // #design opens on start, so #general is off screen and its count is asked from the relay. Nothing arrived
-    // on its timeline since it was read, so it carries no badge: the thread replies are not channel rows.
+    // #design opens on start, so #general is off screen and its count is asked from the relay. Nothing arrived on
+    // its timeline, so it is not a *counted* unread — a thread reply is not a channel row.
     s.expect("the channel list", "#general");
     std::thread::sleep(Duration::from_millis(800)); // long enough for a startup count to arrive if one were coming
     let screen = s.screen();
@@ -978,6 +983,30 @@ fn a_thread_reply_is_not_counted_as_a_channel_unread() {
         "a thread reply must not count as a channel unread:\n{}\n{screen}",
         ruler()
     );
+    // Open the channel: the message list marks the thread, and the channel row now says the same thing — one circle,
+    // still no count.
+    s.press_all(&["down", "down", "enter"]);
+    s.expect("the general channel", "hello from c-general");
+    s.expect("the thread's own mark", "● 2 new");
+    let screen = s.until("the channel row's circle", |sc| sidebar(sc).iter().any(|row| row == "#general ●"));
+    assert!(
+        !sidebar(&screen).iter().any(|row| row.starts_with("#general (")),
+        "the row carries the circle without a count:\n{screen}"
+    );
+    // Reading the thread clears both markers together.
+    s.press("enter");
+    s.expect("the thread view", "the sidebar keeps a fixed order");
+    s.press("esc");
+    s.expect_gone("the thread's message mark", "● 2 new");
+    s.until("the channel row's circle to clear", |sc| !sidebar(sc).iter().any(|row| row == "#general ●"));
+}
+
+/// The `created_at` stored for `channel` in a `read-state.json` body (the file is pretty-printed, so the value is after
+/// the key's colon and some whitespace).
+fn stored_position(text: &str, channel: &str) -> u64 {
+    let needle = format!("\"{channel}\"");
+    let i = text.find(&needle).expect("the channel is in the read state") + needle.len();
+    text[i..].chars().skip_while(|c| *c == ':' || c.is_ascii_whitespace()).take_while(char::is_ascii_digit).collect::<String>().parse().expect("a position")
 }
 
 /// The whole `read-state.json` once it records a position for `channel`, waiting for the file to appear.
