@@ -1367,6 +1367,176 @@ fn opening_a_search_hit_goes_to_its_channel_and_selects_the_message() {
     assert_eq!(app.overlay, Overlay::Search);
 }
 
+// ---- inviting people --------------------------------------------------------------------------------------------------------
+
+/// `(me, bob)` as the channel's members and Bob's display name, ready for a mention to be resolved against.
+fn c1_members(app: &mut App) {
+    app.handle(AppEvent::Members { channel: "c1".into(), result: Ok(vec![(ME.into(), "owner".into()), (BOB.into(), "member".into())]) });
+}
+
+#[test]
+fn invite_adds_someone_to_the_channel_and_refreshes_the_member_list() {
+    let alice = "aa".repeat(32);
+    let mut app = app_with(1);
+    c1_members(&mut app);
+    app.handle(AppEvent::Names(Ok([(BOB.into(), "Bob".into()), (alice.clone(), "Alice".into())].into())));
+    app.focus = Focus::Input;
+    type_text(&mut app, "/invite Alice");
+    let cmds = press(&mut app, KeyCode::Enter);
+    assert_eq!(cmds, vec![Cmd::Invite { channel: "c1".into(), pubkey: alice.clone(), dm: false }]);
+    assert_eq!(app.flash_text(), Some("inviting Alice to #general…"));
+    // the relay answers: the cached member list is stale, so it is dropped and asked for again
+    let cmds = app.handle(AppEvent::Invited { channel: "c1".into(), pubkey: alice.clone(), result: Ok(()) });
+    assert_eq!(cmds, vec![Cmd::LoadMembers { channel: "c1".into() }]);
+    assert!(!app.members.contains_key("c1"), "the old list is gone before the fresh one arrives");
+    assert_eq!(app.flash_text(), Some("invited Alice"));
+    // a refused invite is reported, not swallowed
+    app.focus = Focus::Input;
+    type_text(&mut app, "/invite Alice");
+    press(&mut app, KeyCode::Enter);
+    app.handle(AppEvent::Invited { channel: "c1".into(), pubkey: alice.clone(), result: Err("not a relay member".into()) });
+    assert!(app.flash_text().unwrap().contains("could not invite: not a relay member"));
+}
+
+#[test]
+fn invite_reports_a_member_an_unknown_name_and_read_only_mode() {
+    let mut app = app_with(1);
+    c1_members(&mut app);
+    app.handle(AppEvent::Names(Ok([(BOB.into(), "Bob".into())].into())));
+    app.focus = Focus::Input;
+    type_text(&mut app, "/invite Bob");
+    assert!(press(&mut app, KeyCode::Enter).is_empty());
+    assert_eq!(app.flash_text(), Some("Bob is already in #general"));
+    type_text(&mut app, "/invite nobody");
+    assert!(press(&mut app, KeyCode::Enter).is_empty());
+    assert!(app.flash_text().unwrap().contains("nobody here is called nobody"));
+    type_text(&mut app, "/invite");
+    assert!(press(&mut app, KeyCode::Enter).is_empty());
+    assert!(app.flash_text().unwrap().starts_with("usage: /invite"));
+    let mut ro = app_with(1);
+    ro.read_only = true;
+    assert!(ro.invite(BOB).is_empty());
+    assert!(ro.flash_text().unwrap().contains("read-only"));
+}
+
+#[test]
+fn inviting_the_group_dm_uses_the_dm_event() {
+    let alice = "aa".repeat(32);
+    let mut app = app_with(1);
+    let dm = app.channels.iter().position(|c| c.id == "dm1").unwrap();
+    app.open_channel(dm);
+    app.handle(AppEvent::Members { channel: "dm1".into(), result: Ok(vec![(ME.into(), "member".into()), (BOB.into(), "member".into())]) });
+    app.handle(AppEvent::Names(Ok([(alice.clone(), "Alice".into())].into())));
+    app.focus = Focus::Input;
+    type_text(&mut app, "/invite Alice");
+    let cmds = press(&mut app, KeyCode::Enter);
+    assert_eq!(cmds, vec![Cmd::Invite { channel: "dm1".into(), pubkey: alice.clone(), dm: true }], "a DM adds to the conversation, not to a NIP-29 group");
+}
+
+#[test]
+fn a_mention_of_someone_outside_the_channel_asks_first_and_y_invites_then_sends() {
+    let alice = "aa".repeat(32);
+    let mut app = app_with(3);
+    c1_members(&mut app);
+    app.handle(AppEvent::Names(Ok([(BOB.into(), "Bob".into()), (alice.clone(), "Alice".into())].into())));
+    press(&mut app, KeyCode::Tab); // messages -> input
+    type_text(&mut app, "hey @Alice can you look");
+    assert!(press(&mut app, KeyCode::Enter).is_empty(), "nothing goes out until the question is answered");
+    assert_eq!(app.invite_prompt().as_deref(), Some("Invite Alice to #general? y invites and sends, n just sends, Esc cancels"));
+    assert!(app.editor.is_empty(), "the message is held, not left in the input");
+    // `y`: the message goes out with Alice named in it, and the invite goes with it
+    let cmds = press(&mut app, KeyCode::Char('y'));
+    assert_eq!(
+        cmds,
+        vec![
+            Cmd::Send { channel: "c1".into(), text: "hey @Alice can you look".into(), root: None, mentions: vec![alice.clone()] },
+            Cmd::Invite { channel: "c1".into(), pubkey: alice.clone(), dm: false },
+        ]
+    );
+    assert!(app.confirm_invite.is_none());
+    assert_eq!(app.flash_text(), Some("inviting Alice to #general"));
+}
+
+#[test]
+fn a_mention_of_someone_outside_the_channel_can_be_sent_without_inviting() {
+    let alice = "aa".repeat(32);
+    let mut app = app_with(3);
+    c1_members(&mut app);
+    app.handle(AppEvent::Names(Ok([(alice.clone(), "Alice".into())].into())));
+    press(&mut app, KeyCode::Tab);
+    type_text(&mut app, "@Alice ping");
+    assert!(press(&mut app, KeyCode::Enter).is_empty());
+    let cmds = press(&mut app, KeyCode::Char('n'));
+    assert_eq!(cmds, vec![Cmd::Send { channel: "c1".into(), text: "@Alice ping".into(), root: None, mentions: vec![] }], "no invite, and nobody to notify");
+    assert_eq!(app.flash_text(), Some("sent without inviting Alice"));
+}
+
+#[test]
+fn escape_keeps_a_held_message_in_the_input() {
+    let alice = "aa".repeat(32);
+    let mut app = app_with(3);
+    c1_members(&mut app);
+    app.handle(AppEvent::Names(Ok([(alice.clone(), "Alice".into())].into())));
+    press(&mut app, KeyCode::Tab);
+    type_text(&mut app, "@Alice, thoughts?");
+    assert!(press(&mut app, KeyCode::Enter).is_empty());
+    assert!(press(&mut app, KeyCode::Esc).is_empty());
+    assert!(app.confirm_invite.is_none());
+    assert_eq!(app.editor.text(), "@Alice, thoughts?", "the text comes back so it can be changed");
+    assert_eq!(app.focus, Focus::Input);
+    assert_eq!(app.flash_text(), Some("not sent"));
+}
+
+#[test]
+fn a_held_message_keeps_the_thread_it_was_written_in() {
+    let alice = "aa".repeat(32);
+    let mut app = app_with(3);
+    app.handle(AppEvent::Members { channel: "c1".into(), result: Ok(vec![(ME.into(), "owner".into())]) });
+    app.handle(AppEvent::Names(Ok([(alice.clone(), "Alice".into())].into())));
+    app.open_thread("m000".into());
+    press(&mut app, KeyCode::Tab); // messages -> input
+    type_text(&mut app, "in here @Alice");
+    assert!(press(&mut app, KeyCode::Enter).is_empty());
+    assert_eq!(app.confirm_invite.as_ref().unwrap().root.as_deref(), Some("m000"));
+    let cmds = press(&mut app, KeyCode::Char('y'));
+    assert!(matches!(cmds.as_slice(), [Cmd::Send { root: Some(r), .. }, Cmd::Invite { .. }] if r == "m000"));
+}
+
+#[test]
+fn mentioning_a_member_never_asks_and_nothing_is_asked_before_the_member_list_loads() {
+    let alice = "aa".repeat(32);
+    // Bob is a member: naming him is an ordinary mention, even though Alice's name is known and she is not a member
+    let mut app = app_with(3);
+    c1_members(&mut app);
+    app.handle(AppEvent::Names(Ok([(BOB.into(), "Bob".into()), (alice.clone(), "Alice".into())].into())));
+    press(&mut app, KeyCode::Tab);
+    type_text(&mut app, "hi @Bob and @Bobby");
+    let cmds = press(&mut app, KeyCode::Enter);
+    assert_eq!(cmds, vec![Cmd::Send { channel: "c1".into(), text: "hi @Bob and @Bobby".into(), root: None, mentions: vec![BOB.into()] }]);
+    assert!(app.confirm_invite.is_none());
+    // no member list yet: there is nothing to compare against, so the message simply goes
+    let mut fresh = app_with(1);
+    fresh.handle(AppEvent::Names(Ok([(alice.clone(), "Alice".into())].into())));
+    fresh.focus = Focus::Input;
+    type_text(&mut fresh, "@Alice hello");
+    assert!(matches!(press(&mut fresh, KeyCode::Enter).as_slice(), [Cmd::Send { .. }]));
+    assert!(fresh.confirm_invite.is_none());
+}
+
+#[test]
+fn a_dm_never_asks_to_invite_a_mentioned_outsider() {
+    let alice = "aa".repeat(32);
+    let mut app = app_with(1);
+    let dm = app.channels.iter().position(|c| c.id == "dm1").unwrap();
+    app.open_channel(dm);
+    app.handle(AppEvent::Members { channel: "dm1".into(), result: Ok(vec![(ME.into(), "member".into()), (BOB.into(), "member".into())]) });
+    app.handle(AppEvent::Names(Ok([(alice.clone(), "Alice".into())].into())));
+    press(&mut app, KeyCode::Tab);
+    type_text(&mut app, "@Alice hi");
+    assert!(matches!(press(&mut app, KeyCode::Enter).as_slice(), [Cmd::Send { .. }]), "a DM is a conversation, not a room to join");
+    assert!(app.confirm_invite.is_none());
+}
+
 // ---- archiving a channel -----------------------------------------------------------------------------------------------------
 
 #[test]

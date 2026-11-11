@@ -272,6 +272,11 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         f.render_widget(Paragraph::new(prompt).alignment(Alignment::Right), area);
         return;
     }
+    if let Some(prompt) = app.invite_prompt() {
+        let prompt = Span::styled(prompt, Style::default().fg(crate::theme::get().warn).add_modifier(Modifier::BOLD));
+        f.render_widget(Paragraph::new(prompt).alignment(Alignment::Right), area);
+        return;
+    }
     let text = if let Some(t) = app.flash_text() {
         t.to_owned()
     } else if app.reply_target.is_some() {
@@ -524,6 +529,11 @@ pub const KEYS: &[(&str, &str)] = &[
     ("Ctrl+A / E, Ctrl+W / U / K", "line start / end, kill word / to start / to end"),
     ("Alt+Backspace", "delete the word before the cursor"),
     ("Ctrl+← →, Alt+B / F", "move by word"),
+    ("", ""),
+    ("Invite prompt (a message mentions someone who is not in the channel)", ""),
+    ("y", "invite them, then send the message"),
+    ("n", "send the message without inviting them"),
+    ("Esc", "keep the message in the input"),
 ];
 
 fn draw_keys(f: &mut Frame, body: Rect) {
@@ -555,6 +565,7 @@ pub const HELP: &[&str] = &[
     "  /help       this screen                /q   quit",
     "  /edit N     edit your message N        /delete N   delete your message N (asks first)",
     "  /whois NAME their profile             /dm NAME   start (or open) a DM",
+    "  /invite NAME   add them to this channel (or the group DM you are in)",
     "  /search text   search                  /new [private] name [about]   create a channel",
     "  /plugins    what is loaded, and the commands plugins added",
     "  /update     how to upgrade this copy (brew, cargo or the release page)",
@@ -568,6 +579,8 @@ pub const HELP: &[&str] = &[
     "~/.config/buzzr/read-state.json, and a \"new messages\" line marks where new messages start.",
     "Search (Ctrl+F): channel names, people and full-text message search; Enter opens the result — a person starts a DM.",
     "A person is found by the name in their profile, or by their npub (hex or npub1…): /dm and /whois take either.",
+    "Mentioning `@name` someone who is not in the channel asks first: y invites them and sends, n sends without inviting,",
+    "Esc keeps the message in the input. /invite NAME does the same without a message.",
     "Others see \"typing…\" while you write (start with --no-typing to turn that off).",
     "`a` opens the reaction picker on the selected message: pick an emoji from the list, or type a name to search it (or an",
     "emoji the list does not have). Enter sends the emoji on the cursor line, Esc closes. The picker opens on your own reaction,",
@@ -1049,6 +1062,33 @@ mod tests {
         term.draw(|f| draw(f, &mut app)).unwrap();
         let s = screen(&term).join("\n");
         assert!(s.contains("edit message") && s.contains("just mine") && s.contains("Cancel edit"), "{s}");
+    }
+
+    #[test]
+    fn a_message_that_mentions_an_outsider_asks_whether_to_invite_them() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let key = |code| AppEvent::Key(KeyEvent::new(code, KeyModifiers::NONE));
+        let mut term = Terminal::new(TestBackend::new(130, 30)).unwrap();
+        let alice = "aa".repeat(32);
+        let mut app = app();
+        // bob is in #general; Alice, whose profile we know, is not
+        app.handle(AppEvent::Members { channel: "c1".into(), result: Ok(vec![("me".into(), "owner".into()), ("bob".into(), "member".into())]) });
+        app.handle(AppEvent::Names(Ok([("bob".to_string(), "Bob".to_string()), (alice.clone(), "Alice Smith".to_string())].into())));
+        app.focus = Focus::Input;
+        for c in "hello @Alice Smith".chars() {
+            app.handle(key(KeyCode::Char(c)));
+        }
+        app.handle(key(KeyCode::Enter));
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(s.contains("Invite Alice Smith to #general? y invites and sends, n just sends, Esc cancels"), "the status line asks and says what each key does\n{s}");
+        assert!(app.editor.is_empty(), "the message waits for the answer, held out of the input");
+        // `n` sends it without inviting, and the question clears
+        app.handle(key(KeyCode::Char('n')));
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(!s.contains("Invite Alice Smith to"), "the question is gone once it is answered\n{s}");
+        assert!(s.contains("sent without inviting Alice Smith"), "and the status line reports what happened\n{s}");
     }
 
     #[test]
