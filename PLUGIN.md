@@ -79,7 +79,7 @@ that cannot speak it should say why on the log and exit.
 {"type":"panel_action","id":"hello","row":1,"value":"pick"}
 {"type":"prompt_answer","id":"name","text":"Scout"}
 {"type":"agents","id":"list","agents":[{"name":"Scout","pubkey":"<hex>","npub":"npub1…","harness":"claude-code-acp","workspace":"/…/agents/scout","created_at":1700000000}]}
-{"type":"created","id":"new","agent":{"name":"Scout","pubkey":"<hex>","npub":"npub1…","published":true,"detail":""}}
+{"type":"created","id":"new","agent":{"name":"Scout","pubkey":"<hex>","npub":"npub1…"}}
 {"type":"bye"}
 ```
 
@@ -206,9 +206,9 @@ keeps that copy byte-for-byte identical to `sdk/typescript/buzzr.ts`.
   and one entry each: `name`, `pubkey`, `npub`, `harness`, `workspace`, `created_at`. There is **no key** in it — the key stays in
   `agents.json`, which only buzzr reads.
 - **`create_agent`** (needs `agents:write`) asks buzzr to make a local agent — a key, a folder and a record of its own — and publish it.
-  It is refused under `--read-only`, and the answer is a `created` message with the same `id`: the `agent` it made (with `published`
-  telling whether the relay took it and `detail` why not), or an `error`. buzzr owns the key, the folder and the relay; the plugin never
-  sees them.
+  It is refused under `--read-only`, and the answer is a `created` message with the same `id`: the `agent` it made, or an `error`. The
+  relay is asked first, so an agent the relay refuses is not made at all, and the `error` says why. buzzr owns the key, the folder and
+  the relay; the plugin never sees them.
 - The process runs with a **clean environment** (only `PATH`, `HOME`, `LANG`, `LC_ALL`, `TZ`, `TMPDIR` and the `BUZZR_PLUGIN_*`
   variables are passed on), so no key or relay credential in buzzr's environment can leak into a plugin. Its stderr is captured to
   `<config dir>/plugin-logs/<id>.log`; `log` with `level:"error"` also flashes.

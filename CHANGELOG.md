@@ -42,10 +42,11 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
 - **Agents.** `/agents` lists the agents this copy made; `/agents create` — or the “new agent…” row in that list — turns the composer into a
   two-step flow that asks for a name and then for what the agent should do, and makes it an agent: a fresh key of its own, a
   folder of its own to work in, and a record in `agents.json` (mode 600, next to the read positions, since it holds the agent's
-  key). It is then published to the relay, the way the Buzz app does it: the agent's own kind-0 profile, signed with its own key
+  key). It is published to the relay, the way the Buzz app does it: the agent's own kind-0 profile, signed with its own key
   and carrying this identity's NIP-OA attestation of it, and this identity's `kind:30177` listing of it, so the owner's other Buzz
-  clients show it. The harness it is made for is a local Claude Code driven over ACP (`claude-code-acp`). A relay that refuses
-  either leaves the agent local, and the flow says so. Read-only mode refuses to make one.
+  clients show it. The relay is asked before anything is written down, so an agent it refuses is not made at all — no key, no
+  folder, no record — and the flow says why. The harness it is made for is a local Claude Code driven over ACP
+  (`claude-code-acp`). Read-only mode refuses to make one.
 
 ### Changed
 

@@ -2575,23 +2575,22 @@ fn the_answer_to_a_creation_lands_in_the_list_and_is_reported() {
     // the answer belongs to the plugin that asked, so the flow runs first: that is what sets up the pending creation
     ask_for_agent(&mut app, "Scout");
     let scout = agent("Scout");
-    app.handle(AppEvent::AgentCreated(Ok((scout.clone(), Ok(())))));
+    app.handle(AppEvent::AgentCreated(Ok(scout.clone())));
     assert_eq!(app.agents, vec![scout], "the made agent is in the list");
     let flash = app.flash_text().unwrap();
     assert!(flash.contains("Scout"), "the plugin's flash names it: {flash:?}");
     assert!(flash.contains("published to the relay"), "and says the relay took it: {flash:?}");
     assert_eq!(app.overlay, Overlay::Panel, "the list it lands in comes up");
-    // a relay that would not take it still leaves the agent, and the flash says where it is
+    // a relay that would not take it makes no agent at all: the failure is said, and nothing is added
     ask_for_agent(&mut app, "Pilot");
-    let other = agent("Pilot");
-    app.handle(AppEvent::AgentCreated(Ok((other.clone(), Err("relay returned 500".into())))));
-    assert_eq!(app.agents.last(), Some(&other), "the agent is kept");
+    app.handle(AppEvent::AgentCreated(Err("the relay returned 500".into())));
+    assert_eq!(app.agents.len(), 1, "a refused agent is not created");
     let flash = app.flash_text().unwrap();
-    assert!(flash.contains("local only") && flash.contains("relay returned 500"), "the refusal is named: {flash:?}");
-    // a refusal adds nothing, and is only said
-    ask_for_agent(&mut app, "Pilot");
+    assert!(flash.contains("could not create") && flash.contains("relay returned 500"), "the refusal is named: {flash:?}");
+    // a name that is taken fails the same way: nothing is added, and the reason is said
+    ask_for_agent(&mut app, "Scout");
     app.handle(AppEvent::AgentCreated(Err("an agent called Scout already exists".into())));
-    assert_eq!(app.agents.len(), 2, "nothing was added");
+    assert_eq!(app.agents.len(), 1, "nothing was added");
     assert!(app.flash_text().unwrap().contains("already exists"));
 }
 

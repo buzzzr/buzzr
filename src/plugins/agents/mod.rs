@@ -110,22 +110,19 @@ impl Agents {
         }
     }
 
-    /// The answer to `CreateAgent`: say plainly whether the relay took it, and re-open the list on the new agent.
+    /// The answer to `CreateAgent`: say plainly that it was made and published, and re-open the list on it. A relay
+    /// that refused it (or any other failure) made no agent at all, so the error is all there is to say.
     fn on_created(&mut self, result: Result<crate::plugin::CreatedAgent, String>) -> Vec<PluginOutput> {
         match result {
             Ok(a) => {
-                let where_it_is = if a.published {
-                    "published to the relay".to_owned()
-                } else {
-                    format!("local only — the relay did not take it: {}", a.detail)
-                };
                 // The list first, the flash last: a panel opening sets its own hint, so saying what happened has to be
                 // the final word or the "created" message is lost behind it.
                 vec![
                     PluginOutput::ListAgents { id: "refresh".into() },
-                    PluginOutput::Flash(format!("{} created ({}) · {where_it_is} · /agents lists it", a.name, short(&a.npub))),
+                    PluginOutput::Flash(format!("{} created ({}) · published to the relay · /agents lists it", a.name, short(&a.npub))),
                 ]
             }
+            // Nothing was made: no key, no folder, no record. Say why and leave the list as it was.
             Err(e) => vec![PluginOutput::Flash(format!("could not create the agent: {e}"))],
         }
     }
@@ -255,22 +252,16 @@ mod tests {
                 name: "Scout".into(),
                 pubkey: "00".repeat(32),
                 npub: "npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqs2d".into(),
-                published: true,
-                detail: String::new(),
             }),
         });
         // the list is refreshed first, then the result is said — so the flash is the last word after the panel opens
         assert!(matches!(&outs[0], PluginOutput::ListAgents { id } if id == "refresh"));
         assert!(matches!(outs[1], PluginOutput::Flash(ref t) if t.contains("published to the relay")));
 
-        // a relay that refused says "local only", and a creation that failed says why
-        let outs = p.on(PluginInput::Created {
-            id: "create".into(),
-            result: Ok(crate::plugin::CreatedAgent { name: "Scout".into(), pubkey: "00".repeat(32), npub: "npub1x".into(), published: false, detail: "no route".into() }),
-        });
-        assert!(matches!(outs[1], PluginOutput::Flash(ref t) if t.contains("local only") && t.contains("no route")));
-        let outs = p.on(PluginInput::Created { id: "create".into(), result: Err("a name is needed".into()) });
-        assert!(matches!(outs[0], PluginOutput::Flash(ref t) if t.contains("could not create")));
+        // a creation that failed (a relay that refused it, a name that is taken) made no agent: only the reason is said
+        let outs = p.on(PluginInput::Created { id: "create".into(), result: Err("the relay returned 500".into()) });
+        assert_eq!(outs.len(), 1, "nothing was made, so there is no list to refresh");
+        assert!(matches!(outs[0], PluginOutput::Flash(ref t) if t.contains("could not create") && t.contains("relay returned 500")));
     }
 
     #[test]

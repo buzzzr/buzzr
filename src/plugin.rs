@@ -60,17 +60,15 @@ pub struct AgentView {
     pub created_at: u64,
 }
 
-/// An agent the host made, as the answer to [`PluginOutput::CreateAgent`]: whether it reached the relay, and why not
-/// when it did not.
+/// An agent the host made, as the answer to [`PluginOutput::CreateAgent`]: the identity it speaks with. The relay is
+/// asked first, so there is no "made but not published" state — a relay that refuses the agent means it was not made,
+/// and that comes back as the `Err` of [`PluginInput::Created`].
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct CreatedAgent {
     pub name: String,
     pub pubkey: String,
     /// The same key as `npub1…`, for display.
     pub npub: String,
-    pub published: bool,
-    /// Why the relay did not take it; empty when it did.
-    pub detail: String,
 }
 
 /// What buzzr hands a plugin: a fresh snapshot of what is on screen, a heartbeat, a command the user ran, the answer to

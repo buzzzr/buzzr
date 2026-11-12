@@ -93,33 +93,82 @@ fn read(path: &Path) -> Result<File, String> {
     }
 }
 
-/// Make a new agent: a fresh key, a folder of its own, and a record appended to `agents.json`. Returns what the panel
-/// shows; the key goes to that file and nowhere else.
-pub fn create(paths: &Paths, name: &str, instructions: &str) -> Result<Agent, String> {
+/// An agent made but not yet written down: its key is in memory and its folder is not made.
+///
+/// Publishing happens between [`prepare`] and [`commit`], so a relay that does not take the agent leaves nothing
+/// behind — no key, no folder and no record. This is the order `/agents create` takes; `create` is the two steps in one
+/// for a caller that does not publish.
+pub struct Pending {
+    agent: Agent,
+    keys: Keys,
+}
+
+impl Pending {
+    /// The agent as the panel will show it.
+    pub fn agent(&self) -> &Agent {
+        &self.agent
+    }
+
+    /// The agent's own key, for signing its own events (its kind-0 profile). Kept in memory, and written to the
+    /// record only by [`commit`].
+    pub fn keys(&self) -> &Keys {
+        &self.keys
+    }
+}
+
+/// Check a new agent and make its key, without writing anything: the name, the folder it will get, and the identity it
+/// will speak with. [`commit`] writes it down once the relay has taken it.
+pub fn prepare(paths: &Paths, name: &str, instructions: &str) -> Result<Pending, String> {
     let name = clean_name(name)?;
     let instructions = clean_instructions(instructions);
-    let mut file = read(&paths.agents())?;
+    let file = read(&paths.agents())?;
     if file.agents.iter().any(|r| r.name.eq_ignore_ascii_case(&name)) {
         return Err(format!("an agent called {name} already exists"));
     }
     let workspace = workspace_for(paths, &name, &file.agents);
     let keys = Keys::generate();
-    let record = Record {
+    let agent = Agent {
         name,
         pubkey: keys.public_key().to_hex(),
-        nsec: keys.secret_key().to_bech32().map_err(|e| e.to_string())?,
         harness: HARNESS.to_owned(),
         workspace: workspace.display().to_string(),
         instructions,
         created_at: now(),
     };
-    let agent = record.agent();
+    Ok(Pending { agent, keys })
+}
+
+/// Write a prepared agent down: a folder of its own, and its record (with its key) appended to `agents.json`. Returns
+/// what the panel shows; the key goes to that file and nowhere else.
+pub fn commit(paths: &Paths, pending: &Pending) -> Result<Agent, String> {
+    let agent = &pending.agent;
+    let mut file = read(&paths.agents())?;
+    if file.agents.iter().any(|r| r.name.eq_ignore_ascii_case(&agent.name)) {
+        return Err(format!("an agent called {} already exists", agent.name));
+    }
+    let record = Record {
+        name: agent.name.clone(),
+        pubkey: agent.pubkey.clone(),
+        nsec: pending.keys.secret_key().to_bech32().map_err(|e| e.to_string())?,
+        harness: agent.harness.clone(),
+        workspace: agent.workspace.clone(),
+        instructions: agent.instructions.clone(),
+        created_at: agent.created_at,
+    };
     // the folder first: a record that names a folder we could not make would be worse than an empty folder
-    make_private_dir(&workspace)?;
+    make_private_dir(Path::new(&agent.workspace))?;
     file.agents.push(record);
     let doc = Zeroizing::new(serde_json::to_string_pretty(&file).expect("a json value serialises") + "\n");
     config::write_private(&paths.agents(), &doc).map_err(|e| format!("could not write {}: {e}", paths.agents().display()))?;
-    Ok(agent)
+    Ok(agent.clone())
+}
+
+/// Make a new agent in one step: a fresh key, a folder of its own, and a record appended to `agents.json`. Returns what
+/// the panel shows; the key goes to that file and nowhere else. A caller that publishes the agent uses [`prepare`] and
+/// [`commit`] instead, so a relay that refuses it leaves nothing behind.
+pub fn create(paths: &Paths, name: &str, instructions: &str) -> Result<Agent, String> {
+    let pending = prepare(paths, name, instructions)?;
+    commit(paths, &pending)
 }
 
 /// The agent's own key, read back from the record file — the only place it is kept. Used to sign the agent's own
@@ -241,6 +290,23 @@ mod tests {
         let doc: serde_json::Value = serde_json::from_str(&text).unwrap();
         let nsec = doc["agents"][0]["nsec"].as_str().unwrap();
         assert_eq!(Keys::parse(nsec).unwrap().public_key().to_hex(), a.pubkey);
+        std::fs::remove_dir_all(paths.dir()).unwrap();
+    }
+
+    #[test]
+    fn a_prepared_agent_is_not_written_until_it_is_committed() {
+        let paths = temp_paths();
+        let pending = prepare(&paths, "  Scout  ", "watch the repo").unwrap();
+        // nothing is on disk yet, so a relay that refuses the agent leaves nothing behind
+        assert!(!paths.agents().exists(), "prepare writes no record");
+        assert!(!Path::new(&pending.agent().workspace).exists(), "prepare makes no folder");
+        assert_eq!(pending.agent().name, "Scout", "the name is tidied before anything is written");
+        // commit is what writes it down: the folder, and the record with the key
+        let a = commit(&paths, &pending).unwrap();
+        assert_eq!(a.pubkey, pending.agent().pubkey, "the committed agent is the prepared one");
+        assert!(Path::new(&a.workspace).is_dir(), "the folder is made");
+        assert_eq!(mode(&paths.agents()), 0o600, "the record file is private");
+        assert_eq!(load(&paths.agents()), vec![a], "and reads back");
         std::fs::remove_dir_all(paths.dir()).unwrap();
     }
 

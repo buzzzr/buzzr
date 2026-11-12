@@ -331,21 +331,22 @@ fn exit_notice(app: &App) -> Option<String> {
     app.latest.as_ref().map(|v| release::notice(release::CURRENT, v, app.update_source))
 }
 
-/// Make a local agent and publish it to the relay. The agent is made and kept first, so it survives a relay that
-/// refuses it; the pair comes back either way — the agent, and whether it reached the relay (and why not).
-async fn create_and_publish(relay: &Relay, paths: &config::Paths, name: String, instructions: String) -> Result<(agents::Agent, Result<(), String>), String> {
-    let agent = agents::create(paths, &name, &instructions)?;
-    let published = publish_agent(relay, paths, &agent).await;
-    Ok((agent, published))
+/// Make a local agent and publish it to the relay. The relay comes first: the agent is checked and its key made in
+/// memory, published, and only written down (its folder and its record) once the relay has taken it — so an agent the
+/// relay refuses is not created at all.
+async fn create_and_publish(relay: &Relay, paths: &config::Paths, name: String, instructions: String) -> Result<agents::Agent, String> {
+    let pending = agents::prepare(paths, &name, &instructions)?;
+    publish_agent(relay, &pending).await?;
+    agents::commit(paths, &pending)
 }
 
 /// The relay half of `/agents create`: the agent's own kind-0 profile — signed by the agent's key and sent as the
 /// agent, carrying this identity's attestation — and then this identity's listing of it. Either failing is reported,
-/// and the agent stays a local one.
-async fn publish_agent(relay: &Relay, paths: &config::Paths, agent: &agents::Agent) -> Result<(), String> {
-    let keys = agents::keys_of(&paths.agents(), &agent.pubkey)?;
+/// and nothing is written locally, so the agent is not created.
+async fn publish_agent(relay: &Relay, pending: &agents::Pending) -> Result<(), String> {
+    let agent = pending.agent();
     let attestation = agents::attestation(relay.keys(), &agent.pubkey)?;
-    relay.publish_agent_profile(&keys, &agent.name, &attestation).await.map_err(|e| format!("{e:#}"))?;
+    relay.publish_agent_profile(pending.keys(), &agent.name, &attestation).await.map_err(|e| format!("{e:#}"))?;
     relay.publish_agent_listing(&agent.pubkey, &agent.name, agents::HARNESS_RUNTIME).await.map_err(|e| format!("{e:#}"))?;
     Ok(())
 }
@@ -386,9 +387,9 @@ fn run(cmd: Cmd, relay: &Arc<Relay>, tx: &UnboundedSender<AppEvent>, subscriptio
             let _ = config::save_drafts(&paths.drafts(), &drafts);
         }
         Cmd::CreateAgent { name, instructions } => {
-            // Local first (a key of the agent's own, a folder for it and a record in `agents.json`), then the relay:
-            // the agent's own kind-0 profile carrying this identity's attestation, and this identity's listing of it.
-            // The answer is what the overlay shows, so both halves travel together.
+            // The relay first, the disk second: the agent is published (its own kind-0 profile carrying this
+            // identity's attestation, and this identity's listing of it) and only then written down. A relay that
+            // refuses it means no agent — no key, no folder, no record — and the error is what the overlay shows.
             let paths = paths.clone();
             tokio::spawn(async move {
                 let _ = tx.send(AppEvent::AgentCreated(create_and_publish(&relay, &paths, name, instructions).await));

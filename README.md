@@ -61,10 +61,10 @@
   keeps the message in the input.
 - **Agents.** `/agents` lists the agents this copy made; `/agents create` (or the “new agent…” row in that list) asks for a name and then for what
   the agent should do, and makes it — a key of its own, a folder of its own, and a record in `agents.json` (mode 600, beside the
-  read positions) — and then publishes it to the relay: the agent's own profile, signed with its own key and carrying your
+  read positions) — and publishes it to the relay: the agent's own profile, signed with its own key and carrying your
   attestation of it, and your listing of it, so other Buzz clients show it as yours. The harness it is made for is a local Claude
-  Code driven over ACP (`claude-code-acp`, as the Buzz app does). A relay that will not take it leaves the agent local, and the
-  flow says so.
+  Code driven over ACP (`claude-code-acp`, as the Buzz app does). The relay is asked first, so an agent it will not take is not
+  made at all, and the flow says why.
 - **Plugins.** Add your own `/commands`, status items, badges, a pane under the channel list and panels — from any language, as a runtime-loaded plugin, or as a compiled-in Rust plugin in buzzr's own tree. See [PLUGIN.md](PLUGIN.md).
 - **Themes.** The default `buzz-dark` uses the dark palette of the Buzz desktop app. `BUZZR_THEME=dark` keeps your terminal's own background, `BUZZR_THEME=buzz-light` is the desktop app's light palette, and `BUZZR_THEME=light` is for a light terminal. `BUZZR_THEME=high-contrast` is black-on-white at WCAG AAA (7:1), and `NO_COLOR` or `TERM=dumb` turns colour off entirely.
 - **Read-only mode** (`--read-only`) for identities you should not speak for.

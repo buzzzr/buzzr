@@ -289,8 +289,8 @@ pub enum AppEvent {
     Search { seq: u64, result: Result<Vec<Ev>, String> },
     /// How many unread messages a channel had when we started (see `Cmd::LoadUnread`).
     Unread { channel: String, count: u32 },
-    /// The answer to `Cmd::CreateAgent`: the agent that was made and whether it reached the relay, or why it was not made.
-    AgentCreated(Result<(crate::agents::Agent, Result<(), String>), String>),
+    /// The answer to `Cmd::CreateAgent`: the agent that was made, or why it was not (including a relay that refused it).
+    AgentCreated(Result<crate::agents::Agent, String>),
     /// From the plugin runtime: ready/status/panel/flash/draft/send/gone, and the plugin list.
     Plugin(PluginEvent),
     /// The release feed found a later version than the one running.
@@ -1581,12 +1581,12 @@ impl App {
             AppEvent::Search { seq, result } => self.search_results(seq, result),
             AppEvent::Unread { channel, count } => self.unread_loaded(channel, count),
             AppEvent::AgentCreated(result) => {
-                // The host made the agent (or could not). The plugin that asked owns the flow and the words, so the
-                // result goes back to it as `PluginInput::Created`; the agent is also kept here, as the list the
-                // plugin is handed when it asks for one.
+                // The host made the agent (or could not — the relay refused it, or the name was taken). The plugin that
+                // asked owns the flow and the words, so the result goes back to it as `PluginInput::Created`; the agent
+                // is also kept here, as the list the plugin is handed when it asks for one.
                 match result {
-                    Ok((agent, published)) => {
-                        let view = created_view(&agent, &published);
+                    Ok(agent) => {
+                        let view = created_view(&agent);
                         self.agents.push(agent);
                         match self.pending_create.take() {
                             Some((plugin, id)) => self.plugin_input(&plugin, PluginInput::Created { id, result: Ok(view) }),
@@ -3567,14 +3567,13 @@ fn plugin_cmd(plugin: &str, input: PluginInput) -> Option<PluginCmd> {
     })
 }
 
-/// An agent as the plugin's answer to `CreateAgent`: what was made, whether the relay took it, and why not when it did not.
-fn created_view(agent: &crate::agents::Agent, published: &Result<(), String>) -> plugin::CreatedAgent {
+/// An agent as the plugin's answer to `CreateAgent`: the identity it speaks with. The relay was asked first, so an
+/// agent that exists here is one the relay took.
+fn created_view(agent: &crate::agents::Agent) -> plugin::CreatedAgent {
     plugin::CreatedAgent {
         name: agent.name.clone(),
         pubkey: agent.pubkey.clone(),
         npub: relay::npub_of(&agent.pubkey).unwrap_or_else(|| agent.pubkey.clone()),
-        published: published.is_ok(),
-        detail: published.as_ref().err().cloned().unwrap_or_default(),
     }
 }
 
