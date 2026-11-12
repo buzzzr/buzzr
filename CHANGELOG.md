@@ -11,8 +11,8 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
   many people are in it and whether you are one of them (the membership and the counts come from NIP-29 `kind:39002`). A channel you
   are not in opens read-only: in place of the composer there is a `[ Join ]` button, reached with Tab the way the input is, and Enter
   on it asks the relay to join you (`kind:9021`) — its answer turns the button back into the composer. A private channel is not
-  offered, because a self-join needs an open one. `/join NAME` (a name, `#name` or a channel id) joins or opens one directly, and
-  `/leave` asks first (`y` confirms) before it sends `kind:9022` and drops the channel from the list. The list and the membership are
+  offered, because a self-join needs an open one. `join NAME` (a name, `#name` or a channel id) joins or opens one directly, and
+  `leave` asks first (`y` confirms) before it sends `kind:9022` and drops the channel from the list. The list and the membership are
   read again after a join or a leave.
 - A plugin can keep a **pane** under the channel list: a small block that is always on screen and takes no focus, key or click.
   `examples/plugins/clock` shows the time in large digits there and redraws it from an opt-in heartbeat.
@@ -70,19 +70,18 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
 
 ### Changed
 
+- **Commands moved to a `Ctrl+K` command palette.** `Ctrl+K` opens a modal palette with a query of its own: type to narrow the
+  commands to the ones whose name starts with what you typed, the arrows move the highlight, and Enter runs the one on the cursor. A
+  command that takes an argument asks for it in a step of its own (Esc backs out of the argument step, a second Esc closes the
+  palette). The palette never touches the composer or its draft, and a `/` typed into the message box is now ordinary text — the
+  `/command` form is gone, for the commands plugins add too.
 - `←` / `→` walk a thread from the message list: with a message row selected, `→` opens its thread (a message with no replies has
   nothing under it, so there the key does nothing) and `←` leaves a thread for the timeline it came from, putting the cursor back on
   the message the thread hangs off. Esc still backs out the same way, wherever the cursor is.
 - The thread pane reads as a thread: its root is pinned to the top as one header line — the message number, the time, the author
   and the first line of what was said, cut with `…` when there is more — and it stays on screen while the replies, indented two
-  columns, scroll under it. The root keeps message number 1, so the numbers `/r N` and `/t N` take are the ones on screen, and
+  columns, scroll under it. The root keeps message number 1, so the numbers `r N` and `t N` take are the ones on screen, and
   links in an indented reply are still where they look.
-
-### Fixed
-
-- Esc while the slash-command palette was up moved the keyboard out of the composer and left the `/command` behind in the input.
-  It now closes just the palette and keeps the keyboard — and the half-written command — where they are, so typing can go on; the
-  list comes back with the next edit.
 
 ## [0.2.0-rc.2] - 2026-11-11
 

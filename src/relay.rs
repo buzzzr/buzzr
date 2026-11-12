@@ -500,7 +500,7 @@ pub fn delete_channel_builder(channel: &str) -> Result<EventBuilder> {
     buzz_sdk::build_delete_channel(channel_id).map_err(|e| anyhow!("{e}"))
 }
 
-/// Open a direct message with `peer` (`kind:41010`, what `/dm` sends). The relay creates the conversation if it does not exist
+/// Open a direct message with `peer` (`kind:41010`, what the `dm` command sends). The relay creates the conversation if it does not exist
 /// and reuses it if it does, so this is safe to send for someone you already have a DM with; it answers with no channel id, so
 /// the client finds the conversation in the channel list afterwards.
 pub fn dm_open_builder(peer: &str) -> Result<EventBuilder> {

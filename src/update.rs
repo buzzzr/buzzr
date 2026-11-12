@@ -63,7 +63,7 @@ impl InstallSource {
         }
     }
 
-    /// The one line `/update` shows in the status bar.
+    /// The one line the `update` command shows in the status bar.
     pub fn advice(self) -> String {
         match self.upgrade_command() {
             Some(command) => format!("upgrade with: {command}"),

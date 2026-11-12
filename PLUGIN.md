@@ -14,7 +14,7 @@ A plugin can put things on these surfaces and nothing else:
 
 | Contribution | Where it shows |
 |---|---|
-| `commands` | `/commands` in the input box |
+| `commands` | a command in the Ctrl+K palette |
 | `status` | one item on the status line (left of the built-in text) |
 | `header` | a badge on the right of the header |
 | `messageMarks` | a short tag in front of one message (by event id) |
@@ -75,7 +75,7 @@ that cannot speak it should say why on the log and exit.
 {"type":"hello","protocol":1,"apiVersion":2,"host":"buzzr/0.2.0","plugin":"hello"}
 {"type":"snapshot","seq":7,"projection":{ /* see below */ }}
 {"type":"tick","seq":3}
-{"type":"invoke","id":11,"command":"hello","args":"the text after /hello"}
+{"type":"invoke","id":11,"command":"hello","args":"what was typed for the command"}
 {"type":"panel_action","id":"hello","row":1,"value":"pick"}
 {"type":"prompt_answer","id":"name","text":"Scout"}
 {"type":"agents","id":"list","agents":[{"name":"Scout","pubkey":"<hex>","npub":"npub1…","harness":"claude-agent-acp","model":"opus","effort":"high","workspace":"/…/agents/scout","created_at":1700000000}]}
@@ -128,8 +128,8 @@ Only the rows on screen are included. The private key, the relay address, filter
 
 | Field | Meaning |
 |---|---|
-| `name` | The name `/plugins` and the plugin's own rows show. Control characters are stripped; empty or absent means "call it by the folder name". |
-| `permissions` | What the plugin asks to be allowed to do, as a list. **Unknown names are dropped** (and the drop is logged), and the granted set is what `/plugins` shows, so a plugin never appears to hold more than buzzr enforces. In this build: `read:visible` (get the screen projection), `messages:write` (send messages), `agents:read` (see the local agents) and `agents:write` (start a harness, and make and publish an agent). |
+| `name` | The name the `plugins` command and the plugin's own rows show. Control characters are stripped; empty or absent means "call it by the folder name". |
+| `permissions` | What the plugin asks to be allowed to do, as a list. **Unknown names are dropped** (and the drop is logged), and the granted set is what the `plugins` command shows, so a plugin never appears to hold more than buzzr enforces. In this build: `read:visible` (get the screen projection), `messages:write` (send messages), `agents:read` (see the local agents) and `agents:write` (start a harness, and make and publish an agent). |
 | `tickMs` | An **opt-in heartbeat**, in milliseconds: buzzr then sends this plugin a `tick` on that interval, so time-based output (a clock, a build) can redraw without running a timer of its own. Absent or `0` means never — most plugins only react to commands and snapshots and are never woken. A value is clamped to `250`–`60000`. |
 | `contributions` | What the plugin puts on screen to begin with — see below. Absent means it adds nothing until asked. |
 
@@ -137,7 +137,7 @@ Only the rows on screen are included. The private key, the relay address, filter
 
 ```json
 {
-  "commands":     [{"id":"prs","title":"Pull requests","usage":"/prs [open|closed]"}],
+  "commands":     [{"id":"prs","title":"Pull requests","usage":"[open|closed]"}],
   "status":       [{"text":"2 open","tone":"ok"}],
   "header":       [{"text":"gh","tone":"dim"}],
   "messageMarks": [{"target":"<message id>","text":"PR","tone":"accent"}],
@@ -149,6 +149,11 @@ Only the rows on screen are included. The private key, the relay address, filter
 A `tone` is one of `default`, `dim`, `accent`, `warn`, `error`, `ok`, `bold`. `text` is a single line; newlines and control
 characters are stripped, and each text is capped at 2000 characters (a panel at 500 rows, a pane at 20, 64 commands, 32 status
 segments).
+
+A `commands` entry adds one command to the Ctrl+K palette: `id` is the name typed to find it, `title` is the line shown beside
+that name, and `usage` is the argument hint (the built-in `new` command, for example, uses `[private] name [about]`). A command
+with a `usage` gets an argument step — buzzr asks for it first and passes what was typed as `args` in the `invoke` message — and
+one with an empty `usage` runs as soon as it is picked, with empty `args`.
 
 ## The TypeScript SDK
 
@@ -235,5 +240,5 @@ buzzr --no-plugins        # start without plugins
 BUZZR_SAFE_MODE=1 buzzr    # the same
 ```
 
-Inside the UI, `/plugins` shows what loaded, what each plugin may do, and the commands it added. The name in that list is the one
+Inside the UI, the `plugins` command shows what loaded, what each plugin may do, and the commands it added. The name in that list is the one
 the plugin itself sent in `ready`, which is why `plugins list` — which never starts anything — shows ids and files instead.
