@@ -750,6 +750,41 @@ fn typing_reaches_the_input_box() {
     s.expect("the messages pane again", "Open thread");
 }
 
+#[test]
+fn a_draft_comes_back_with_its_channel_and_is_still_there_after_a_restart() {
+    let Some(relay) = relay_or_skip("a_draft_comes_back_...") else { return };
+    let mut s = session(&relay);
+    let config = s.config.clone();
+    s.press_all(&["tab", "tab"]); // channels -> messages -> input
+    s.expect("the input box to take focus", "Send");
+    s.type_text("half a thought");
+    s.expect("the draft in the box", "half a thought");
+    // Leave for #dev without sending: the box clears, and the draft stays behind in #design.
+    s.press("esc"); // input -> messages
+    s.press("esc"); // -> the channel list
+    s.expect("the channel list", "Open channel");
+    s.press_all(&["down", "enter"]);
+    s.expect("the dev channel", "hello from c-dev");
+    s.expect_gone("the other channel's draft", "half a thought");
+    // Back in #design it is in the box again.
+    s.press("esc");
+    s.expect("the channel list again", "Open channel");
+    s.press_all(&["up", "enter"]);
+    s.expect("the design channel again", "hello from c-design");
+    s.expect("the draft back in the box", "half a thought");
+    // Quit, and start again on what it left behind: the draft comes back with the channel.
+    s.press("ctrl+q");
+    s.wait_exit(Duration::from_secs(10)).expect("buzzr should exit on Ctrl+Q");
+    let written = std::fs::read_to_string(config.join("drafts.json")).expect("the draft is on disk");
+    assert!(written.contains("half a thought"), "the draft is stored for the channel it was typed in: {written}");
+    drop(s); // the session takes its config directory with it
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(config.join("drafts.json"), &written).unwrap();
+    let again = session_in(&relay, config);
+    again.expect("the channel it opens by itself", "#design");
+    again.expect("the draft it was left holding", "half a thought");
+}
+
 /// A message that `@mentions` someone the channel does not have is held back, and the status line asks whether to
 /// invite them; Esc answers by keeping the message in the input. The fake relay serves no member list for an open
 /// channel, so a person whose profile it seeds (carol, the author of #design's message) is not a member of the channel
