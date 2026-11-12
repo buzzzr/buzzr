@@ -2434,7 +2434,9 @@ fn agent(name: &str) -> crate::agents::Agent {
     crate::agents::Agent {
         name: name.into(),
         pubkey: format!("{:0>64}", name.len()),
-        harness: crate::agents::HARNESS.into(),
+        harness: crate::harness::DEFAULT.id.into(),
+        model: None,
+        effort: None,
         workspace: format!("/tmp/{name}"),
         instructions: String::new(),
         created_at: 1,
@@ -2449,14 +2451,29 @@ fn agent_app() -> App {
     app
 }
 
-/// Run `/agents create` through both prompts, up to the point where the host is asked to make the agent. The commands
-/// the last step returns are handed back, so a caller can assert the create (or its refusal).
+/// What a harness answers with in these cases: two models, the second on two thinking levels. Built by hand so the app
+/// tests need no harness on `PATH` — starting a real one is covered where it lives, in `harness` and `plugins`.
+fn harness_offer() -> crate::plugin::HarnessOffer {
+    let choice = |v: &str| crate::plugin::Choice { value: v.into(), label: v.into() };
+    crate::plugin::HarnessOffer {
+        models: vec![choice("sonnet"), choice("opus")],
+        model: "sonnet".into(),
+        efforts: vec![choice("low"), choice("high")],
+        effort: "low".into(),
+    }
+}
+
+/// Run `/agents create` all the way through: a name, the instructions, the harness's offer, a model and a level. The
+/// commands the last step returns are handed back, so a caller can assert the create (or its refusal).
 fn ask_for_agent(app: &mut App, name: &str) -> Vec<Cmd> {
     app.command("agents", "create");
     type_text(app, name);
     press(app, KeyCode::Enter);
     type_text(app, "watch the repo");
-    press(app, KeyCode::Enter)
+    press(app, KeyCode::Enter); // the instructions ask the harness what it offers
+    app.handle(AppEvent::HarnessOffer(Ok(harness_offer()))); // the model panel comes up
+    press(app, KeyCode::Enter); // take the model in force — its levels are already in hand
+    press(app, KeyCode::Enter) // take the level in force, which makes the agent
 }
 
 #[test]
@@ -2520,7 +2537,7 @@ fn the_agents_panel_moves_its_cursor_and_enter_on_the_new_row_starts_the_flow() 
 }
 
 #[test]
-fn the_agents_create_flow_asks_for_a_name_then_instructions_and_makes_the_agent() {
+fn the_agents_create_flow_asks_for_a_name_then_the_instructions_then_the_harness_and_makes_the_agent() {
     let mut app = agent_app();
     type_text(&mut app, "/agents create");
     assert!(press(&mut app, KeyCode::Enter).is_empty(), "starting the flow sends nothing");
@@ -2531,10 +2548,33 @@ fn the_agents_create_flow_asks_for_a_name_then_instructions_and_makes_the_agent(
     assert!(press(&mut app, KeyCode::Enter).is_empty(), "the name alone makes nothing");
     assert_eq!(app.prompt.as_ref().map(|p| p.id.as_str()), Some("instructions"));
     assert!(app.editor.is_empty(), "the box is cleared for the instructions");
+    // the instructions are not the last step: the host is asked to start the harness and read what it offers first
     type_text(&mut app, "watch the repo");
-    let cmds = press(&mut app, KeyCode::Enter);
-    assert_eq!(cmds, vec![Cmd::CreateAgent { name: "Scout".into(), instructions: "watch the repo".into() }]);
-    assert!(app.prompt.is_none(), "the flow is over once the agent is asked for");
+    assert_eq!(
+        press(&mut app, KeyCode::Enter),
+        vec![Cmd::ProbeHarness { harness: crate::harness::DEFAULT.id.into(), model: None }],
+        "the harness is asked what it offers, before anything is made"
+    );
+    assert!(app.prompt.is_none(), "the composer is free once the harness is asked");
+    // the answer brings the models up on a panel, the one in force marked; taking it needs no second look
+    app.handle(AppEvent::HarnessOffer(Ok(harness_offer())));
+    let panel = app.panel.as_ref().expect("the model panel");
+    assert_eq!(panel.title, "new agent · model");
+    assert!(panel.rows[0].text.contains("current"), "the model in force is marked: {:?}", panel.rows[0]);
+    assert!(press(&mut app, KeyCode::Enter).is_empty(), "picking a model asks for nothing yet");
+    let panel = app.panel.as_ref().expect("the level panel");
+    assert_eq!(panel.title, "new agent · level");
+    // taking a level makes the agent: the name, the instructions, the harness and both picks
+    assert_eq!(
+        press(&mut app, KeyCode::Enter),
+        vec![Cmd::CreateAgent {
+            name: "Scout".into(),
+            instructions: "watch the repo".into(),
+            harness: crate::harness::DEFAULT.id.into(),
+            model: "sonnet".into(),
+            effort: "low".into(),
+        }]
+    );
     assert!(app.editor.is_empty(), "and the box is empty again");
 }
 
@@ -2603,9 +2643,15 @@ fn read_only_still_lists_agents_and_refuses_to_make_one() {
     assert!(app.command("agents", "").is_empty(), "listing writes nothing, so it is allowed");
     assert_eq!(app.overlay, Overlay::Panel);
     assert!(app.panel.as_ref().unwrap().rows.iter().any(|r| r.text.contains("Scout")));
-    // the flow may ask for text — a question is not a write — but making the agent is, and read-only refuses it
-    let cmds = ask_for_agent(&mut app, "Scout");
+    // the flow may ask for text — a question is not a write — but starting a harness to make an agent is, and read-only
+    // refuses that first: the harness is never started, and the agent is never asked for
+    app.command("agents", "create");
+    type_text(&mut app, "Scout");
+    press(&mut app, KeyCode::Enter);
+    type_text(&mut app, "watch the repo");
+    let cmds = press(&mut app, KeyCode::Enter);
     assert!(!cmds.iter().any(|c| matches!(c, Cmd::CreateAgent { .. })), "read-only makes nothing: {cmds:?}");
+    assert!(!cmds.iter().any(|c| matches!(c, Cmd::ProbeHarness { .. })), "and does not even start a harness: {cmds:?}");
     assert_eq!(app.agents.len(), 1, "and no agent is added");
     assert!(app.flash_text().unwrap().contains("read-only"), "{:?}", app.flash_text());
 }

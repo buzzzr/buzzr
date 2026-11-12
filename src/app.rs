@@ -253,9 +253,14 @@ pub enum Cmd {
     SaveArchived(HashSet<String>),
     /// Write the messages typed but not sent, per channel and thread, to disk (the loop owns the file).
     SaveDrafts(HashMap<(String, Option<String>), String>),
-    /// Make an agent: a fresh key, a folder of its own and a record in `agents.json` (the loop owns the file), then
-    /// publish it to the relay (the agent's own profile and this identity's listing of it).
-    CreateAgent { name: String, instructions: String },
+    /// Make an agent: a fresh key, a folder of its own and a record in `agents.json` (the loop owns the file), on
+    /// `harness` and its `model`/`effort` (either may be empty), then publish it to the relay (the agent's own profile
+    /// and this identity's listing of it).
+    CreateAgent { name: String, instructions: String, harness: String, model: String, effort: String },
+    /// Ask a harness what it offers for a new agent — its models, and a model's thinking levels. The answer comes back
+    /// as `AppEvent::HarnessOffer`; the plugin that asked is answered with it. Runs off the loop: a harness that will
+    /// not answer is waited on, never the event loop.
+    ProbeHarness { harness: String, model: Option<String> },
     /// Work for the plugin runtime (start, reload, or send a command to a plugin process).
     Plugin(PluginCmd),
 }
@@ -291,6 +296,9 @@ pub enum AppEvent {
     Unread { channel: String, count: u32 },
     /// The answer to `Cmd::CreateAgent`: the agent that was made, or why it was not (including a relay that refused it).
     AgentCreated(Result<crate::agents::Agent, String>),
+    /// The answer to `Cmd::ProbeHarness`: what the harness offers for a new agent, or why it could not be asked (it is
+    /// not installed, or it did not answer).
+    HarnessOffer(Result<crate::plugin::HarnessOffer, String>),
     /// From the plugin runtime: ready/status/panel/flash/draft/send/gone, and the plugin list.
     Plugin(PluginEvent),
     /// The release feed found a later version than the one running.
@@ -422,6 +430,8 @@ pub struct App {
     pub prompt: Option<PromptState>,
     /// The plugin waiting on a `Cmd::CreateAgent` result, and the id it will be answered with.
     pending_create: Option<(String, String)>,
+    /// The plugin waiting on a `Cmd::ProbeHarness` result, and the id it will be answered with.
+    pending_probe: Option<(String, String)>,
     /// When each compiled-in plugin last got a heartbeat, and when each last sent (the same limits the host applies to
     /// an external one).
     plugin_ticks: HashMap<String, Instant>,
@@ -529,6 +539,7 @@ impl App {
             internal_declared: BTreeMap::new(),
             prompt: None,
             pending_create: None,
+            pending_probe: None,
             plugin_ticks: HashMap::new(),
             plugin_sends: HashMap::new(),
             pushed_projection: None,
@@ -1600,6 +1611,14 @@ impl App {
                             Vec::new()
                         }
                     },
+                }
+            }
+            AppEvent::HarnessOffer(result) => {
+                // The host asked a harness what it offers (or could not — it is not installed, or it did not answer).
+                // The plugin that asked owns the words, so the result goes back to it as `PluginInput::HarnessOffer`.
+                match self.pending_probe.take() {
+                    Some((plugin, id)) => self.plugin_input(&plugin, PluginInput::HarnessOffer { id, result }),
+                    None => Vec::new(),
                 }
             }
             AppEvent::Plugin(e) => self.plugin_event(e),
@@ -3563,6 +3582,7 @@ fn plugin_cmd(plugin: &str, input: PluginInput) -> Option<PluginCmd> {
         PluginInput::Prompt { id, text } => PluginCmd::PromptAnswer { plugin, id, text },
         PluginInput::Agents { id, agents } => PluginCmd::Agents { plugin, id, agents },
         PluginInput::Created { id, result } => PluginCmd::Created { plugin, id, result },
+        PluginInput::HarnessOffer { id, result } => PluginCmd::HarnessOffer { plugin, id, result },
         PluginInput::Snapshot(_) | PluginInput::Tick => return None,
     })
 }
@@ -3592,6 +3612,8 @@ impl App {
                 pubkey: a.pubkey.clone(),
                 npub: relay::npub_of(&a.pubkey).unwrap_or_else(|| a.pubkey.clone()),
                 harness: a.harness.clone(),
+                model: a.model.clone(),
+                effort: a.effort.clone(),
                 workspace: a.workspace.clone(),
                 created_at: a.created_at,
             })
@@ -3688,7 +3710,28 @@ impl App {
                 let agents = self.agent_views();
                 self.plugin_input(&plugin, PluginInput::Agents { id, agents })
             }
-            PluginEvent::CreateAgent { plugin, id, name, instructions } => {
+            PluginEvent::ProbeHarness { plugin, id, harness, model } => {
+                // The harness is buzzr's to start (principle 8: no plugin code in the core — and no process either), so
+                // the ask comes here and the answer goes back as `AppEvent::HarnessOffer`. Refusing it in read-only mode
+                // is the first half of "an agent is not created"; the second is the same guard on `CreateAgent`.
+                if self.read_only {
+                    self.flash("read-only mode: agents are not created");
+                    return Vec::new();
+                }
+                if !self.plugin_may(&plugin, plugin::AGENTS_WRITE) {
+                    self.flash(format!("{} is not allowed to create agents", self.plugin_name(&plugin)));
+                    return Vec::new();
+                }
+                // One probe at a time: the flow asks for one look at a time, so a second while one is in flight is
+                // refused rather than letting its answer clobber the first.
+                if self.pending_probe.is_some() {
+                    self.flash(format!("{} asked for a harness check, but one is already running", self.plugin_name(&plugin)));
+                    return Vec::new();
+                }
+                self.pending_probe = Some((plugin, id));
+                vec![Cmd::ProbeHarness { harness, model }]
+            }
+            PluginEvent::CreateAgent { plugin, id, name, instructions, harness, model, effort } => {
                 if self.read_only {
                     self.flash("read-only mode: nothing is written");
                     return Vec::new();
@@ -3699,7 +3742,7 @@ impl App {
                 }
                 // The result comes back as `AppEvent::AgentCreated`; the plugin that asked is answered with it.
                 self.pending_create = Some((plugin, id));
-                vec![Cmd::CreateAgent { name, instructions }]
+                vec![Cmd::CreateAgent { name, instructions, harness, model, effort }]
             }
             PluginEvent::Gone { id, why } => {
                 self.plugins.remove(&id);

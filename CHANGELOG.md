@@ -26,10 +26,12 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
   library, registered with `register_plugin!` and driven in-process). Both speak the same `PluginInput`/`PluginOutput` contract and
   pass the same permission and screen gates, so the transport never changes what a plugin may do. A new **prompt** binding lets either
   kind ask buzzr to put a question in the composer — one line, or a block of text — and hand the answer back, and two new bindings and
-  permissions (`agents:read`, `agents:write`) let either kind list the local agents and ask buzzr to make and publish one.
+  permissions (`agents:read`, `agents:write`) let either kind list the local agents, ask buzzr to start a harness and read what it
+  offers, and ask buzzr to make and publish one.
 - **`/agents` is now the first compiled-in plugin** (`src/plugins/agents/`), written against that same contract: it lists the
-  local agents as a panel, asks for a name and then for the instructions through prompts, and asks the host to make the agent. The
-  `/agents` overlay and its bespoke state are gone from the core — the feature is a plugin.
+  local agents as a panel, asks for a name and then for the instructions through prompts, asks the host to start the harness and read
+  what it offers, and asks the host to make the agent. The `/agents` overlay and its bespoke state are gone from the core — the
+  feature is a plugin.
 - A **typed SDK for TypeScript** (`sdk/typescript/buzzr.ts`): one dependency-free file that turns the protocol into a single
   `definePlugin({ name, permissions, tickMs, ready, onTick, onCommand, … })` call, with `status`, `pane`, `panel`, `flash`, `draft`,
   `send` and `log` on the handle it gives back. `examples/plugins/clock` is written with it.
@@ -40,13 +42,15 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
   carrying a half-written message along, and the text is back when you return to that channel or thread. Sending clears that
   place's draft. They are kept in `drafts.json` next to the read positions, so they survive a restart.
 - **Agents.** `/agents` lists the agents this copy made; `/agents create` — or the “new agent…” row in that list — turns the composer into a
-  two-step flow that asks for a name and then for what the agent should do, and makes it an agent: a fresh key of its own, a
-  folder of its own to work in, and a record in `agents.json` (mode 600, next to the read positions, since it holds the agent's
-  key). It is published to the relay, the way the Buzz app does it: the agent's own kind-0 profile, signed with its own key
-  and carrying this identity's NIP-OA attestation of it, and this identity's `kind:30177` listing of it, so the owner's other Buzz
-  clients show it. The relay is asked before anything is written down, so an agent it refuses is not made at all — no key, no
-  folder, no record — and the flow says why. The harness it is made for is a local Claude Code driven over ACP
-  (`claude-code-acp`). Read-only mode refuses to make one.
+  flow that asks for a name, then for what the agent should do, then starts the harness and reads what it offers over ACP (its models, and a
+  model's thinking levels) so a model and a level can be picked, and makes it an agent: a fresh key of its own, a folder of its own to work in,
+  and a record in `agents.json` (mode 600, next to the read positions, since it holds the agent's key). It is published to the relay, the way
+  the Buzz app does it: the agent's own kind-0 profile, signed with its own key and carrying this identity's NIP-OA attestation of it, and this
+  identity's `kind:30177` listing of it, so the owner's other Buzz clients show it. The harness is asked what it offers, and the relay asked to
+  take the agent, before anything is written down: a harness that will not start or will not answer, or an agent the relay refuses, stops the
+  flow and makes nothing — no key, no folder, no record — and the flow says why. The harness it is made for is a local Claude Code driven over
+  ACP (`claude-code-acp`); a second one (codex, say) is a new entry in the harness table (`src/harness/mod.rs`) and nothing else. Read-only
+  mode refuses to make one.
 
 ### Changed
 

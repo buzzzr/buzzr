@@ -13,6 +13,7 @@ pub mod config;
 pub mod contrib;
 pub mod editor;
 pub mod emoji;
+pub mod harness;
 pub mod keyfile;
 pub mod list;
 pub mod live;

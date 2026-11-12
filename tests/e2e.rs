@@ -15,7 +15,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -172,6 +172,11 @@ impl Session {
             .stdin(Stdio::from(inp.try_clone().unwrap()))
             .stdout(Stdio::from(inp.try_clone().unwrap()))
             .stderr(Stdio::from(inp));
+        // The harness the agents flow starts is not installed in a test environment: put the stub first on `PATH`.
+        let mut stub_path = stub_harness_dir().as_os_str().to_owned();
+        stub_path.push(":");
+        stub_path.push(std::env::var_os("PATH").unwrap_or_default());
+        cmd.env("PATH", stub_path);
         if keyboard_enhanced {
             // Make the pty the child's controlling terminal, the way a terminal emulator does: the app asks for the
             // keyboard protocol on /dev/tty, and a test runner started from a terminal has a /dev/tty of its own.
@@ -419,6 +424,38 @@ fn empty_plugins_dir() -> PathBuf {
     let _ = std::fs::create_dir_all(&dir);
     dir
 }
+
+/// A stub `claude-code-acp` on a directory of its own, made once and put first on every session's `PATH`.
+///
+/// `/agents create` starts the harness and reads what it offers over ACP before it makes anything, and no real harness
+/// is installed in a test environment. The stub answers `initialize` and `session/new` with two models and three
+/// thinking levels, and `session/set_config_option` with the levels of the model it is moved to — which is all the
+/// probe reads. It sits on every session's `PATH`: only the agents flow ever starts a harness, so nothing else notices.
+fn stub_harness_dir() -> &'static PathBuf {
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    DIR.get_or_init(|| {
+        let dir = std::env::temp_dir().join(format!("buzzr-e2e-harness-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("could not make the stub harness directory");
+        let path = dir.join("claude-code-acp");
+        std::fs::write(&path, STUB_HARNESS).expect("could not write the stub harness");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("could not make the stub harness executable");
+        dir
+    })
+}
+
+/// The stub harness: one JSON-RPC request per line in, one answer per line out, echoing the request id.
+const STUB_HARNESS: &str = r#"#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+  case "$line" in
+    *'"initialize"'*) result='{"protocolVersion":1,"agentCapabilities":{}}' ;;
+    *'"session/new"'*) result='{"sessionId":"s1","configOptions":[{"id":"model","category":"model","currentValue":"sonnet","options":[{"value":"sonnet","name":"Sonnet"},{"value":"opus","name":"Opus"}]},{"id":"thought_level","category":"thought_level","currentValue":"medium","options":[{"value":"low"},{"value":"medium"},{"value":"high"}]}]}' ;;
+    *'"session/set_config_option"'*) result='{"configOptions":[{"id":"model","category":"model","currentValue":"opus","options":[{"value":"sonnet"},{"value":"opus"}]},{"id":"thought_level","category":"thought_level","currentValue":"high","options":[{"value":"low"},{"value":"high"}]}]}' ;;
+    *) result='{}' ;;
+  esac
+  printf '{"jsonrpc":"2.0","id":%s,"result":%s}\n' "$id" "$result"
+done
+"#;
 
 /// Like `session`, but with plugins on and an empty plugins folder, so a compiled-in plugin is there and no
 /// runtime-loaded one is.
@@ -893,10 +930,12 @@ fn esc_closes_the_command_palette_and_keeps_what_was_typed() {
     s.press("esc");
 }
 
-/// `/agents` and the two-step "new agent" flow, all through the real UI: the list opens from the composer, Enter on
-/// its "new agent…" row turns the composer into the flow's box (a name, then what the agent should do), and accepting
-/// it makes a local agent — a key of its own, a folder of its own, and a record on disk — which the list then shows.
-/// The flow reads and writes only the config directory, so a session with its own temp config is safe to run it in.
+/// `/agents` and the "new agent" flow, all through the real UI: the list opens from the composer, Enter on its
+/// "new agent…" row turns the composer into the flow's box (a name, then what the agent should do), the harness is
+/// asked what it offers (its models on a panel, a model's thinking levels on another), and the pick makes a local
+/// agent — a key of its own, a folder of its own, and a record on disk — which the list then shows. The flow reads and
+/// writes only the config directory, so a session with its own temp config is safe to run it in. The harness is the
+/// stub on `PATH` (see `stub_harness_dir`), since no real one is installed here.
 #[test]
 fn agents_are_listed_and_a_new_one_is_created_through_the_composer() {
     let Some(relay) = relay_or_skip("agents_are_listed_and_a_new_one_...") else { return };
@@ -922,8 +961,16 @@ fn agents_are_listed_and_a_new_one_is_created_through_the_composer() {
     s.press("enter");
     s.expect("the composer to ask what it should do", "new agent · instructions");
     s.expect("the question, naming the agent", "What should Scout do?");
-    // the second Enter makes it: the list comes up on the new agent, with its harness and its own folder
+    // the instructions ask the harness what it offers, and its models come up on a panel, the one it is on marked
     s.type_text("watch the repo");
+    s.press("enter");
+    s.expect("the models panel", "new agent · model");
+    s.expect("a model the harness listed", "Opus");
+    // pick another model: the harness is asked again, for that model's own thinking levels
+    s.press("down");
+    s.press("enter");
+    s.expect("the levels panel", "new agent · level");
+    // the level makes it: the list comes up on the new agent, with its harness and its own folder
     s.press("enter");
     s.expect("the confirmation", "Scout created");
     s.expect("the agent in the list", "Scout");
@@ -931,11 +978,13 @@ fn agents_are_listed_and_a_new_one_is_created_through_the_composer() {
     s.expect("the folder of its own beside the record", "agents/scout");
     s.press("esc");
     s.expect_gone("the panel to close", "local agents");
-    // it is on disk: a fresh run on the same config lists it again
+    // it is on disk, with the harness and the picks the flow took, so a fresh run on the same config lists it again
     s.press("ctrl+q");
     s.wait_exit(Duration::from_secs(10)).expect("buzzr should exit on Ctrl+Q");
     let written = std::fs::read_to_string(config.join("agents.json")).expect("the agent is on disk");
     assert!(written.contains("Scout") && written.contains("claude-code-acp"), "the record names the agent and its harness: {written}");
+    assert!(written.contains("\"model\": \"opus\""), "the record keeps the model the flow picked: {written}");
+    assert!(written.contains("\"effort\": \"low\""), "and the thinking level it picked: {written}");
     assert!(written.contains("nsec1"), "the agent keeps its own key in the file: {written}");
     drop(s); // the session takes its config directory with it
     std::fs::create_dir_all(&config).unwrap();

@@ -440,8 +440,11 @@ impl Runtime {
                         self.emit(PluginEvent::Prompt { plugin: plugin.to_owned(), id, title, hint, multiline })
                     }
                     FromPlugin::ListAgents { id } => self.emit(PluginEvent::ListAgents { plugin: plugin.to_owned(), id }),
-                    FromPlugin::CreateAgent { id, name, instructions } => {
-                        self.emit(PluginEvent::CreateAgent { plugin: plugin.to_owned(), id, name, instructions })
+                    FromPlugin::ProbeHarness { id, harness, model } => {
+                        self.emit(PluginEvent::ProbeHarness { plugin: plugin.to_owned(), id, harness, model })
+                    }
+                    FromPlugin::CreateAgent { id, name, instructions, harness, model, effort } => {
+                        self.emit(PluginEvent::CreateAgent { plugin: plugin.to_owned(), id, name, instructions, harness, model, effort })
                     }
                     FromPlugin::Log { level, text } => {
                         self.log(plugin, &format!("{level}: {text}"));
@@ -594,6 +597,15 @@ impl Runtime {
                         Err(e) => (None, Some(e.as_str())),
                     };
                     let _ = proc.stdin.send(ToPlugin::Created { id: &id, agent, error }.line());
+                }
+            }
+            PluginCmd::HarnessOffer { plugin, id, result } => {
+                if let Some(proc) = self.running.get(&plugin) {
+                    let (offer, error) = match &result {
+                        Ok(o) => (Some(o), None),
+                        Err(e) => (None, Some(e.as_str())),
+                    };
+                    let _ = proc.stdin.send(ToPlugin::HarnessOffer { id: &id, offer, error }.line());
                 }
             }
         }

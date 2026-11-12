@@ -16,19 +16,14 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
-/// The harness a new agent is created with: a local Claude Code that speaks ACP on stdio.
-pub const HARNESS: &str = "claude-code-acp";
-
-/// The agent type this harness runs, as the owner's listing names it (`pluginId/typeId`): the Buzz app's own Claude
-/// Code type, `buzz.claude-code/claude-code`. Buzz clients read a listing's `runtime` tag to resolve the type, and one
-/// they cannot resolve is not shown, so a buzzr agent names the type it actually runs.
-pub const HARNESS_RUNTIME: &str = "buzz.claude-code/claude-code";
-
 /// The longest name accepted, so a name always fits on one line.
 const NAME_MAX: usize = 64;
 
 /// The longest instruction text kept, so a hand-edited file cannot grow the config without bound.
 const INSTRUCTIONS_MAX: usize = 4096;
+
+/// The longest model id or thinking level kept (they are short ids, not prose).
+const CHOICE_MAX: usize = 64;
 
 /// One local agent: everything the panel shows. The private key it speaks with is not here.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -36,8 +31,12 @@ pub struct Agent {
     pub name: String,
     /// The identity's public key (hex).
     pub pubkey: String,
-    /// What will run it: `claude-code-acp`.
+    /// What will run it: a harness id, the program to run (`claude-code-acp`).
     pub harness: String,
+    /// The model the harness is asked to run, when one was chosen (`None` = the harness's own default).
+    pub model: Option<String>,
+    /// The thinking level the harness is asked to run at, when one was chosen (`None` = its default).
+    pub effort: Option<String>,
     /// The folder the harness works in.
     pub workspace: String,
     /// What the agent was told to do; free text, may be empty.
@@ -52,6 +51,10 @@ struct Record {
     pubkey: String,
     nsec: String,
     harness: String,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    effort: Option<String>,
     workspace: String,
     #[serde(default)]
     instructions: String,
@@ -65,6 +68,8 @@ impl Record {
             name: self.name.clone(),
             pubkey: self.pubkey.clone(),
             harness: self.harness.clone(),
+            model: self.model.clone(),
+            effort: self.effort.clone(),
             workspace: self.workspace.clone(),
             instructions: self.instructions.clone(),
             created_at: self.created_at,
@@ -98,6 +103,7 @@ fn read(path: &Path) -> Result<File, String> {
 /// Publishing happens between [`prepare`] and [`commit`], so a relay that does not take the agent leaves nothing
 /// behind — no key, no folder and no record. This is the order `/agents create` takes; `create` is the two steps in one
 /// for a caller that does not publish.
+#[derive(Debug)]
 pub struct Pending {
     agent: Agent,
     keys: Keys,
@@ -116,11 +122,15 @@ impl Pending {
     }
 }
 
-/// Check a new agent and make its key, without writing anything: the name, the folder it will get, and the identity it
-/// will speak with. [`commit`] writes it down once the relay has taken it.
-pub fn prepare(paths: &Paths, name: &str, instructions: &str) -> Result<Pending, String> {
+/// Check a new agent and make its key, without writing anything: the name, the folder it will get, the harness it will
+/// run on, and the identity it will speak with. [`commit`] writes it down once the relay has taken it.
+///
+/// `harness` is an id from the harness table (`harness.rs`); `model` and `effort` are what the harness offered and the
+/// user picked, either of which may be empty for the harness's own choice.
+pub fn prepare(paths: &Paths, name: &str, instructions: &str, harness: &str, model: &str, effort: &str) -> Result<Pending, String> {
     let name = clean_name(name)?;
     let instructions = clean_instructions(instructions);
+    let harness = crate::harness::get(harness).ok_or_else(|| format!("{harness} is not a harness buzzr knows"))?;
     let file = read(&paths.agents())?;
     if file.agents.iter().any(|r| r.name.eq_ignore_ascii_case(&name)) {
         return Err(format!("an agent called {name} already exists"));
@@ -130,7 +140,9 @@ pub fn prepare(paths: &Paths, name: &str, instructions: &str) -> Result<Pending,
     let agent = Agent {
         name,
         pubkey: keys.public_key().to_hex(),
-        harness: HARNESS.to_owned(),
+        harness: harness.id.to_owned(),
+        model: clean_choice(model),
+        effort: clean_choice(effort),
         workspace: workspace.display().to_string(),
         instructions,
         created_at: now(),
@@ -151,6 +163,8 @@ pub fn commit(paths: &Paths, pending: &Pending) -> Result<Agent, String> {
         pubkey: agent.pubkey.clone(),
         nsec: pending.keys.secret_key().to_bech32().map_err(|e| e.to_string())?,
         harness: agent.harness.clone(),
+        model: agent.model.clone(),
+        effort: agent.effort.clone(),
         workspace: agent.workspace.clone(),
         instructions: agent.instructions.clone(),
         created_at: agent.created_at,
@@ -163,11 +177,12 @@ pub fn commit(paths: &Paths, pending: &Pending) -> Result<Agent, String> {
     Ok(agent.clone())
 }
 
-/// Make a new agent in one step: a fresh key, a folder of its own, and a record appended to `agents.json`. Returns what
-/// the panel shows; the key goes to that file and nowhere else. A caller that publishes the agent uses [`prepare`] and
-/// [`commit`] instead, so a relay that refuses it leaves nothing behind.
+/// Make a new agent in one step, on the default harness and its own choice of model: a fresh key, a folder of its own,
+/// and a record appended to `agents.json`. Returns what the panel shows; the key goes to that file and nowhere else. A
+/// caller that publishes the agent uses [`prepare`] and [`commit`] instead, so a relay that refuses it leaves nothing
+/// behind; the flow that picks a harness, model and effort uses those too.
 pub fn create(paths: &Paths, name: &str, instructions: &str) -> Result<Agent, String> {
-    let pending = prepare(paths, name, instructions)?;
+    let pending = prepare(paths, name, instructions, crate::harness::DEFAULT.id, "", "")?;
     commit(paths, &pending)
 }
 
@@ -213,6 +228,18 @@ fn clean_instructions(text: &str) -> String {
     let text = crate::markdown::strip_controls(text);
     let text = text.trim();
     text.chars().take(INSTRUCTIONS_MAX).collect()
+}
+
+/// A model id or thinking level the harness offered: control characters go, the length is capped, and an empty one is
+/// the harness's own choice (`None`), so an unset field and an empty string are the same thing.
+fn clean_choice(text: &str) -> Option<String> {
+    let text = crate::markdown::strip_controls(text);
+    let text: String = text.trim().chars().take(CHOICE_MAX).collect();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
 }
 
 /// `<config dir>/agents/<slug>`, with `-2`, `-3`… when that folder (or another agent's) is already there.
@@ -276,7 +303,9 @@ mod tests {
         let paths = temp_paths();
         let a = create(&paths, "  Scout  ", "watch the repo").unwrap();
         assert_eq!(a.name, "Scout", "the name is tidied");
-        assert_eq!(a.harness, HARNESS);
+        assert_eq!(a.harness, crate::harness::DEFAULT.id);
+        assert_eq!(a.model, None, "the default harness's own choice of model is not pinned");
+        assert_eq!(a.effort, None);
         assert_eq!(a.pubkey.len(), 64, "a hex public key");
         assert!(a.workspace.ends_with("/agents/scout"), "{}", a.workspace);
         assert!(a.instructions.contains("watch the repo"));
@@ -296,7 +325,7 @@ mod tests {
     #[test]
     fn a_prepared_agent_is_not_written_until_it_is_committed() {
         let paths = temp_paths();
-        let pending = prepare(&paths, "  Scout  ", "watch the repo").unwrap();
+        let pending = prepare(&paths, "  Scout  ", "watch the repo", crate::harness::DEFAULT.id, "sonnet", "high").unwrap();
         // nothing is on disk yet, so a relay that refuses the agent leaves nothing behind
         assert!(!paths.agents().exists(), "prepare writes no record");
         assert!(!Path::new(&pending.agent().workspace).exists(), "prepare makes no folder");
@@ -304,9 +333,42 @@ mod tests {
         // commit is what writes it down: the folder, and the record with the key
         let a = commit(&paths, &pending).unwrap();
         assert_eq!(a.pubkey, pending.agent().pubkey, "the committed agent is the prepared one");
+        assert_eq!(a.model.as_deref(), Some("sonnet"), "the chosen model is kept");
+        assert_eq!(a.effort.as_deref(), Some("high"), "and the thinking level");
         assert!(Path::new(&a.workspace).is_dir(), "the folder is made");
         assert_eq!(mode(&paths.agents()), 0o600, "the record file is private");
         assert_eq!(load(&paths.agents()), vec![a], "and reads back");
+        std::fs::remove_dir_all(paths.dir()).unwrap();
+    }
+
+    #[test]
+    fn an_agent_is_made_on_a_harness_buzzr_knows_and_keeps_the_choices_tidied() {
+        let paths = temp_paths();
+        // a harness this build does not know is refused before anything is made
+        let err = prepare(&paths, "Scout", "", "not-a-harness", "", "").unwrap_err();
+        assert!(err.contains("not a harness"), "{err}");
+        assert!(!paths.agents().exists(), "nothing was written");
+        // model and effort are trimmed, and an empty one is the harness's own choice, not an empty string
+        let pending = prepare(&paths, "Scout", "", crate::harness::DEFAULT.id, "  opus ", "   ").unwrap();
+        assert_eq!(pending.agent().model.as_deref(), Some("opus"));
+        assert_eq!(pending.agent().effort, None, "a blank level is no choice at all");
+        let _ = std::fs::remove_dir_all(paths.dir()); // `prepare` wrote nothing, so there may be no directory to remove
+    }
+
+    #[test]
+    fn a_record_written_before_agents_had_a_model_still_reads_back() {
+        let paths = temp_paths();
+        std::fs::create_dir_all(paths.dir()).unwrap();
+        // an older build wrote no `model`/`effort`; the record must still load, with no choice pinned
+        std::fs::write(
+            paths.agents(),
+            r#"{"agents":[{"name":"Scout","pubkey":"aa","nsec":"x","harness":"claude-code-acp","workspace":"/tmp/x","instructions":"","created_at":1}]}"#,
+        )
+        .unwrap();
+        let agents = load(&paths.agents());
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].model, None);
+        assert_eq!(agents[0].effort, None);
         std::fs::remove_dir_all(paths.dir()).unwrap();
     }
 

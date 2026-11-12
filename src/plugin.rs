@@ -25,7 +25,8 @@ pub const READ_VISIBLE: &str = "read:visible";
 pub const MESSAGES_WRITE: &str = "messages:write";
 /// Permission: the plugin may be told which local agents exist (`AgentView`, never a key).
 pub const AGENTS_READ: &str = "agents:read";
-/// Permission: the plugin's `CreateAgent` is honoured (it makes a new local identity and publishes it).
+/// Permission: the plugin may ask buzzr to start a harness (`ProbeHarness`) and to make and publish a local agent
+/// (`CreateAgent`).
 pub const AGENTS_WRITE: &str = "agents:write";
 
 /// The send limit both kinds share: at most this many sends from one plugin in a minute, and never two closer together
@@ -53,8 +54,14 @@ pub struct AgentView {
     pub pubkey: String,
     /// The same key as `npub1…`, for display.
     pub npub: String,
-    /// What runs it: `claude-code-acp`.
+    /// What runs it: a harness id, the program to run (`claude-code-acp`).
     pub harness: String,
+    /// The model the harness is asked to run, when one was chosen (`None` = the harness's own default).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// The thinking level the harness is asked to run at, when one was chosen (`None` = its default).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
     /// The folder the harness works in.
     pub workspace: String,
     pub created_at: u64,
@@ -69,6 +76,30 @@ pub struct CreatedAgent {
     pub pubkey: String,
     /// The same key as `npub1…`, for display.
     pub npub: String,
+}
+
+/// One value a harness offers for a setting — a model, a thinking level — and what to call it.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Choice {
+    /// The value to name when the setting is set.
+    pub value: String,
+    /// What to show; a harness that names nothing is labelled by its value.
+    #[serde(default)]
+    pub label: String,
+}
+
+/// What a harness offers for a new agent: the models it lists, the one it is on, and that model's thinking levels.
+/// The answer to [`PluginOutput::ProbeHarness`], and the same shape a harness's ACP `configOptions` are read into.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct HarnessOffer {
+    #[serde(default)]
+    pub models: Vec<Choice>,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub efforts: Vec<Choice>,
+    #[serde(default)]
+    pub effort: String,
 }
 
 /// What buzzr hands a plugin: a fresh snapshot of what is on screen, a heartbeat, a command the user ran, the answer to
@@ -91,6 +122,9 @@ pub enum PluginInput {
     Agents { id: String, agents: Vec<AgentView> },
     /// The answer to [`PluginOutput::CreateAgent`]: the agent that was made, or why it was not.
     Created { id: String, result: Result<CreatedAgent, String> },
+    /// The answer to [`PluginOutput::ProbeHarness`]: what the harness offers for a new agent, or why it could not be
+    /// asked (it is not installed, or it did not answer).
+    HarnessOffer { id: String, result: Result<HarnessOffer, String> },
 }
 
 /// What a plugin asks buzzr to do — the same surface an external plugin has on the wire.
@@ -116,9 +150,15 @@ pub enum PluginOutput {
     Prompt { id: String, title: String, hint: String, multiline: bool },
     /// Ask for the local agents. The answer comes back as [`PluginInput::Agents`] with this `id`.
     ListAgents { id: String },
-    /// Make a local agent and publish it. The host owns the key, the folder and the relay, so the plugin asks; the
-    /// answer comes back as [`PluginInput::Created`] with this `id`.
-    CreateAgent { id: String, name: String, instructions: String },
+    /// Ask buzzr to start the harness and read what it offers for a new agent — its models, and the thinking levels of
+    /// the model it starts on. When `model` is given the session is put on that model first, so the levels are its. The
+    /// answer comes back as [`PluginInput::HarnessOffer`] with this `id`. The harness is buzzr's to run, not the
+    /// plugin's: a plugin never starts a process.
+    ProbeHarness { id: String, harness: String, model: Option<String> },
+    /// Make a local agent and publish it, on `harness`, on `model` and thinking level `effort` (both may be empty, for
+    /// the harness's own choice). The host owns the key, the folder and the relay, so the plugin asks; the answer comes
+    /// back as [`PluginInput::Created`] with this `id`.
+    CreateAgent { id: String, name: String, instructions: String, harness: String, model: String, effort: String },
 }
 
 impl PluginOutput {
@@ -149,11 +189,20 @@ impl PluginOutput {
                 multiline,
             },
             PluginOutput::ListAgents { id: prompt } => PluginEvent::ListAgents { plugin: id.to_owned(), id: clean_line(&prompt) },
-            PluginOutput::CreateAgent { id: prompt, name, instructions } => PluginEvent::CreateAgent {
+            PluginOutput::ProbeHarness { id: prompt, harness, model } => PluginEvent::ProbeHarness {
+                plugin: id.to_owned(),
+                id: clean_line(&prompt),
+                harness: clean_line(&harness),
+                model: model.map(|m| clean_line(&m)),
+            },
+            PluginOutput::CreateAgent { id: prompt, name, instructions, harness, model, effort } => PluginEvent::CreateAgent {
                 plugin: id.to_owned(),
                 id: clean_line(&prompt),
                 name: clean_line(&name),
                 instructions: clean_block(&instructions),
+                harness: clean_line(&harness),
+                model: clean_line(&model),
+                effort: clean_line(&effort),
             },
         }
     }
@@ -350,11 +399,39 @@ mod tests {
         assert_eq!(panel.rows.len(), 1, "a blank row is dropped");
         assert_eq!(panel.rows[0].text, "one[2J");
 
-        let ev = PluginOutput::CreateAgent { id: "new".into(), name: "Scout".into(), instructions: "a\nb".into() }.into_event("agents");
+        let ev = PluginOutput::CreateAgent {
+            id: "new".into(),
+            name: "Scout".into(),
+            instructions: "a\nb".into(),
+            harness: "claude-code-acp".into(),
+            model: "opus".into(),
+            effort: "high".into(),
+        }
+        .into_event("agents");
         assert_eq!(
             ev,
-            PluginEvent::CreateAgent { plugin: "agents".into(), id: "new".into(), name: "Scout".into(), instructions: "a\nb".into() }
+            PluginEvent::CreateAgent {
+                plugin: "agents".into(),
+                id: "new".into(),
+                name: "Scout".into(),
+                instructions: "a\nb".into(),
+                harness: "claude-code-acp".into(),
+                model: "opus".into(),
+                effort: "high".into(),
+            }
         );
+    }
+
+    #[test]
+    fn a_probe_and_a_create_carry_the_harness_and_the_picks() {
+        // Asking the harness what it offers: the id, and no model yet (the first look).
+        let ev = PluginOutput::ProbeHarness { id: "offer".into(), harness: "claude-code-acp".into(), model: None }.into_event("agents");
+        assert_eq!(ev, PluginEvent::ProbeHarness { plugin: "agents".into(), id: "offer".into(), harness: "claude-code-acp".into(), model: None });
+        // A second look, for one model's levels, names the model; control characters never survive.
+        let ev = PluginOutput::ProbeHarness { id: "levels".into(), harness: "claude-code-acp".into(), model: Some("opus\u{1b}[31m".into()) }
+            .into_event("agents");
+        let PluginEvent::ProbeHarness { model, .. } = ev else { panic!("not a probe") };
+        assert_eq!(model.as_deref(), Some("opus[31m"));
     }
 
     #[test]

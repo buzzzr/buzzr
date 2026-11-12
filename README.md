@@ -59,12 +59,13 @@
 - **Invite people into a channel.** `/invite name` adds someone to the channel on screen (or the group DM you are in). A message
   that `@mentions` someone who is not in the channel asks first: `y` invites them and sends, `n` sends without inviting, Esc
   keeps the message in the input.
-- **Agents.** `/agents` lists the agents this copy made; `/agents create` (or the “new agent…” row in that list) asks for a name and then for what
-  the agent should do, and makes it — a key of its own, a folder of its own, and a record in `agents.json` (mode 600, beside the
-  read positions) — and publishes it to the relay: the agent's own profile, signed with its own key and carrying your
-  attestation of it, and your listing of it, so other Buzz clients show it as yours. The harness it is made for is a local Claude
-  Code driven over ACP (`claude-code-acp`, as the Buzz app does). The relay is asked first, so an agent it will not take is not
-  made at all, and the flow says why.
+- **Agents.** `/agents` lists the agents this copy made; `/agents create` (or the “new agent…” row in that list) asks for a name, then for what
+  the agent should do, then asks the harness what it offers — its models, and a model's thinking levels — so you can pick one of each, and makes
+  it — a key of its own, a folder of its own, and a record in `agents.json` (mode 600, beside the read positions) — and publishes it to the
+  relay: the agent's own profile, signed with its own key and carrying your attestation of it, and your listing of it, so other Buzz clients
+  show it as yours. The harness it is made for is a local Claude Code driven over ACP (`claude-code-acp`, as the Buzz app does). The harness is
+  asked what it offers, and the relay asked to take the agent, before anything is written: a harness that will not answer, like an agent the
+  relay will not take, stops the flow and makes nothing, and says why.
 - **Plugins.** Add your own `/commands`, status items, badges, a pane under the channel list and panels — from any language, as a runtime-loaded plugin, or as a compiled-in Rust plugin in buzzr's own tree. See [PLUGIN.md](PLUGIN.md).
 - **Themes.** The default `buzz-dark` uses the dark palette of the Buzz desktop app. `BUZZR_THEME=dark` keeps your terminal's own background, `BUZZR_THEME=buzz-light` is the desktop app's light palette, and `BUZZR_THEME=light` is for a light terminal. `BUZZR_THEME=high-contrast` is black-on-white at WCAG AAA (7:1), and `NO_COLOR` or `TERM=dumb` turns colour off entirely.
 - **Read-only mode** (`--read-only`) for identities you should not speak for.
@@ -250,7 +251,7 @@ The full behaviour, for when the feature list above is not enough.
 | Enter, in a channel you are not in | join it (the composer is a `[ Join ]` button) |
 | r, c, u, e, d | reply in the thread, copy, mark unread, edit, delete the selected message (e and d: yours only) |
 | a | react to the selected message: pick an emoji, or type to search one (Enter sends, Esc closes) |
-| Enter, on the “new agent…” row of the `/agents` list | make a new agent: a name, then what it should do (Esc cancels, Enter makes it) |
+| Enter, on the “new agent…” row of the `/agents` list | make a new agent: a name, what it should do, and its model and thinking level (Esc cancels, Enter makes it) |
 | / | start a `/command`: a palette lists the commands above the input and narrows as you type (Enter runs the one on the cursor, Tab completes it, Esc closes the list and keeps what was typed) |
 | Ctrl+F | search channels, people and messages |
 | Esc | close the palette or a panel, cancel a reply, leave a thread, then step back to the channel list |

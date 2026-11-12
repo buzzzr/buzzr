@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Context, Result};
-use buzzr::{agents, config, keyfile, live, plugin, plugins, relay, release, selftest, setup, ui, update};
+use buzzr::{agents, config, harness, keyfile, live, plugin, plugins, relay, release, selftest, setup, ui, update};
 use buzzr::app::{App, AppEvent, Cmd};
 use buzzr::relay::Relay;
 use clap::Parser;
@@ -333,9 +333,18 @@ fn exit_notice(app: &App) -> Option<String> {
 
 /// Make a local agent and publish it to the relay. The relay comes first: the agent is checked and its key made in
 /// memory, published, and only written down (its folder and its record) once the relay has taken it — so an agent the
-/// relay refuses is not created at all.
-async fn create_and_publish(relay: &Relay, paths: &config::Paths, name: String, instructions: String) -> Result<agents::Agent, String> {
-    let pending = agents::prepare(paths, &name, &instructions)?;
+/// relay refuses is not created at all. The harness, model and thinking level the flow picked are named here; the
+/// harness is one buzzr knows (or `prepare` refuses it), and the picks may be empty for the harness's own choice.
+async fn create_and_publish(
+    relay: &Relay,
+    paths: &config::Paths,
+    name: String,
+    instructions: String,
+    harness: String,
+    model: String,
+    effort: String,
+) -> Result<agents::Agent, String> {
+    let pending = agents::prepare(paths, &name, &instructions, &harness, &model, &effort)?;
     publish_agent(relay, &pending).await?;
     agents::commit(paths, &pending)
 }
@@ -345,9 +354,11 @@ async fn create_and_publish(relay: &Relay, paths: &config::Paths, name: String, 
 /// and nothing is written locally, so the agent is not created.
 async fn publish_agent(relay: &Relay, pending: &agents::Pending) -> Result<(), String> {
     let agent = pending.agent();
+    // The listing names the agent type the harness runs (`pluginId/typeId`), so an owner's client can resolve it.
+    let runtime = harness::get(&agent.harness).map(|h| h.runtime).unwrap_or(harness::DEFAULT.runtime);
     let attestation = agents::attestation(relay.keys(), &agent.pubkey)?;
     relay.publish_agent_profile(pending.keys(), &agent.name, &attestation).await.map_err(|e| format!("{e:#}"))?;
-    relay.publish_agent_listing(&agent.pubkey, &agent.name, agents::HARNESS_RUNTIME).await.map_err(|e| format!("{e:#}"))?;
+    relay.publish_agent_listing(&agent.pubkey, &agent.name, runtime).await.map_err(|e| format!("{e:#}"))?;
     Ok(())
 }
 
@@ -386,13 +397,26 @@ fn run(cmd: Cmd, relay: &Arc<Relay>, tx: &UnboundedSender<AppEvent>, subscriptio
             // Written here too: each save is the whole map, so an older one must not land after a newer one.
             let _ = config::save_drafts(&paths.drafts(), &drafts);
         }
-        Cmd::CreateAgent { name, instructions } => {
+        Cmd::CreateAgent { name, instructions, harness, model, effort } => {
             // The relay first, the disk second: the agent is published (its own kind-0 profile carrying this
             // identity's attestation, and this identity's listing of it) and only then written down. A relay that
             // refuses it means no agent — no key, no folder, no record — and the error is what the overlay shows.
             let paths = paths.clone();
             tokio::spawn(async move {
-                let _ = tx.send(AppEvent::AgentCreated(create_and_publish(&relay, &paths, name, instructions).await));
+                let _ = tx.send(AppEvent::AgentCreated(create_and_publish(&relay, &paths, name, instructions, harness, model, effort).await));
+            });
+        }
+        Cmd::ProbeHarness { harness: id, model } => {
+            // A harness that will not start, or will not answer ACP, is reported rather than hung on: the probe blocks
+            // (it waits on the harness), so it runs on the blocking pool, off the loop and off the async workers.
+            tokio::spawn(async move {
+                let result = tokio::task::spawn_blocking(move || match harness::get(&id) {
+                    Some(h) => harness::offer(h, model.as_deref()),
+                    None => Err(format!("{id} is not a harness buzzr knows")),
+                })
+                .await
+                .unwrap_or_else(|e| Err(format!("the harness check failed: {e}")));
+                let _ = tx.send(AppEvent::HarnessOffer(result));
             });
         }
         Cmd::LoadWindow { channel, cursor } => {

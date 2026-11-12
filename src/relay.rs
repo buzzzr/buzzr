@@ -747,12 +747,12 @@ mod tests {
     fn the_owners_listing_names_the_agent_and_the_runtime_it_runs() {
         let owner = Keys::generate();
         let agent = Keys::generate();
-        let event = agent_listing_event(&owner, &agent.public_key().to_hex(), "clara", crate::agents::HARNESS_RUNTIME).unwrap();
+        let event = agent_listing_event(&owner, &agent.public_key().to_hex(), "clara", crate::harness::DEFAULT.runtime).unwrap();
         assert_eq!(event.kind, Kind::Custom(30177), "the owner's agent listing");
         assert_eq!(event.pubkey, owner.public_key(), "the owner signs their own listing");
         assert_eq!(tag_of(&event, "d")[1], agent.public_key().to_hex(), "the agent's key addresses the record");
         let runtime = tag_of(&event, "runtime");
-        assert_eq!(runtime[1], crate::agents::HARNESS_RUNTIME);
+        assert_eq!(runtime[1], crate::harness::DEFAULT.runtime);
         assert!(runtime[1].contains('/'), "a runtime is `pluginId/typeId`, which is what a Buzz client resolves: {runtime:?}");
         let body: Value = serde_json::from_str(&event.content).unwrap();
         assert_eq!(body["name"], "clara");
@@ -841,7 +841,7 @@ mod tests {
         let relay = Relay::new(&url, owner.clone(), None).unwrap();
         let attestation = crate::agents::attestation(&owner, &agent.public_key().to_hex()).unwrap();
         relay.publish_agent_profile(&agent, "clara", &attestation).await.unwrap();
-        relay.publish_agent_listing(&agent.public_key().to_hex(), "clara", crate::agents::HARNESS_RUNTIME).await.unwrap();
+        relay.publish_agent_listing(&agent.public_key().to_hex(), "clara", crate::harness::DEFAULT.runtime).await.unwrap();
         server.await.unwrap();
 
         let seen = seen.lock().unwrap();

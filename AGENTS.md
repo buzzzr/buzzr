@@ -105,4 +105,5 @@ Test the first-run questions in a real terminal with an empty `BUZZR_CONFIG_DIR`
   channel creation is only exercised by `--selftest --probe-write`, which has to be run by someone happy for that identity to create and
   delete a private test channel.
 - Mention completion while typing; recalling sent messages with Up in the input.
+- Only one harness (Claude Code, `claude-code-acp`): a second one (codex, say) is a new entry in the harness table (`src/harness/mod.rs`) and nothing else.
 - Verify the relay's signatures on overlay events (`39005`, `39006`); today the authenticated HTTPS transport is trusted.
