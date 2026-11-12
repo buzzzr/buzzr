@@ -24,7 +24,7 @@ jobs:
     outputs:
       version: ${{ steps.v.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - id: v
         name: Read the version from Cargo.toml and check it against the tag
         run: |
@@ -48,7 +48,7 @@ jobs:
           - { target: x86_64-apple-darwin,        os: macos-latest,     linux: false }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Build (Linux, static, in Alpine)
         if: matrix.linux
