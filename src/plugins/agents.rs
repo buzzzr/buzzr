@@ -38,17 +38,19 @@ impl Agents {
         if self.agents.is_empty() {
             rows.push(PanelRow { text: "No agents yet.".into(), tone: Tone::Bold, action: None });
             rows.push(PanelRow {
-                text: "Enter on “new agent” below, or /agents create, makes one: an identity of its own and a folder of its own.".into(),
+                text: "Enter “new agent” below, or /agents create, makes one — its own identity and folder.".into(),
                 tone: Tone::Dim,
                 action: None,
             });
         }
         for a in &self.agents {
-            rows.push(PanelRow { text: format!("{}  ·  {}", a.name, a.npub), tone: Tone::Accent, action: None });
+            rows.push(PanelRow { text: format!("{}  ·  {}", a.name, short(&a.npub)), tone: Tone::Accent, action: None });
             rows.push(PanelRow { text: format!("   {}  ·  {}", a.harness, a.workspace), tone: Tone::Dim, action: None });
         }
         rows.push(PanelRow { text: "new agent…".into(), tone: Tone::Ok, action: Some("new".into()) });
-        PluginOutput::Panel(Panel { id: ID.into(), title: "local agents · Enter on “new agent” makes one · Esc closes".into(), rows })
+        // The title is just the name: the panel draws its own "Up/Down · Enter runs · Esc closes" after it, so anything
+        // longer here collides with that line and clips.
+        PluginOutput::Panel(Panel { id: ID.into(), title: "local agents".into(), rows })
     }
 
     /// Start the flow: ask for a name.
