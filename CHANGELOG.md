@@ -27,6 +27,9 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
 
 ### Changed
 
+- `←` / `→` walk a thread from the message list: with a message row selected, `→` opens its thread (a message with no replies has
+  nothing under it, so there the key does nothing) and `←` goes up to that thread's root and, from the root, out of the thread. Esc
+  still backs out the same way, wherever the cursor is.
 - The thread pane reads as a thread: its root sits at the top as one header line — the message number, the time, the author and
   the first line of what was said, cut with `…` when there is more — and every reply is indented two columns under it. The root
   keeps message number 1, so the numbers `/r N` and `/t N` take are the ones on screen, and links in an indented reply are still

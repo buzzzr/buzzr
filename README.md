@@ -228,6 +228,7 @@ The full behaviour, for when the feature list above is not enough.
 | Up / Down | select a channel or message (Up at the top of a channel loads older messages) |
 | Up / Down, at the edges | nothing typed in the input, Up goes to the messages on the newest one; on the newest message, Down goes back to the input |
 | Enter | open the channel / open the thread (which reads it) / send |
+| ← / → | walk a thread: → opens the thread of the selected message, ← goes to the thread's root and then out of it (→ on a message with no replies does nothing) |
 | y, n, Esc (invite prompt) | invite the mentioned person and send, send without inviting them, keep the message in the input |
 | x | archive the channel under the bar (it leaves the list; Ctrl+F or `/search` finds it again) |
 | Enter, in a channel you are not in | join it (the composer is a `[ Join ]` button) |

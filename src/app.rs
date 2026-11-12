@@ -839,6 +839,46 @@ impl App {
         vec![Cmd::SaveRead(self.read_state())]
     }
 
+    /// Right arrow on the message the cursor is on: open its thread. A message with no replies has nothing under it, so
+    /// the key does nothing there — the same quiet no-op as Up at the top of the list. Inside a thread there is nothing
+    /// further to go into either: every row is already the reply it looks like.
+    fn enter_thread_of_selected(&mut self) -> Vec<Cmd> {
+        if self.in_thread() {
+            return Vec::new();
+        }
+        let Some(m) = self.selected_msg() else { return Vec::new() };
+        let Some(store) = self.store() else { return Vec::new() };
+        let root = store.thread_root(&m).to_owned();
+        // The relay's summary counts replies that are not loaded yet, so a row that says "2 replies" opens.
+        if root == m.id && store.replies_of(&m).0 == 0 {
+            return Vec::new();
+        }
+        self.open_thread(root)
+    }
+
+    /// Left arrow on the message the cursor is on: go up one level. A reply goes to its root — the thread view is flat, so
+    /// that is the message it answers — and the root itself leaves the thread for the channel it came from. The channel
+    /// timeline is the top, so there the key does nothing.
+    fn leave_for_thread_root(&mut self) {
+        let View::Thread(root) = self.view.clone() else { return };
+        let view_h = self.view_h;
+        let Some(layout) = self.layout.take() else { return };
+        let (w, layout) = layout;
+        let selected = list::selected_index(&layout, &self.state).and_then(|i| layout.items.get(i)).map(|it| it.id.clone());
+        match (selected.as_deref(), layout.index_of(&root)) {
+            // on the root: out of the thread, the way Esc goes
+            (Some(id), _) if id == root => {
+                self.layout = Some((w, layout));
+                self.back_to_channel();
+            }
+            (_, Some(i)) => {
+                list::select(&layout, &mut self.state, view_h, i);
+                self.layout = Some((w, layout));
+            }
+            _ => self.layout = Some((w, layout)),
+        }
+    }
+
     // ---- layout ----------------------------------------------------------------------------------------------------------
 
     /// The messages the list shows, oldest first.
@@ -1918,6 +1958,14 @@ impl App {
                 Vec::new()
             }
             KeyCode::Char('u') => self.mark_unread_from_selected(),
+            // Left and Right walk the thread: Right goes into the thread of the message under the cursor, Left goes up to
+            // its root and, from the root, out of the thread. Up and Down stay the cursor in the list (see `key_input` for
+            // the same keys in the composer).
+            KeyCode::Right => self.enter_thread_of_selected(),
+            KeyCode::Left => {
+                self.leave_for_thread_root();
+                Vec::new()
+            }
             KeyCode::Esc => {
                 // Escape backs out one level: leave a thread first, otherwise there is nothing left to close, so
                 // the keyboard goes back to the channel list.
