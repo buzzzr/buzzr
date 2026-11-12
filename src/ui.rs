@@ -1,7 +1,7 @@
 //! Drawing the screen. Everything here reads `App`; the only thing it changes is the geometry it reports back (so that clicks
 //! can be mapped to what is on screen).
 
-use crate::app::{App, Conn, Focus, Overlay, Row, SideRow, View};
+use crate::app::{App, Conn, Focus, Overlay, ReactRow, Row, SideRow, View};
 use crate::list;
 use ratatui::layout::{Alignment, Constraint, Layout, Position, Rect};
 use ratatui::style::{Modifier, Style};
@@ -21,7 +21,9 @@ fn faint() -> Style {
 }
 
 fn key_hint(key: &str, what: &str) -> Vec<Span<'static>> {
-    vec![Span::styled(format!(" {key} "), Style::default().add_modifier(Modifier::REVERSED)), Span::styled(format!(" {what}  "), dim())]
+    // One space either side of the label: the footer carries a key per action, and the reaction key only fits at 100 columns with
+    // the tighter gap.
+    vec![Span::styled(format!(" {key} "), Style::default().add_modifier(Modifier::REVERSED)), Span::styled(format!(" {what} "), dim())]
 }
 
 /// The scheme's own background and text colour; a scheme that leaves both to the terminal gives the default style.
@@ -49,11 +51,17 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(3), Constraint::Length(1)]).split(area);
     let (header, body, footer) = (rows[0], rows[1], rows[2]);
     let cols = Layout::horizontal([Constraint::Length(CHANNELS_W.min(body.width / 3)), Constraint::Min(10)]).split(body);
-    let (chans, right) = (cols[0], cols[1]);
+    let (sidebar, right) = (cols[0], cols[1]);
+    // A plugin pane is always on screen, so it takes the bottom of the channel column and the channel list gives up
+    // those rows — but not all of them: a list with nothing left to scroll is worse than a pane that is not drawn.
+    let pane_wanted: u16 = app.plugins.panes().iter().map(|(_, p)| p.height() as u16).sum();
+    let pane_h = pane_wanted.min(sidebar.height.saturating_sub(2));
+    let side = Layout::vertical([Constraint::Min(1), Constraint::Length(pane_h)]).split(sidebar);
+    let (chans, panes) = (side[0], side[1]);
 
-    // the input box grows with its text, up to 10 lines
+    // the composer grows with its text, up to 10 lines; a channel we are not in shows a one-line Join button instead
     let input_inner_w = right.width.saturating_sub(4).max(4) as usize;
-    let input_rows = app.editor.rows(input_inner_w).len().clamp(1, 10) as u16;
+    let input_rows = if app.open_channel_not_joined() { 1 } else { app.editor.rows(input_inner_w).len().clamp(1, 10) as u16 };
     let rr = Layout::vertical([Constraint::Min(2), Constraint::Length(1), Constraint::Length(1), Constraint::Length(input_rows + 2)]).split(right);
     let (msgs, typing, status, input) = (rr[0], rr[1], rr[2], rr[3]);
 
@@ -66,11 +74,18 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     draw_header(f, app, header);
     draw_channels(f, app, chans);
+    draw_plugin_panes(f, app, panes);
     draw_messages(f, app, msgs);
     draw_typing(f, app, typing);
     draw_status(f, app, status);
     draw_input(f, app, input, input_inner_w);
     draw_footer(f, app, footer);
+    if app.palette_up() {
+        draw_command_palette(f, app, input);
+    }
+    if app.react.is_some() {
+        draw_react(f, app, area);
+    }
     match app.overlay {
         Overlay::Keys => draw_keys(f, body),
         Overlay::Help => draw_help(f, area),
@@ -89,8 +104,8 @@ fn spans(segments: &[crate::contrib::Segment], width: usize) -> Vec<Span<'static
 fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     let title = match (app.channel(), &app.view) {
         (None, _) => "no channel".to_owned(),
-        (Some(c), View::Channel) => if c.is_dm() { c.label.clone() } else { format!("#{}", c.label) },
-        (Some(c), View::Thread(_)) => format!("{} › thread", if c.is_dm() { c.label.clone() } else { format!("#{}", c.label) }),
+        (Some(c), View::Channel) => format!("{}{}", c.marker(), c.label),
+        (Some(c), View::Thread(_)) => format!("{}{} › thread", c.marker(), c.label),
     };
     let left = Line::from(vec![Span::styled(" buzzr ", Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED)), Span::raw(format!(" {title}"))]);
     let (dot, text, color) = match &app.conn {
@@ -134,25 +149,27 @@ fn draw_channels(f: &mut Frame, app: &App, area: Rect) {
         let c = &app.channels[i];
         let open = app.cur == Some(i);
         let bar = app.channel_bar() == Some(i);
-        let unread = app.unread.get(&c.id).copied().unwrap_or(0);
+        let top = app.unread.get(&c.id).copied().unwrap_or(0);
+        // Unread replies inside a thread are a circle, not a count: a thread is not a timeline row, so opening the channel
+        // would never clear a count that stood for them. The two markers are independent, and a row that has both says so.
+        let thread = app.channel_thread_unread(&c.id);
         let mut style = Style::default();
         if open {
             style = style.add_modifier(Modifier::BOLD);
         }
-        if unread > 0 {
+        if top > 0 || thread {
             style = style.fg(crate::theme::get().warn).add_modifier(Modifier::BOLD);
         }
         let marker = if bar { "▌" } else { " " };
-        // `#` for an open channel, `*` for a private one (RFC 2811's private-channel prefix); both are ASCII, so every font
-        // has them. DMs are pulled out by `is_dm` and already labelled `✉ name`, so they get no marker.
-        let glyph = if c.is_dm() {
-            ""
-        } else if c.is_private {
-            "*"
-        } else {
-            "#"
+        // `#` for an open channel, `*` for a private one (RFC 2811's private-channel prefix), `@` for a DM (a person, not a
+        // room); all ASCII, so every font has them and a DM row never opens with a box it cannot draw.
+        let glyph = c.marker();
+        let badge = match (top, thread) {
+            (0, false) => String::new(),
+            (n, false) => format!(" ({n})"),
+            (0, true) => " ●".to_owned(),
+            (n, true) => format!(" ({n}) ●"),
         };
-        let badge = if unread > 0 { format!(" ({unread})") } else { String::new() };
         let mark = app.plugins.channel_mark(&c.id);
         let mark_text = mark.map(|m| format!(" {}", m.text)).unwrap_or_default();
         let room = (inner.width as usize).saturating_sub(2 + glyph.width() + badge.width() + mark_text.width());
@@ -178,6 +195,33 @@ fn draw_channels(f: &mut Frame, app: &App, area: Rect) {
         lines.push(line);
     }
     f.render_widget(Paragraph::new(lines), inner);
+}
+
+/// The panes plugins asked for, stacked under the channel list in plugin-id order. Display-only: a pane takes no focus,
+/// no key and no click, and its rows are clipped to the column (plugin text is hostile like any other).
+fn draw_plugin_panes(f: &mut Frame, app: &App, area: Rect) {
+    if area.height == 0 {
+        return;
+    }
+    let bottom = area.y + area.height;
+    let mut top = area.y;
+    for (_, pane) in app.plugins.panes() {
+        if top >= bottom {
+            break;
+        }
+        // The rule on top carries the title; a pane that does not fit here is clipped, not scrolled.
+        let h = (pane.height() as u16).min(bottom - top);
+        let rect = Rect::new(area.x, top, area.width, h);
+        // The right border continues the channel list's, so the message pane stays separated all the way down.
+        let block = Block::default().borders(Borders::TOP | Borders::RIGHT).border_style(faint());
+        let block = if pane.title.is_empty() { block } else { block.title(Span::styled(format!(" {} ", pane.title), dim())) };
+        let inner = block.inner(rect);
+        f.render_widget(block, rect);
+        let lines: Vec<Line> =
+            pane.rows.iter().take(inner.height as usize).map(|row| Line::from(spans(std::slice::from_ref(row), inner.width as usize))).collect();
+        f.render_widget(Paragraph::new(lines), inner);
+        top += h;
+    }
 }
 
 fn draw_messages(f: &mut Frame, app: &App, area: Rect) {
@@ -223,6 +267,35 @@ fn draw_messages(f: &mut Frame, app: &App, area: Rect) {
         let mut sb = ScrollbarState::new(layout.max_scroll(view_h)).position(app.state.scroll);
         f.render_stateful_widget(Scrollbar::new(ScrollbarOrientation::VerticalRight).track_symbol(Some("│")).thumb_symbol("█").style(faint()), area, &mut sb);
     }
+    // The newest message is past the bottom of the pane, so the channel does not end here. Once the newest message is
+    // on screen the marker is gone: it tracks what is visible, not where the cursor sits.
+    if layout.last_bottom() > app.state.scroll + view_h {
+        draw_more_below(f, text_area);
+    }
+}
+
+/// A corner marker for the messages that are past the bottom of the view. It is written straight into the buffer so that whatever background the
+/// row already carries (the selection band) stays under it, and it is kept off the rightmost column, which the scrollbar owns.
+fn draw_more_below(f: &mut Frame, area: Rect) {
+    const HINT: &str = "↓ more below";
+    let width = HINT.width() as u16;
+    if area.height == 0 || area.width < width + 2 {
+        return;
+    }
+    let y = area.bottom() - 1;
+    let fg = crate::theme::get().dim;
+    let buf = f.buffer_mut();
+    let mut x = area.right().saturating_sub(width + 1); // one blank column against the right edge
+    // Starting on the second half of a wide character would break it apart; there is room to step over it.
+    if x > area.x && UnicodeWidthStr::width(buf[(x - 1, y)].symbol()) == 2 {
+        x += 1;
+    }
+    for (i, ch) in HINT.chars().enumerate() {
+        let cell = &mut buf[(x + i as u16, y)];
+        let under = cell.bg;
+        cell.set_symbol(&ch.to_string());
+        cell.set_style(Style::default().fg(fg).bg(under));
+    }
 }
 
 fn draw_typing(f: &mut Frame, app: &App, area: Rect) {
@@ -238,6 +311,11 @@ fn draw_typing(f: &mut Frame, app: &App, area: Rect) {
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     if app.confirm_delete.is_some() {
         let prompt = Span::styled("Delete this message? press y to delete, anything else cancels", Style::default().fg(crate::theme::get().warn).add_modifier(Modifier::BOLD));
+        f.render_widget(Paragraph::new(prompt).alignment(Alignment::Right), area);
+        return;
+    }
+    if let Some(prompt) = app.invite_prompt() {
+        let prompt = Span::styled(prompt, Style::default().fg(crate::theme::get().warn).add_modifier(Modifier::BOLD));
         f.render_widget(Paragraph::new(prompt).alignment(Alignment::Right), area);
         return;
     }
@@ -304,9 +382,63 @@ fn spans_of(text: String, tone: crate::contrib::Tone, width: usize) -> Vec<Span<
     spans(&[crate::contrib::Segment { text, tone }], width)
 }
 
+/// The slash-command palette: while the input holds a `/command`, the commands whose name starts with what has been typed,
+/// drawn just above the input box. Enter runs the command on the cursor line, Tab fills its name in, and the arrows move the
+/// highlight. `app.palette_up()` decides when it is shown; here we only draw it.
+fn draw_command_palette(f: &mut Frame, app: &App, input: Rect) {
+    let rows = app.command_rows();
+    let want = if rows.is_empty() { 3 } else { rows.len() as u16 + 2 };
+    let w = input.width;
+    let h = want.min(input.y).min(12);
+    if h < 3 || w < 16 {
+        return;
+    }
+    let r = Rect::new(input.x, input.y - h, w, h);
+    clear_popup(f, r);
+    let block = Block::default().borders(Borders::ALL).border_style(Style::default().fg(crate::theme::get().accent)).title(" Commands · Enter runs · Tab completes ");
+    let inner = block.inner(r);
+    f.render_widget(block, r);
+    if inner.height == 0 {
+        return;
+    }
+    // Line the descriptions up in a column, measured in cells (a plugin may register a name with wide characters).
+    let name_w = rows.iter().map(|row| row.name.width()).max().unwrap_or(0).min((inner.width as usize).saturating_sub(6));
+    let vis = inner.height as usize;
+    let start = app.cmd_cursor.saturating_sub(vis.saturating_sub(1) / 2).min(rows.len().saturating_sub(vis));
+    let mut lines: Vec<Line> = Vec::new();
+    for (i, row) in rows.iter().enumerate().skip(start).take(vis) {
+        let label = format!("/{:<width$}", row.name, width = name_w);
+        let room = (inner.width as usize).saturating_sub(label.width() + 3); // marker + label + a space, and one to spare
+        let mut desc = row.desc.clone();
+        while desc.width() > room {
+            desc.pop();
+        }
+        let spans = vec![
+            Span::raw(if i == app.cmd_cursor { "▌" } else { " " }),
+            Span::styled(label, Style::default().fg(crate::theme::get().accent)),
+            Span::raw(" "),
+            Span::styled(desc, dim()),
+        ];
+        let mut line = Line::from(spans);
+        if i == app.cmd_cursor {
+            line = line.style(Style::default().bg(crate::theme::get().sel_bg));
+        }
+        lines.push(line);
+    }
+    if rows.is_empty() {
+        lines.push(Line::from(Span::styled(" no matching command", dim())));
+    }
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+/// The composer. In a channel we are not in it is not a text field at all: it is a Join button, reached with Tab like the input
+/// is, and Enter joins the channel — the relay's answer turns it back into the composer.
 fn draw_input(f: &mut Frame, app: &App, area: Rect, inner_w: usize) {
     let focused = app.focus == Focus::Input;
-    let title = if app.editing.is_some() {
+    let join = app.open_channel_not_joined();
+    let title = if join {
+        " join this channel "
+    } else if app.editing.is_some() {
         " edit message "
     } else if app.reply_target.is_some() || app.in_thread() {
         " reply in thread "
@@ -316,8 +448,21 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect, inner_w: usize) {
     let block = Block::default().borders(Borders::ALL).border_style(if focused { Style::default().fg(crate::theme::get().accent) } else { faint() }).title(title);
     let inner = block.inner(area);
     f.render_widget(block, area);
+    if join {
+        let style = if focused {
+            Style::default().fg(crate::theme::get().accent).bg(crate::theme::get().sel_bg).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(crate::theme::get().accent)
+        };
+        f.render_widget(Paragraph::new(Line::from(Span::styled("[ Join ]", style))).alignment(Alignment::Center), inner);
+        return;
+    }
     if app.editor.is_empty() {
-        let hint = if app.read_only { "read-only: nothing will be sent" } else { "Type a message · /help for commands · F1 for keys" };
+        let hint = if app.read_only {
+            "read-only: nothing will be sent"
+        } else {
+            "Type a message · /help for commands · F1 for keys"
+        };
         f.render_widget(Paragraph::new(Span::styled(hint, dim())), inner);
     } else {
         let lines: Vec<Line> = app.editor.rows(inner_w).iter().map(|r| Line::raw(app.editor.row_text(r))).collect();
@@ -334,29 +479,48 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect, inner_w: usize) {
 
 fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
     let mut spans: Vec<Span> = Vec::new();
-    match app.focus {
-        Focus::Channels => spans.extend(key_hint("⏎", "Open channel")),
-        Focus::Messages => {
-            spans.extend(key_hint("⏎", if app.in_thread() { "Reply" } else { "Open thread" }));
-            spans.extend(key_hint("r", "Reply"));
-            spans.extend(key_hint("c", "Copy"));
-            spans.extend(key_hint("u", "Mark unread"));
-            if app.selected_is_own() {
-                spans.extend(key_hint("e", "Edit"));
-                spans.extend(key_hint("d", "Delete"));
+    if app.palette_up() {
+        spans.extend(key_hint("↑↓", "Move"));
+        spans.extend(key_hint("⏎", "Run"));
+        spans.extend(key_hint("tab", "Complete"));
+        spans.extend(key_hint("esc", "Close"));
+    } else if app.react.is_some() {
+        spans.extend(key_hint("type", "Search"));
+        spans.extend(key_hint("⏎", "Send"));
+        spans.extend(key_hint("esc", "Close"));
+    } else {
+        match app.focus {
+            Focus::Channels => {
+                spans.extend(key_hint("⏎", "Open channel"));
+                spans.extend(key_hint("x", "Archive"));
             }
-            if app.in_thread() {
-                spans.extend(key_hint("esc", "Back"));
+            Focus::Messages => {
+                spans.extend(key_hint("⏎", if app.in_thread() { "Reply" } else { "Open thread" }));
+                spans.extend(key_hint("r", "Reply"));
+                spans.extend(key_hint("a", "React"));
+                spans.extend(key_hint("c", "Copy"));
+                spans.extend(key_hint("u", "Mark unread"));
+                if app.selected_is_own() {
+                    spans.extend(key_hint("e", "Edit"));
+                    spans.extend(key_hint("d", "Delete"));
+                }
+                if app.in_thread() {
+                    spans.extend(key_hint("esc", "Back"));
+                }
             }
-        }
-        Focus::Input => {
-            spans.extend(key_hint("⏎", "Send"));
-            // Only name Shift+Enter where the terminal confirmed it reports it; Alt+Enter works in every terminal.
-            spans.extend(key_hint(if app.keyboard_enhanced { "Shift+⏎" } else { "Alt+⏎" }, "New line"));
-            if app.editing.is_some() {
-                spans.extend(key_hint("esc", "Cancel edit"));
-            } else if app.reply_target.is_some() {
-                spans.extend(key_hint("esc", "Cancel reply"));
+            Focus::Input if app.open_channel_not_joined() => {
+                spans.extend(key_hint("⏎", "Join"));
+                spans.extend(key_hint("esc", "Messages"));
+            }
+            Focus::Input => {
+                spans.extend(key_hint("⏎", "Send"));
+                // Only name Shift+Enter where the terminal confirmed it reports it; Alt+Enter works in every terminal.
+                spans.extend(key_hint(if app.keyboard_enhanced { "Shift+⏎" } else { "Alt+⏎" }, "New line"));
+                if app.editing.is_some() {
+                    spans.extend(key_hint("esc", "Cancel edit"));
+                } else if app.reply_target.is_some() {
+                    spans.extend(key_hint("esc", "Cancel reply"));
+                }
             }
         }
     }
@@ -370,7 +534,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
 
 pub const KEYS: &[(&str, &str)] = &[
     ("Tab / Shift+Tab", "switch between channels, messages and the input"),
-    ("Esc", "close a panel, cancel a reply, leave a thread, then step back to the channels"),
+    ("Esc", "close the palette or a panel, cancel a reply, leave a thread, then step back to the channels"),
     ("F1", "this list of keys"),
     ("F2", "help: commands and how things work"),
     ("Ctrl+R", "reload the open channel or thread"),
@@ -379,13 +543,18 @@ pub const KEYS: &[(&str, &str)] = &[
     ("", ""),
     ("Channels", ""),
     ("Up / Down, Home / End", "move"),
-    ("Enter", "open the channel"),
+    ("Enter", "open the channel; one you are not in opens with a Join button"),
+    ("x", "archive the channel (it leaves the list; search finds it again)"),
     ("", ""),
     ("Messages", ""),
     ("Up / Down", "select a message (Up at the top loads older)"),
+    ("Down on the newest", "back to the input"),
     ("PgUp / PgDn, Home / End", "scroll, first, last"),
     ("Enter", "open the thread and read it (in a thread: reply)"),
+    ("Right", "open the thread of the selected message (a message with no replies has none)"),
+    ("Left", "in a thread: to its root, and out of the thread from there"),
     ("r", "reply in the thread of the selected message"),
+    ("a", "react to the selected message: pick an emoji, or type to search one (Enter sends, Esc closes)"),
     ("c", "copy the selected message to the clipboard"),
     ("u", "mark the selected message unread (until /read)"),
     ("e", "edit the selected message (yours only)"),
@@ -393,6 +562,19 @@ pub const KEYS: &[(&str, &str)] = &[
     ("Ctrl+F", "search channels, people and every message"),
     ("click", "select; open the thread; on a link: copy it"),
     ("mouse wheel", "scroll"),
+    ("", ""),
+    ("Command palette (while a `/command` is typed)", ""),
+    ("type", "narrow the commands whose name starts with it"),
+    ("Up / Down", "move the highlight"),
+    ("Enter", "run the command on the cursor line"),
+    ("Tab", "complete its name into the input, ready for an argument"),
+    ("Esc", "close the list and keep the command in the input"),
+    ("", ""),
+    ("Reaction picker (from `a` on a message)", ""),
+    ("type", "search the emoji by name, or type an emoji to send it as-is"),
+    ("Up / Down", "move the cursor"),
+    ("Enter", "send the emoji on the cursor line, or remove yours"),
+    ("Esc", "close"),
     ("", ""),
     ("Panel (from /plugins or a plugin)", ""),
     ("Up / Down, PgUp / PgDn, Home / End", "move"),
@@ -403,12 +585,19 @@ pub const KEYS: &[(&str, &str)] = &[
     ("Esc", "close"),
     ("", ""),
     ("Writing", ""),
-    ("Enter", "send"),
+    ("Enter", "send; in a channel you are not in, join it (the composer is a Join button)"),
+    ("/", "start a `/command`: a palette lists the commands and narrows as you type"),
+    ("Up, nothing typed", "back to the messages, on the newest one"),
     ("Alt+Enter, Ctrl+J", "new line, in any terminal"),
     ("Shift+Enter", "new line, where the terminal reports it"),
     ("Ctrl+A / E, Ctrl+W / U / K", "line start / end, kill word / to start / to end"),
     ("Alt+Backspace", "delete the word before the cursor"),
     ("Ctrl+← →, Alt+B / F", "move by word"),
+    ("", ""),
+    ("Invite prompt (a message mentions someone who is not in the channel)", ""),
+    ("y", "invite them, then send the message"),
+    ("n", "send the message without inviting them"),
+    ("Esc", "keep the message in the input"),
 ];
 
 fn draw_keys(f: &mut Frame, body: Rect) {
@@ -432,6 +621,10 @@ pub const HELP: &[&str] = &[
     "Channels list the top-level messages only; replies live in their thread (Enter or a click opens it, and reads it).",
     "A message with replies shows how many, when the last one was, and `● N new` for replies since you last opened it.",
     "Esc returns you to the same place.",
+    "In a thread, its root is the one-line header at the top (number, time, author, then the first line of it, cut with `…` if there",
+    "is more) and every reply is indented two columns under it, so the pane reads as a thread.",
+    "With a message row selected, Right opens its thread (on a message with no replies there is nothing to open) and Left goes up to",
+    "that thread's root, then out of the thread; Esc does the same, wherever the cursor is.",
     "",
     "Commands, typed in the input (N is the message number shown as #N):",
     "  /r N text   reply to message N        /t N   open the thread of message N",
@@ -440,16 +633,31 @@ pub const HELP: &[&str] = &[
     "  /help       this screen                /q   quit",
     "  /edit N     edit your message N        /delete N   delete your message N (asks first)",
     "  /whois NAME their profile             /dm NAME   start (or open) a DM",
+    "  /invite NAME   add them to this channel (or the group DM you are in)",
     "  /search text   search                  /new [private] name [about]   create a channel",
+    "  /join NAME  join (or open) a channel   /leave   leave this channel (asks first, y confirms)",
     "  /plugins    what is loaded, and the commands plugins added",
     "  /update     how to upgrade this copy (brew, cargo or the release page)",
     "A newer release shows up in the status line (BUZZR_NO_UPDATE_CHECK=1 turns the once-a-day check off).",
     "  /read       mark this channel read     /read all   mark every channel read",
+    "  /archive    archive this channel (`x` in the list): it leaves the list, and Ctrl+F or /search finds it again",
+    "An archived channel is still loaded and still counts unread; only the list hides it. Enter on its search result brings it back.",
+    "Search (Ctrl+F) finds channel names, people and every message. A channel row says what it is for, how many people",
+    "are in it and whether you are one of them, and Enter opens it — a channel you are not in opens read-only, with a",
+    "Join button in place of the composer, and Enter there joins it. `/join NAME` joins (or opens) a channel by name,",
+    "and `/leave` takes you out of the open channel (it asks first; `y` confirms).",
+    "Typing `/` lists the commands above the input: keep typing to narrow them, Enter runs the one on the cursor, and Tab",
+    "fills its name in for a command that takes an argument (the list holds anything plugins added too). Esc closes the list",
+    "and leaves what was typed in the input, so a half-written command can be finished or corrected.",
     "Unread survives a restart: it comes from the last-read position per channel and per thread in",
     "~/.config/buzzr/read-state.json, and a \"new messages\" line marks where new messages start.",
-    "Search (Ctrl+F): channel names, people and full-text message search; Enter opens the result — a person starts a DM.",
     "A person is found by the name in their profile, or by their npub (hex or npub1…): /dm and /whois take either.",
+    "Mentioning `@name` someone who is not in the channel asks first: y invites them and sends, n sends without inviting,",
+    "Esc keeps the message in the input. /invite NAME does the same without a message.",
     "Others see \"typing…\" while you write (start with --no-typing to turn that off).",
+    "`a` opens the reaction picker on the selected message: pick an emoji from the list, or type a name to search it (or an",
+    "emoji the list does not have). Enter sends the emoji on the cursor line, Esc closes. The picker opens on your own reaction,",
+    "and its first row takes it back — so `a` then Enter changes nothing, and Enter on that row removes yours.",
     "Enter sends. Alt+Enter and Ctrl+J add a line in any terminal; the footer names the one that works here.",
     "Shift+Enter adds a line only where the terminal reports it: kitty, foot, WezTerm, Ghostty, iTerm2.",
     "",
@@ -460,6 +668,58 @@ pub const HELP: &[&str] = &[
     "",
     "Press Esc, Enter or F2 to close.",
 ];
+
+/// The reaction picker (`a` on a selected message): a query line, then the emoji whose name matches, with the first row
+/// taking your reaction back. Enter sends the row under the cursor, Esc closes. It is drawn over the message pane, so the
+/// message it reacts to keeps its selection underneath.
+fn draw_react(f: &mut Frame, app: &App, area: Rect) {
+    let w = 48.min(area.width.saturating_sub(4)).max(24);
+    let h = 16.min(area.height.saturating_sub(2)).max(6);
+    let r = Rect::new(area.x + (area.width.saturating_sub(w)) / 2, area.y + (area.height.saturating_sub(h)) / 2, w, h);
+    clear_popup(f, r);
+    let block = Block::default().borders(Borders::ALL).border_style(Style::default().fg(crate::theme::get().accent)).title(" React · Enter sends · Esc closes ");
+    let inner = block.inner(r);
+    f.render_widget(block, r);
+    if inner.height < 3 || inner.width < 10 {
+        return;
+    }
+    let picker = app.react.as_ref().expect("draw_react is only called while the picker is up");
+    let prefix = "Search: ";
+    f.render_widget(Paragraph::new(Line::from(vec![Span::styled(prefix, Style::default().add_modifier(Modifier::BOLD)), Span::raw(picker.query.clone())])), Rect::new(inner.x, inner.y, inner.width, 1));
+    // the query cursor sits after what has been typed
+    let col = prefix.chars().count() + picker.query.chars().count();
+    f.set_cursor_position(Position::new((inner.x + col as u16).min(inner.x + inner.width - 1), inner.y));
+    f.render_widget(Paragraph::new(Span::styled("type a name to search · ↑↓ to move", dim())), Rect::new(inner.x, inner.y + 1, inner.width, 1));
+
+    let list_area = Rect::new(inner.x, inner.y + 2, inner.width, inner.height.saturating_sub(2));
+    let rows = app.react_rows();
+    let vis = list_area.height as usize;
+    let start = picker.cursor.saturating_sub(vis.saturating_sub(1) / 2).min(rows.len().saturating_sub(vis));
+    let mut lines = Vec::new();
+    for (i, row) in rows.iter().enumerate().skip(start).take(vis) {
+        let mut spans = vec![Span::raw(if i == picker.cursor { "▌" } else { " " })];
+        match row {
+            ReactRow::Remove(_) => {
+                spans.push(Span::styled("↩  ", dim()));
+                spans.push(Span::styled("remove your reaction", dim()));
+            }
+            ReactRow::Emoji(glyph) | ReactRow::Typed(glyph) => {
+                spans.push(Span::raw(format!("{glyph}  ")));
+                let hint = crate::emoji::name_of(glyph).map(str::to_owned).unwrap_or_else(|| "send this emoji".to_owned());
+                spans.push(Span::styled(hint, dim()));
+            }
+        }
+        let mut line = Line::from(spans);
+        if i == picker.cursor {
+            line = line.style(Style::default().bg(crate::theme::get().sel_bg));
+        }
+        lines.push(line);
+    }
+    if rows.is_empty() {
+        lines.push(Line::from(Span::styled(" no match — try a word like \"fire\", or an emoji", dim())));
+    }
+    f.render_widget(Paragraph::new(lines), list_area);
+}
 
 /// Universal search: a query line, then channels whose name matches, then messages the relay found.
 fn draw_search(f: &mut Frame, app: &App, area: Rect) {
@@ -497,8 +757,29 @@ fn draw_search(f: &mut Frame, app: &App, area: Rect) {
         match row {
             Row::Channel(c) => {
                 let ch = &app.channels[*c];
-                spans.push(Span::styled(if ch.is_dm() { ch.label.clone() } else { format!("# {}", ch.label) }, Style::default().fg(crate::theme::get().accent).add_modifier(Modifier::BOLD)));
-                spans.push(Span::styled("  channel", dim()));
+                let dm = ch.is_dm();
+                spans.push(Span::styled(format!("{} {}", ch.marker(), ch.label), Style::default().fg(crate::theme::get().accent).add_modifier(Modifier::BOLD)));
+                if app.is_archived(&ch.id) {
+                    spans.push(Span::styled("  archived · Enter brings it back", dim()));
+                } else if dm {
+                    spans.push(Span::styled("  direct message · Enter opens it", dim()));
+                } else {
+                    // What the channel is for, how many people are in it and whether we are one of them — the detail that says
+                    // whether Enter opens a channel we are in or one we are not (which opens with a Join button).
+                    let state = match app.member_counts.get(&ch.id) {
+                        Some(n) => format!("{n} {} · {} · Enter opens", if *n == 1 { "member" } else { "members" }, if app.is_member(&ch.id) { "joined" } else { "not joined" }),
+                        None => "channel · Enter opens".to_owned(),
+                    };
+                    spans.push(Span::styled(format!("  {state}"), dim()));
+                    let about = crate::markdown::strip_controls(&ch.about).split_whitespace().collect::<Vec<_>>().join(" ");
+                    if !about.is_empty() {
+                        let used = 2 + state.width() + if dm { 0 } else { 2 } + ch.label.width();
+                        let room = (list_area.width as usize).saturating_sub(used + 4);
+                        if room > 8 {
+                            spans.push(Span::styled(format!("  {}", clipped(&about, room)), Style::default()));
+                        }
+                    }
+                }
             }
             Row::Person(pk) => {
                 spans.push(Span::styled(app.name_of(pk), Style::default().fg(crate::theme::get().accent).add_modifier(Modifier::BOLD)));
@@ -527,6 +808,25 @@ fn draw_search(f: &mut Frame, app: &App, area: Rect) {
         lines.push(Line::from(Span::styled(" nothing found", dim())));
     }
     f.render_widget(Paragraph::new(lines), list_area);
+}
+
+/// Clip `text` to `room` columns for a single line, counting wide characters as two, with an ellipsis when something was cut.
+fn clipped(text: &str, room: usize) -> String {
+    if text.width() <= room {
+        return text.to_owned();
+    }
+    let mut out = String::new();
+    let mut used = 0;
+    for ch in text.chars() {
+        let w = ch.to_string().width();
+        if used + w > room.saturating_sub(1) {
+            break;
+        }
+        out.push(ch);
+        used += w;
+    }
+    out.push('…');
+    out
 }
 
 /// Somebody's profile card (`/whois NAME`): the name, the npub, and what they wrote about themselves. Everything from the
@@ -598,6 +898,26 @@ mod tests {
         app
     }
 
+    /// #general with more messages than the pane can hold, opened on it with the cursor in the message list.
+    /// Unlike `app()`, the newest message can fall outside the view, which is what the marker is about.
+    fn busy() -> App {
+        let mut app = App::new("me".into(), false, chrono_tz::UTC);
+        let chan = Channel { id: "c1".into(), name: "general".into(), about: String::new(), created_at: 1, section: crate::model::Section::Channels, label: "general".into(), is_private: false };
+        let _: Vec<Cmd> = app.handle(AppEvent::Channels(Ok(vec![chan])));
+        let events = (1..=20)
+            .map(|n| {
+                let mut e = ev(&format!("m{n:02}"), 1000 + n, &format!("message number {n}"), &[]);
+                e.pubkey = "bob".into();
+                e
+            })
+            .collect();
+        app.handle(AppEvent::Names(Ok([("bob".to_string(), "Bob".to_string())].into())));
+        app.handle(AppEvent::Window { channel: "c1".into(), cursor: None, result: Ok(Window { events, has_more: false, next_cursor: None }) });
+        app.handle(AppEvent::Live(Live::Up));
+        app.handle(AppEvent::Key(ratatui::crossterm::event::KeyEvent::new(ratatui::crossterm::event::KeyCode::Tab, ratatui::crossterm::event::KeyModifiers::NONE)));
+        app
+    }
+
     #[test]
     fn a_person_in_the_search_and_a_profile_card_are_drawn() {
         let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
@@ -637,6 +957,67 @@ mod tests {
     }
 
     #[test]
+    fn a_plugin_pane_is_drawn_in_the_channel_column_and_the_list_gives_up_the_rows() {
+        let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        let mut app = app();
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let before = screen(&term);
+        assert!(!before.join("\n").contains("Clock"), "no plugin has asked for a pane:\n{}", before.join("\n"));
+
+        app.plugins.set(
+            "clock",
+            "Clock",
+            crate::contrib::Contributions {
+                pane: Some(crate::contrib::Pane { title: "Clock".into(), rows: vec![crate::contrib::Segment::new("12:34", crate::contrib::Tone::Accent)] }),
+                ..Default::default()
+            },
+        );
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let rows = screen(&term);
+        let s = rows.join("\n");
+        let title = rows.iter().position(|l| l.contains("Clock")).expect("the pane's title rule");
+        let row = rows.iter().position(|l| l.contains("12:34")).expect("the pane's row");
+        let last_channel = rows.iter().rposition(|l| l.contains("#random")).expect("a channel row");
+        assert!(title > last_channel, "the pane is under the channel list:\n{s}");
+        assert_eq!(row, title + 1, "the row is drawn right under the title rule:\n{s}");
+        assert!(rows[row].contains('│'), "the column's right border runs past the pane:\n{s}");
+        assert!(s.contains("Hello there, see docs"), "the message pane keeps its rows:\n{s}");
+    }
+
+    #[test]
+    fn a_pane_never_takes_the_whole_channel_list() {
+        // A 20-row pane in a short terminal: it is clipped, and the channel list keeps enough rows to be read.
+        let mut term = Terminal::new(TestBackend::new(100, 8)).unwrap();
+        let mut app = app();
+        let rows = (0..20).map(|i| crate::contrib::Segment::new(format!("row {i}"), crate::contrib::Tone::Accent)).collect();
+        app.plugins.set("clock", "Clock", crate::contrib::Contributions { pane: Some(crate::contrib::Pane { title: "Clock".into(), rows }), ..Default::default() });
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(s.contains("#general"), "the channel list keeps its rows:\n{s}");
+        assert!(s.contains("Clock") && s.contains("row 0"), "and the pane is drawn, clipped:\n{s}");
+        assert!(!s.contains("row 19"), "not all of it fits, so the rest is dropped rather than scrolled:\n{s}");
+    }
+
+    #[test]
+    fn the_footer_names_the_reaction_key_and_the_picker_lists_emoji() {
+        let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        let mut app = app();
+        app.focus = Focus::Messages;
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(s.contains("React"), "the message pane advertises the reaction key\n{s}");
+        assert!(s.contains("Switch pane") && s.contains("Delete"), "and the key does not push the navigation hints out\n{s}");
+
+        app.handle(AppEvent::Key(ratatui::crossterm::event::KeyEvent::new(ratatui::crossterm::event::KeyCode::Char('a'), ratatui::crossterm::event::KeyModifiers::NONE)));
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(s.contains("React · Enter sends · Esc closes"), "the picker opens with a title that names the keys\n{s}");
+        assert!(s.contains("thumbs up yes like approve +1"), "and lists the emoji the table offers\n{s}");
+        assert!(s.contains("type a name to search"), "with a line saying what to do\n{s}");
+        assert!(s.contains("Search") && s.contains("Close"), "the footer follows the picker\n{s}");
+    }
+
+    #[test]
     fn the_footer_offers_the_new_line_key_this_terminal_can_report() {
         let mut term = Terminal::new(TestBackend::new(110, 30)).unwrap();
         let mut app = app();
@@ -655,7 +1036,10 @@ mod tests {
 
     #[test]
     fn the_keys_overlay_names_both_new_line_keys_and_which_of_them_always_works() {
-        let mut term = Terminal::new(TestBackend::new(110, 60)).unwrap();
+        // The overlay is one plain paragraph with no scrolling, so a terminal shorter than the list clips its bottom rows off
+        // the screen. Size this one to the whole list (two header lines + one per entry, plus the box borders and the header
+        // and footer rows `draw` reserves) so the case sees every key it is about, however the list grows.
+        let mut term = Terminal::new(TestBackend::new(110, KEYS.len() as u16 + 6)).unwrap();
         let mut app = app();
         app.overlay = Overlay::Keys;
         term.draw(|f| draw(f, &mut app)).unwrap();
@@ -679,6 +1063,36 @@ mod tests {
     }
 
     #[test]
+    fn the_channel_list_counts_top_level_unreads_and_circles_thread_replies() {
+        use std::collections::HashMap;
+        let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        let mut app = app();
+        // #general's only news is a reply inside its thread: a stored thread position that predates the reply marks the row
+        // with a circle, and the row carries no count — a thread is not a timeline row, so a count could never clear.
+        app.seed_read(crate::config::ReadState {
+            channels: HashMap::new(),
+            threads: [("a".to_owned(), 1u64)].into_iter().collect(),
+            marks: HashMap::new(),
+        });
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(s.contains("#general ●"), "a thread-only unread is a circle, not a count:\n{s}");
+        assert!(!s.contains("#general ("), "and it is never written as a counted unread:\n{s}");
+
+        // Top-level unreads keep their count.
+        app.unread.insert("c2".into(), 3);
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(s.contains("#random (3)"), "top-level unreads are counted:\n{s}");
+
+        // A channel with both says both.
+        app.unread.insert("c1".into(), 1);
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(s.contains("#general (1) ●"), "a channel with both shows the count and the circle:\n{s}");
+    }
+
+    #[test]
     fn the_selected_message_is_one_band_across_the_whole_pane() {
         let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
         let mut app = app();
@@ -699,6 +1113,37 @@ mod tests {
             }
         }
         assert!(bands > 0, "no row was drawn as selected");
+    }
+
+    #[test]
+    fn the_pane_flags_that_the_newest_message_is_below() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        let mut app = busy();
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        // End jumps to the newest message, which is then on screen: the pane says nothing.
+        app.handle(AppEvent::Key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE)));
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(!s.contains("more below"), "the newest message is on screen at the bottom\n{s}");
+
+        // The cursor moves onto an older message, but the newest one is still on screen: no marker. The marker
+        // answers "is the end of the channel visible", not "is the newest message selected".
+        app.handle(AppEvent::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)));
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(!s.contains("more below"), "the newest message is still visible, so nothing is flagged\n{s}");
+
+        // Jump to the top: the newest message is far below the view.
+        app.handle(AppEvent::Key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE)));
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(s.contains("↓ more below"), "the newest message is off screen, so the pane says so\n{s}");
+
+        app.handle(AppEvent::Key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE)));
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(!s.contains("more below"), "back at the bottom the marker is gone\n{s}");
     }
 
     #[test]
@@ -744,9 +1189,15 @@ mod tests {
         assert!(screen(&term).join("\n").contains("/r N text"));
         assert!(screen(&term).join("\n").contains("/update"), "the help screen lists /update");
         app.overlay = Overlay::None;
-        app.typing.insert(("c1".into(), "bob".into()), std::time::Instant::now());
+        app.typing.insert(("c1".into(), None, "bob".into()), std::time::Instant::now());
         term.draw(|f| draw(f, &mut app)).unwrap();
         assert!(screen(&term).join("\n").contains("Bob is typing"));
+
+        // an indicator sent in a thread stays out of the channel
+        app.typing.clear();
+        app.typing.insert(("c1".into(), Some("a".into()), "bob".into()), std::time::Instant::now());
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        assert!(!screen(&term).join("\n").contains("is typing"), "a thread's typist is not drawn in the channel");
     }
 
     #[test]
@@ -795,6 +1246,33 @@ mod tests {
         term.draw(|f| draw(f, &mut app)).unwrap();
         let s = screen(&term).join("\n");
         assert!(s.contains("edit message") && s.contains("just mine") && s.contains("Cancel edit"), "{s}");
+    }
+
+    #[test]
+    fn a_message_that_mentions_an_outsider_asks_whether_to_invite_them() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let key = |code| AppEvent::Key(KeyEvent::new(code, KeyModifiers::NONE));
+        let mut term = Terminal::new(TestBackend::new(130, 30)).unwrap();
+        let alice = "aa".repeat(32);
+        let mut app = app();
+        // bob is in #general; Alice, whose profile we know, is not
+        app.handle(AppEvent::Members { channel: "c1".into(), result: Ok(vec![("me".into(), "owner".into()), ("bob".into(), "member".into())]) });
+        app.handle(AppEvent::Names(Ok([("bob".to_string(), "Bob".to_string()), (alice.clone(), "Alice Smith".to_string())].into())));
+        app.focus = Focus::Input;
+        for c in "hello @Alice Smith".chars() {
+            app.handle(key(KeyCode::Char(c)));
+        }
+        app.handle(key(KeyCode::Enter));
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(s.contains("Invite Alice Smith to #general? y invites and sends, n just sends, Esc cancels"), "the status line asks and says what each key does\n{s}");
+        assert!(app.editor.is_empty(), "the message waits for the answer, held out of the input");
+        // `n` sends it without inviting, and the question clears
+        app.handle(key(KeyCode::Char('n')));
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(!s.contains("Invite Alice Smith to"), "the question is gone once it is answered\n{s}");
+        assert!(s.contains("sent without inviting Alice Smith"), "and the status line reports what happened\n{s}");
     }
 
     #[test]
@@ -878,7 +1356,7 @@ mod tests {
     }
 
     #[test]
-    fn the_channel_list_marks_private_channels_and_leaves_dms_alone() {
+    fn the_channel_list_marks_open_private_and_direct_channels() {
         use crate::model::Section::*;
         let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
         let mut app = App::new("me".into(), false, chrono_tz::UTC);
@@ -889,7 +1367,7 @@ mod tests {
         let col: Vec<String> = s[1..8].iter().map(|l| l.chars().take(26).collect::<String>().trim().to_owned()).collect();
         assert!(col.iter().any(|r| r.ends_with("#general")), "an open channel is marked #\n{col:?}");
         assert!(col.iter().any(|r| r.ends_with("*dev-buzzr")), "a private channel is marked *\n{col:?}");
-        assert!(col.iter().any(|r| r.ends_with("DM") && !r.contains('#') && !r.contains('*')), "a DM gets no marker\n{col:?}");
+        assert!(col.iter().any(|r| r.ends_with("@DM")), "a DM is marked @, never a glyph a font may lack\n{col:?}");
     }
 
     #[test]
@@ -908,6 +1386,28 @@ mod tests {
         assert!(s.contains("# random") && s.contains("channel"), "channel match\n{s}");
         assert!(s.contains("general · Bob") && s.contains("a random thought about boats"), "message match\n{s}");
         assert!(s.contains("1 messages found") || s.contains("found"), "{s}");
+    }
+
+    #[test]
+    fn an_archived_channel_leaves_the_sidebar_and_its_search_row_offers_it_back() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        let mut app = app();
+        app.seed_archived(["c2".to_owned()].into_iter().collect());
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(s.contains("general"), "the channel that is not archived is still listed\n{s}");
+        assert!(!s.contains("random"), "an archived channel has no row in the list\n{s}");
+
+        // Ctrl+F still finds it, and its row says what Enter does
+        app.handle(AppEvent::Key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL)));
+        for c in "ran".chars() {
+            app.handle(AppEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)));
+        }
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(s.contains("# random"), "search still finds it\n{s}");
+        assert!(s.contains("archived · Enter brings it back"), "and its row offers it back\n{s}");
     }
 
     #[test]
@@ -960,5 +1460,74 @@ mod tests {
         let s = screen(&term).join("\n");
         assert!(s.contains("Pull requests") && s.contains("#42 fix the anchor"), "{s}");
         assert!(s.contains("Esc closes"), "the panel title bar says how to leave\n{s}");
+    }
+
+    #[test]
+    fn typing_a_slash_command_shows_the_palette_above_the_input() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        let mut app = app();
+        app.focus = Focus::Input;
+        let key = |c: char| AppEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        app.handle(key('/'));
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(s.contains("Commands · Enter runs · Tab completes"), "the palette opens with a title that names the keys\n{s}");
+        assert!(s.contains("/help") && s.contains("the commands and how things work"), "and lists a command with what it does\n{s}");
+        assert!(s.contains("/archive") && s.contains("archive this channel"), "the list is scrolled from the first row\n{s}");
+        assert!(s.contains("Run") && s.contains("Complete"), "the footer follows the palette\n{s}");
+
+        // typing narrows the list to the commands that still match
+        app.handle(key('h'));
+        app.handle(key('e'));
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(s.contains("/help") && s.contains("the commands and how things work"), "the command that still matches\n{s}");
+        assert!(!s.contains("/search") && !s.contains("load older messages"), "the ones that do not drop out\n{s}");
+    }
+
+    #[test]
+    fn a_search_row_for_a_channel_says_who_is_in_it_and_what_enter_does() {
+        let mut term = Terminal::new(TestBackend::new(110, 26)).unwrap();
+        let mut app = app();
+        app.joined.insert("c1".into());
+        app.member_counts.insert("c1".into(), 4);
+        app.member_counts.insert("c2".into(), 9);
+        app.channels[1].about = "off-topic, mostly".into();
+        app.overlay = Overlay::Search;
+        app.search.query.insert_str("r"); // "r" matches both general and random
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(s.contains("# general") && s.contains("4 members · joined · Enter opens"), "a channel you are in, with its count\n{s}");
+        assert!(s.contains("# random") && s.contains("9 members · not joined · Enter opens"), "and one you are not\n{s}");
+        assert!(s.contains("off-topic, mostly"), "what the channel is for\n{s}");
+    }
+
+    #[test]
+    fn the_composer_is_a_join_button_in_a_channel_you_are_not_in() {
+        let mut term = Terminal::new(TestBackend::new(110, 26)).unwrap();
+        let mut app = app();
+        app.member_counts.insert("c1".into(), 4); // the relay answered for c1, and we are not one of the four
+        app.focus = Focus::Input;
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(s.contains("join this channel"), "the composer says what it is\n{s}");
+        assert!(s.contains("[ Join ]"), "and is a button\n{s}");
+        assert!(!s.contains("Type a message"), "there is no text field\n{s}");
+        assert!(s.contains("Join"), "the footer names the key\n{s}");
+
+        // Once the relay has us in the channel, the composer comes back.
+        app.joined.insert("c1".into());
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(!s.contains("[ Join ]") && s.contains("Type a message"), "the text field is back\n{s}");
+    }
+
+    #[test]
+    fn clipped_cuts_to_the_room_with_an_ellipsis_and_counts_a_wide_character_as_two() {
+        assert_eq!(clipped("general", 10), "general", "it fits, so it is left alone");
+        assert_eq!(clipped("a very long channel name", 8), "a very …");
+        assert_eq!(clipped("日本語チャンネル", 5), "日本…", "a wide character takes two columns");
+        assert_eq!(clipped("", 0), "");
     }
 }

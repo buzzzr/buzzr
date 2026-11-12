@@ -2,6 +2,7 @@ mod app;
 mod config;
 mod contrib;
 mod editor;
+mod emoji;
 mod keyfile;
 mod list;
 mod live;
@@ -147,24 +148,26 @@ async fn main() -> Result<()> {
 
 /// `buzzr plugins list | enable <id> | disable <id>`: the same folders the TUI reads, without starting a terminal or a key.
 fn plugins_cli(cmd: &PluginsCmd, dir: &std::path::Path) -> Result<()> {
-    use plugins::manifest;
+    use plugins::discover;
     match cmd {
         PluginsCmd::List => {
             println!("plugins in {}", dir.display());
-            let found = manifest::scan(dir);
+            let found = discover::scan(dir);
             if found.is_empty() {
                 println!("  (none)");
             }
             for d in found {
+                // The display name is the plugin's own to declare, and it only does that once it is running, so the
+                // list shows the id and the file buzzr would run.
                 let state = if d.disabled {
                     "off"
-                } else if d.manifest.is_some() {
+                } else if d.entry.is_some() {
                     "on"
                 } else {
                     "broken"
                 };
-                match &d.manifest {
-                    Some(m) => println!("  {:<20} {state:<6} {}   [{}]", m.id, m.name, m.entry.join(" ")),
+                match &d.entry {
+                    Some(entry) => println!("  {:<20} {state:<6} {}", d.id(), entry.display()),
                     None => println!("  {:<20} {state:<6} {}", d.id(), d.problem.clone().unwrap_or_default()),
                 }
             }
@@ -176,11 +179,11 @@ fn plugins_cli(cmd: &PluginsCmd, dir: &std::path::Path) -> Result<()> {
 }
 
 fn set_plugin(dir: &std::path::Path, id: &str, on: bool) -> Result<()> {
-    use plugins::manifest;
-    let Some(d) = manifest::scan(dir).into_iter().find(|d| d.id() == id) else {
+    use plugins::discover;
+    let Some(d) = discover::scan(dir).into_iter().find(|d| d.id() == id) else {
         return Err(anyhow!("no plugin {id} in {}", dir.display()));
     };
-    manifest::set_enabled(&d.dir, on).with_context(|| format!("could not change {}", d.dir.display()))?;
+    discover::set_enabled(&d.dir, on).with_context(|| format!("could not change {}", d.dir.display()))?;
     println!("{}: {}", d.id(), if on { "on" } else { "off" });
     Ok(())
 }
@@ -244,6 +247,8 @@ async fn run_tui(relay: Arc<Relay>, read_only: bool, send_typing: bool, mouse: b
     app.update_source = update::InstallSource::detect();
     // Where each channel was left last time; the badge counts come back over the relay (see `Cmd::LoadUnread`).
     app.seed_read(config::load_read_state(&paths.read_state()));
+    // The channels archived on this device: they have no row in the channel list until a search brings one back.
+    app.seed_archived(config::load_archived(&paths.archived()));
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
     // The release feed: seed the notice from what the last check learned, and ask GitHub again only when that is stale. A failure
     // (offline, no release yet) is silent — see `release.rs`.
@@ -342,6 +347,11 @@ fn run(cmd: Cmd, relay: &Arc<Relay>, tx: &UnboundedSender<AppEvent>, subscriptio
             // the order they were spawned, letting an older position overwrite a newer one. A small file is cheap to write.
             let _ = config::save_read_state(&paths.read_state(), &state);
         }
+        Cmd::SaveArchived(ids) => {
+            // Written here for the same reason as the read positions: the whole set goes out each time, and a spawned write
+            // could race an older one.
+            let _ = config::save_archived(&paths.archived(), &ids);
+        }
         Cmd::LoadWindow { channel, cursor } => {
             tokio::spawn(async move {
                 let result = relay.window(&channel, cursor.as_ref().map(|(at, id)| (*at, id.as_str())), relay::PAGE).await.map_err(e);
@@ -391,6 +401,24 @@ fn run(cmd: Cmd, relay: &Arc<Relay>, tx: &UnboundedSender<AppEvent>, subscriptio
                 let _ = tx.send(AppEvent::Sent(result));
             });
         }
+        Cmd::React { target, emoji, remove } => {
+            tokio::spawn(async move {
+                // Undo the reaction this one replaces first, so a change never leaves two emoji from the same person.
+                let result = async {
+                    let mut sent = String::new();
+                    if let Some(reaction) = remove.as_deref() {
+                        sent = relay.submit(relay::remove_reaction_builder(reaction)?).await?;
+                    }
+                    if !emoji.is_empty() {
+                        sent = relay.submit(relay::reaction_builder(&target, &emoji)?).await?;
+                    }
+                    Ok::<String, anyhow::Error>(sent)
+                }
+                .await
+                .map_err(e);
+                let _ = tx.send(AppEvent::Sent(result));
+            });
+        }
         Cmd::CreateChannel { name, private, about } => {
             tokio::spawn(async move {
                 let result = async {
@@ -403,10 +431,36 @@ fn run(cmd: Cmd, relay: &Arc<Relay>, tx: &UnboundedSender<AppEvent>, subscriptio
                 let _ = tx.send(AppEvent::Created(result));
             });
         }
+        Cmd::JoinChannel { channel } => {
+            tokio::spawn(async move {
+                let result = async { relay.submit(relay::join_builder(&channel)?).await }.await.map_err(e);
+                let _ = tx.send(AppEvent::Joined { channel, result });
+            });
+        }
+        Cmd::LeaveChannel { channel } => {
+            tokio::spawn(async move {
+                let result = async { relay.submit(relay::leave_builder(&channel)?).await }.await.map_err(e);
+                let _ = tx.send(AppEvent::Left { channel, result });
+            });
+        }
+        Cmd::LoadRoster { channels } => {
+            tokio::spawn(async move {
+                let _ = tx.send(AppEvent::Roster(relay.roster(&channels).await.map_err(e)));
+            });
+        }
         Cmd::OpenDm { peer } => {
             tokio::spawn(async move {
                 let result = async { relay.submit(relay::dm_open_builder(&peer)?).await.map(|_| ()) }.await.map_err(e);
                 let _ = tx.send(AppEvent::DmOpened(result));
+            });
+        }
+        Cmd::Invite { channel, pubkey, dm } => {
+            tokio::spawn(async move {
+                let result = match relay::invite_builder(&channel, &pubkey, dm) {
+                    Ok(builder) => relay.submit(builder).await.map(|_| ()).map_err(e),
+                    Err(err) => Err(e(err)),
+                };
+                let _ = tx.send(AppEvent::Invited { channel, pubkey, result });
             });
         }
         Cmd::LoadProfile(pubkey) => {

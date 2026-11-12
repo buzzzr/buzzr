@@ -3,10 +3,11 @@
 //! Files (all in one directory, `$BUZZR_CONFIG_DIR`, else `$XDG_CONFIG_HOME/buzzr`, else `~/.config/buzzr`):
 //! - `config.json`: `{"relay": "wss://..."}`, written by the first-run setup
 //! - `read-state.json`: the last-read positions per channel and per thread, plus the local unread marks (see `load_read_state`)
+//! - `archived.json`: the channel ids the user archived, kept out of the channel list (see `load_archived`)
 //! - `key.enc`: the private key sealed with a password (see `keyfile.rs`)
 //! - `key`: the private key in plain text, for people who chose that (mode 600)
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// `BUZZR_<NAME>`, if set and not empty.
@@ -64,6 +65,10 @@ impl Paths {
     pub fn read_state(&self) -> PathBuf {
         self.dir.join("read-state.json")
     }
+    /// The channel ids the user archived: out of the channel list, found again by search (`archived.json`).
+    pub fn archived(&self) -> PathBuf {
+        self.dir.join("archived.json")
+    }
 }
 
 /// Where the reader left off: for each channel and each thread, the `created_at` read through. `channels` is keyed by channel
@@ -112,6 +117,30 @@ pub fn save_read_state(path: &Path, state: &ReadState) -> std::io::Result<()> {
     let marks: BTreeMap<&str, Vec<&str>> =
         state.marks.iter().filter(|(_, ids)| !ids.is_empty()).map(|(id, ids)| (id.as_str(), ids.iter().map(String::as_str).collect())).collect();
     let doc = serde_json::json!({ "channels": channels, "threads": threads, "marks": marks });
+    write_private(path, &(serde_json::to_string_pretty(&doc).expect("a json value serialises") + "\n"))
+}
+
+/// The archived channel ids, from `archived.json`. A missing or unreadable file is simply nothing archived, never an error: the
+/// list then shows every channel, which is how it behaved before this file. Archiving is a per-user view preference, so it is
+/// kept here and not on the relay — a channel is a relay event everyone sees, unlike this.
+pub fn load_archived(path: &Path) -> HashSet<String> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return HashSet::new();
+    };
+    let Ok(doc) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return HashSet::new();
+    };
+    doc.get("channels")
+        .and_then(|c| c.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect())
+        .unwrap_or_default()
+}
+
+/// Write the archived channel ids (mode 600, atomically). Sorted, so an unchanged set is an unchanged file.
+pub fn save_archived(path: &Path, ids: &HashSet<String>) -> std::io::Result<()> {
+    let mut channels: Vec<&str> = ids.iter().map(String::as_str).collect();
+    channels.sort_unstable();
+    let doc = serde_json::json!({ "channels": channels });
     write_private(path, &(serde_json::to_string_pretty(&doc).expect("a json value serialises") + "\n"))
 }
 
@@ -223,6 +252,24 @@ mod tests {
         assert!(m1 < m2, "the marks are written sorted, so an unchanged state is an unchanged file: {text}");
         assert!(!text.contains("c2"), "a channel with no mark left is not written at all: {text}");
         assert_eq!(load_read_state(&paths.read_state()).marks.get("c1").map(|s| s.len()), Some(2));
+        std::fs::remove_dir_all(paths.dir()).unwrap();
+    }
+
+    #[test]
+    fn the_archived_channels_are_read_back_and_the_file_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let paths = Paths::new(std::env::temp_dir().join(format!("buzzr-test-{}", uuid::Uuid::new_v4())));
+        assert!(load_archived(&paths.archived()).is_empty(), "no file yet: nothing archived, not an error");
+        let ids: HashSet<String> = ["c1".to_owned(), "c2".to_owned()].into_iter().collect();
+        save_archived(&paths.archived(), &ids).unwrap();
+        assert_eq!(load_archived(&paths.archived()), ids);
+        assert_eq!(std::fs::metadata(paths.archived()).unwrap().permissions().mode() & 0o777, 0o600);
+        // sorted, so an unchanged set is an unchanged file
+        let text = std::fs::read_to_string(paths.archived()).unwrap();
+        assert!(text.find("c1").unwrap() < text.find("c2").unwrap(), "the ids are written sorted: {text}");
+        // a damaged file is nothing archived either, rather than a panic on the next start
+        std::fs::write(paths.archived(), "not json").unwrap();
+        assert!(load_archived(&paths.archived()).is_empty());
         std::fs::remove_dir_all(paths.dir()).unwrap();
     }
 }

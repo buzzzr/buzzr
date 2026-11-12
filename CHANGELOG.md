@@ -5,11 +5,100 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
 
 ## [Unreleased]
 
+### Added
+
+- Ctrl+F finds a channel by name across every channel the relay lists, joined or not, and its row says what the channel is for, how
+  many people are in it and whether you are one of them (the membership and the counts come from NIP-29 `kind:39002`). A channel you
+  are not in opens read-only: in place of the composer there is a `[ Join ]` button, reached with Tab the way the input is, and Enter
+  on it asks the relay to join you (`kind:9021`) — its answer turns the button back into the composer. A private channel is not
+  offered, because a self-join needs an open one. `/join NAME` (a name, `#name` or a channel id) joins or opens one directly, and
+  `/leave` asks first (`y` confirms) before it sends `kind:9022` and drops the channel from the list. The list and the membership are
+  read again after a join or a leave.
+- A plugin can keep a **pane** under the channel list: a small block that is always on screen and takes no focus, key or click.
+  `examples/plugins/clock` shows the time in large digits there and redraws it from an opt-in heartbeat.
+- A plugin is now declared **entirely in its own code, with no manifest**: the folder name is the plugin's id, buzzr runs the first
+  executable entry file it finds in the folder through that file's own `#!` line (so the language is the author's choice, and a
+  JavaScript or TypeScript runtime needs nothing added to buzzr), and the plugin sends its display name, its permissions and its
+  heartbeat (`tickMs`) in its `ready` message. The contract version is now `apiVersion` 2. A folder that will not load — no entry
+  file, no executable bit, an id that is not safe — is listed with the reason instead of failing quietly.
+- A **typed SDK for TypeScript** (`sdk/typescript/buzzr.ts`): one dependency-free file that turns the protocol into a single
+  `definePlugin({ name, permissions, tickMs, ready, onTick, onCommand, … })` call, with `status`, `pane`, `panel`, `flash`, `draft`,
+  `send` and `log` on the handle it gives back. `examples/plugins/clock` is written with it.
+- The **channel list tells the two kinds of unread apart**: a channel with unseen top-level messages shows their count (`(2)`),
+  one whose only unseen news is inside a thread shows `●`, and a channel with both shows `(2) ●`. A thread reply still does not
+  add to the counted unread — a count for it could never be cleared by opening the channel, because a reply is not a timeline row.
+
+### Changed
+
+- `←` / `→` walk a thread from the message list: with a message row selected, `→` opens its thread (a message with no replies has
+  nothing under it, so there the key does nothing) and `←` goes up to that thread's root and, from the root, out of the thread. Esc
+  still backs out the same way, wherever the cursor is.
+- The thread pane reads as a thread: its root sits at the top as one header line — the message number, the time, the author and
+  the first line of what was said, cut with `…` when there is more — and every reply is indented two columns under it. The root
+  keeps message number 1, so the numbers `/r N` and `/t N` take are the ones on screen, and links in an indented reply are still
+  where they look.
+
+### Fixed
+
+- Esc while the slash-command palette was up moved the keyboard out of the composer and left the `/command` behind in the input.
+  It now closes just the palette and keeps the keyboard — and the half-written command — where they are, so typing can go on; the
+  list comes back with the next edit.
+
+## [0.2.0-rc.2] - 2026-11-11
+
+### Added
+
+- `x` on the channel list archives the channel under the cursor (`/archive` archives the channel you are in): it drops out of the
+  list without leaving it, so the relay membership and the read position are untouched. Ctrl+F or `/search` still matches it, its
+  row says `archived`, and Enter brings it back and opens it. The archive set lives in `archived.json` next to the read positions
+  and survives a restart; an archived channel keeps its unread count but is left out of the status line's total.
+- Typing `/` in the input shows a slash-command palette above it: the list narrows to the commands whose name starts with
+  what has been typed, Enter runs the command on the cursor line, and Tab fills its name in for one that takes an argument.
+  The commands loaded plugins registered appear in the list too.
+- `a` opens a reaction picker on the selected message: choose an emoji from the list, or type a name to search it (or an emoji the
+  list does not have). Enter sends it as a NIP-25 `kind:7` and Esc closes. The picker opens on the reaction you already have there,
+  and its first row takes it back; changing an emoji undoes the one it replaces first, so a message keeps one reaction from you.
+- `install.sh` installs buzzr in one line: `curl -fsSL https://raw.githubusercontent.com/buzzzr/buzzr/main/install.sh | sh`
+  downloads the archive for the machine it runs on, checks it against the release's `SHA256SUMS` before unpacking anything, and
+  puts the binary in `~/.local/bin`. `--version` pins a release (a prerelease too, which `/releases/latest` skips) and `--dir`
+  moves the destination; running it again replaces the binary, so it is also the upgrade.
+- `/invite NAME` adds someone — a display name from a channel, or an npub — to the channel on screen (or the group DM you are in)
+  as a plain member. A message you send that `@mentions` someone who is not in the channel is held back and the status line asks:
+  `y` invites them and sends, `n` sends without inviting, Esc keeps the message in the input. Mentioning a member never asks, and
+  a DM never asks; nothing is offered before the channel's member list has loaded, and only names the profiles have given us are
+  recognised this way.
+
+### Changed
+
+- The arrow keys move between the messages and the input: `Up` in an empty composer leaves it for the message list and lands on
+  the newest message with the bottom scrolled into view, and `Down` on the newest message goes back to the input. The channel
+  cursor is no longer dragged along, and with text in the input `Up`/`Down` still move inside what is being written.
+
+### Fixed
+
+- A `… is typing` indicator was shown for the whole channel it arrived in: typing sent inside a thread was drawn in the channel
+  timeline, and typing sent in the channel was drawn inside every thread. An indicator is now shown only in the channel or the
+  thread it was sent in.
+- A DM row opened with `✉ ` (U+2709), an envelope that a terminal font without it draws as a box. A DM is now marked `@`, ASCII
+  like the `#` and `*` of an open and a private channel, and no line that names a DM carries the glyph any more.
+
+## [0.2.0-rc.1] - 2026-11-09
+
+### Added
+
+- A `↓ more below` marker sits in the bottom corner of the message pane while the newest message is below the view, and goes
+  away as soon as the newest message is on screen.
+
 ### Changed
 
 - `u` forces *that* message unread instead of marking the channel unread from it: it works on your own message and on the
   newest one, the `new messages` line is drawn above the marked message, and reading on does not clear it — only `/read`
   (or `/read all`) does. The read position is left alone, and a mark never hides a higher unread count.
+
+### Fixed
+
+- A channel's unread badge counted thread replies, which the channel timeline never shows, so the count came back after every
+  restart even once the channel had been read. A badge now counts top-level rows only; a thread keeps its own unread mark.
 
 ## [0.2.0-rc.0] - 2026-11-09
 
@@ -68,7 +157,9 @@ First public version.
 - A notice in the UI when a newer version is published, with the upgrade command.
 - Release builds for Linux (musl, x86_64 and aarch64) and macOS (Apple silicon and Intel), published with `SHA256SUMS`.
 
-[Unreleased]: https://github.com/buzzzr/buzzr/compare/v0.2.0-rc.0...HEAD
+[Unreleased]: https://github.com/buzzzr/buzzr/compare/v0.2.0-rc.2...HEAD
+[0.2.0-rc.2]: https://github.com/buzzzr/buzzr/compare/v0.2.0-rc.1...v0.2.0-rc.2
+[0.2.0-rc.1]: https://github.com/buzzzr/buzzr/compare/v0.2.0-rc.0...v0.2.0-rc.1
 [0.2.0-rc.0]: https://github.com/buzzzr/buzzr/compare/v0.1.1...v0.2.0-rc.0
 [0.1.1]: https://github.com/buzzzr/buzzr/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/buzzzr/buzzr/releases/tag/v0.1.0

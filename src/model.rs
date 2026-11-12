@@ -146,14 +146,14 @@ const SOLO_LABEL: &str = "buzz.solo";
 pub struct Channel {
     pub id: String,
     pub name: String,
-    #[allow(dead_code)]
+    /// What the group metadata says the channel is for (`about`); shown in a search result for the channel.
     pub about: String,
     #[allow(dead_code)]
     pub created_at: u64,
     pub section: Section,
     pub label: String,
     /// A private (restricted) channel: the relay's group metadata says `["private"]` instead of `["public"]`. Shown as `*` in
-    /// the channel list, against `#` for an open one; DMs have no such marker.
+    /// the channel list, against `#` for an open one; a DM is shown as `@` (see `marker`).
     pub is_private: bool,
 }
 
@@ -183,6 +183,19 @@ impl Channel {
 
     pub fn is_dm(&self) -> bool {
         self.section == Section::Dms
+    }
+
+    /// The one character that opens a channel's row: `@` for a direct message (it is a person, not a room), `*` for a
+    /// private channel (RFC 2811's private-channel prefix) and `#` for an open one. All three are ASCII, so no terminal
+    /// font can be missing them — the row is never a box or a blank.
+    pub fn marker(&self) -> &'static str {
+        if self.is_dm() {
+            "@"
+        } else if self.is_private {
+            "*"
+        } else {
+            "#"
+        }
     }
 }
 
@@ -453,6 +466,7 @@ pub mod tests {
         let e = Ev { kind: 39000, tags: vec![vec!["d".into(), "chan1".into()], vec!["name".into(), "DM".into()]], ..ev("m", 3, "", &[]) };
         let c = Channel::from_event(&e).unwrap();
         assert!(c.is_dm() && c.id == "chan1");
+        assert_eq!(c.marker(), "@", "a DM opens with a marker every font can draw");
     }
 
     #[test]

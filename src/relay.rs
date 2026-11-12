@@ -42,6 +42,13 @@ pub fn ws_url(url: &str) -> String {
     }
 }
 
+/// Whether an event counts toward a channel's unread badge: one of the message kinds, someone else's, and listed on the
+/// channel timeline. A thread reply does not count here — it has its own per-thread unread position — otherwise the badge
+/// would include rows the timeline never shows, and opening the channel could not clear it.
+fn counts_as_unread(e: &Ev, me: &str) -> bool {
+    MESSAGE_KINDS.contains(&e.kind) && e.pubkey != me && e.is_top_level()
+}
+
 pub struct Relay {
     http: reqwest::Client,
     base: String,
@@ -225,6 +232,17 @@ impl Relay {
             .unwrap_or_default())
     }
 
+    /// Who is in each of `channels`: `kind:39002`, one event per channel whose `p` tags are its members. One request for the whole
+    /// list — it is what tells the channel browser which channels we are a member of, and how many people are in each. A channel the
+    /// relay has no members event for is left out of the map, rather than read as empty.
+    pub async fn roster(&self, channels: &[String]) -> Result<HashMap<String, Vec<String>>> {
+        if channels.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let evs = self.query(&[json!({"kinds": [KIND_GROUP_MEMBERS], "#d": channels, "limit": 500})]).await?;
+        Ok(roster_from(&evs))
+    }
+
     /// The newest `kind:0` profile per pubkey: the name to show and what the person says about themselves.
     pub async fn profiles(&self, pubkeys: &[String]) -> Result<HashMap<String, Profile>> {
         let mut out = HashMap::new();
@@ -259,11 +277,18 @@ impl Relay {
     }
 
     /// How many messages in `channel` arrived after `since` that someone else wrote: the unread badge at startup. Counts at
-    /// most `UNREAD_LIMIT`, so a very busy channel reads as that many rather than making one huge query.
+    /// most `UNREAD_LIMIT`, so a very busy channel reads as that many rather than making one huge query. Only rows the
+    /// channel timeline lists are counted: a thread reply has its own unread mark (`thread_read`), and counting it in the
+    /// channel badge would leave a badge that opening the channel can never clear, because the reply is not on the timeline
+    /// and so never moves the channel's read position — it came back after every restart.
     pub async fn unread(&self, channel: &str, since: u64) -> Result<u32> {
         let me = self.me();
-        let evs = self.query(&[json!({"kinds": MESSAGE_KINDS, "#h": [channel], "since": since, "limit": UNREAD_LIMIT})]).await?;
-        Ok(evs.iter().filter(|e| MESSAGE_KINDS.contains(&e.kind) && e.pubkey != me).count() as u32)
+        // `top_level` asks a relay that understands it to leave replies out; the filter below keeps the count right on an
+        // older relay that ignores the field.
+        let evs = self
+            .query(&[json!({"kinds": MESSAGE_KINDS, "#h": [channel], "since": since, "limit": UNREAD_LIMIT, "top_level": true})])
+            .await?;
+        Ok(evs.iter().filter(|e| counts_as_unread(e, &me)).count() as u32)
     }
 
     /// A page of the channel timeline, the way the Buzz app asks for it: top-level messages only, with thread summaries and the
@@ -356,6 +381,45 @@ pub fn delete_builder(channel: &str, target: &str) -> Result<EventBuilder> {
     buzz_sdk::build_delete_message(channel_id, target).map_err(|e| anyhow!("{e}"))
 }
 
+/// A NIP-25 reaction (`kind:7`): the emoji, and the message it names. It carries no `h` tag — the message it points at says
+/// which channel the reaction belongs to, which is how it finds its way back to that timeline.
+pub fn reaction_builder(target: &str, emoji: &str) -> Result<EventBuilder> {
+    let target = nostr::EventId::from_hex(target).context("not a message id")?;
+    buzz_sdk::build_reaction(target, emoji).map_err(|e| anyhow!("{e}"))
+}
+
+/// Undo one of your reactions (`kind:5`, NIP-09 naming the reaction event). Changing a reaction removes the old one this way
+/// first, so a message keeps one reaction from you.
+pub fn remove_reaction_builder(reaction: &str) -> Result<EventBuilder> {
+    let reaction = nostr::EventId::from_hex(reaction).context("not a reaction id")?;
+    buzz_sdk::build_remove_reaction(reaction).map_err(|e| anyhow!("{e}"))
+}
+
+/// The `channel -> members` map from the `kind:39002` events of a roster query: the `d` tag is the channel, and each `p` tag is a
+/// member. A channel with no event is left out of the map, rather than read as empty — an unanswered channel is not an empty one.
+fn roster_from(evs: &[Ev]) -> HashMap<String, Vec<String>> {
+    evs.iter()
+        .filter_map(|e| {
+            let id = e.tag("d")?;
+            let members = e.tags.iter().filter(|t| t.first().map(String::as_str) == Some("p")).filter_map(|t| t.get(1).cloned()).collect();
+            Some((id.to_owned(), members))
+        })
+        .collect()
+}
+
+/// Join an open channel (`kind:9021`, what `buzz channels join` sends). The relay adds us as a member, or refuses — a private
+/// channel cannot be joined, it needs an invitation.
+pub fn join_builder(channel: &str) -> Result<EventBuilder> {
+    let channel_id = uuid::Uuid::parse_str(channel).context("not a channel id")?;
+    buzz_sdk::build_join(channel_id).map_err(|e| anyhow!("{e}"))
+}
+
+/// Leave a channel (`kind:9022`, what `buzz channels leave` sends). The relay refuses when we are the last owner.
+pub fn leave_builder(channel: &str) -> Result<EventBuilder> {
+    let channel_id = uuid::Uuid::parse_str(channel).context("not a channel id")?;
+    buzz_sdk::build_leave(channel_id).map_err(|e| anyhow!("{e}"))
+}
+
 /// A new stream channel (`kind:9007`, what `buzz channels create` sends). Returns the builder and the new channel's id.
 pub fn create_channel_builder(name: &str, private: bool, about: Option<&str>) -> Result<(EventBuilder, String)> {
     let id = uuid::Uuid::new_v4();
@@ -375,6 +439,19 @@ pub fn delete_channel_builder(channel: &str) -> Result<EventBuilder> {
 /// the client finds the conversation in the channel list afterwards.
 pub fn dm_open_builder(peer: &str) -> Result<EventBuilder> {
     buzz_sdk::build_dm_open(&[peer]).map_err(|e| anyhow!("{e}"))
+}
+
+/// Add someone to a channel (`kind:9000`, what `buzz channels add-member` sends) or to a group DM (`kind:41011`, what
+/// `buzz dms add-member` sends). A channel is a NIP-29 group and a DM is a conversation with people, so the relay takes a
+/// different event for each and `dm` picks which. No role is asked for, so the person joins as a plain member — the same
+/// as `add-member` with no `--role`.
+pub fn invite_builder(channel: &str, pubkey: &str, dm: bool) -> Result<EventBuilder> {
+    let channel_id = uuid::Uuid::parse_str(channel).context("not a channel id")?;
+    if dm {
+        buzz_sdk::build_dm_add_member(channel_id, pubkey).map_err(|e| anyhow!("{e}"))
+    } else {
+        buzz_sdk::build_add_member(channel_id, pubkey, None).map_err(|e| anyhow!("{e}"))
+    }
 }
 
 /// The human-readable part of a relay error body.
@@ -398,6 +475,35 @@ mod tests {
         assert_eq!(ws_url("https://chat.example.com"), "wss://chat.example.com");
         assert_eq!(ws_url("http://192.0.2.10:3000"), "ws://192.0.2.10:3000");
         assert_eq!(ws_url("wss://a.b"), "wss://a.b");
+    }
+
+    #[test]
+    fn an_unread_count_skips_thread_replies() {
+        let me = "me";
+        let ev = |id: &str, who: &str, tags: &[&[&str]]| Ev {
+            id: id.into(),
+            pubkey: who.into(),
+            created_at: 1000,
+            kind: 9,
+            content: "hi".into(),
+            tags: tags.iter().map(|t| t.iter().map(|s| (*s).to_owned()).collect()).collect(),
+        };
+        let root = "aa".repeat(32);
+        assert!(counts_as_unread(&ev("top", "alice", &[&["h", "c"]]), me), "a top-level channel message counts");
+        assert!(
+            counts_as_unread(&ev("bcast", "alice", &[&["h", "c"], &["e", &root, "", "reply"], &["broadcast", "1"]]), me),
+            "a broadcast reply is listed on the timeline, so it counts"
+        );
+        assert!(
+            !counts_as_unread(&ev("reply", "alice", &[&["h", "c"], &["e", &root, "", "reply"]]), me),
+            "a thread reply is not on the channel timeline and must not count"
+        );
+        assert!(
+            !counts_as_unread(&ev("nested", "alice", &[&["h", "c"], &["e", &root, "", "root"], &["e", &root, "", "reply"]]), me),
+            "a nested reply does not count either"
+        );
+        assert!(!counts_as_unread(&ev("mine", me, &[&["h", "c"]]), me), "your own message never counts");
+        assert!(!counts_as_unread(&Ev { kind: 7, ..ev("react", "alice", &[&["h", "c"]]) }, me), "a reaction is not a message");
     }
 
     #[test]
@@ -502,10 +608,60 @@ mod tests {
     }
 
     #[test]
+    fn an_invite_adds_a_member_the_way_the_cli_does() {
+        let keys = Keys::generate();
+        let channel = "11111111-1111-4111-8111-111111111111";
+        let friend = "cd".repeat(32);
+        let ev = invite_builder(channel, &friend, false).unwrap().sign_with_keys(&keys).unwrap();
+        assert_eq!((ev.kind.as_u16(), ev.content.as_str()), (9000, ""), "a channel invite is a NIP-29 add-member with no content");
+        assert!(ev.tags.iter().any(|t| t.as_slice() == ["h", channel]));
+        assert!(ev.tags.iter().any(|t| t.as_slice() == ["p", friend.as_str()]), "{:?}", ev.tags);
+        assert!(!ev.tags.iter().any(|t| t.as_slice().first().map(String::as_str) == Some("role")), "no role tag: the person joins as a plain member");
+        let dm = invite_builder(channel, &friend, true).unwrap().sign_with_keys(&keys).unwrap();
+        assert_eq!(dm.kind.as_u16(), 41011, "a DM invite adds to the conversation instead");
+        assert!(dm.tags.iter().any(|t| t.as_slice() == ["h", channel]) && dm.tags.iter().any(|t| t.as_slice() == ["p", friend.as_str()]));
+        assert!(invite_builder("not-a-uuid", &friend, false).is_err(), "the channel must be a uuid");
+        assert!(invite_builder(channel, "alice", false).is_err(), "a pubkey is required");
+        assert!(invite_builder(channel, "alice", true).is_err(), "and the same goes for a DM");
+    }
+
+    #[test]
     fn auth_tag_must_be_a_json_array() {
         assert!(Relay::new("https://r", Keys::generate(), Some("not json".into())).is_err());
         let keys = Keys::generate();
         let tag = json!(["auth", keys.public_key().to_hex(), "", "00".repeat(64)]).to_string();
         assert!(Relay::new("https://r", Keys::generate(), Some(tag)).unwrap().auth_tag().is_some());
+    }
+
+    #[test]
+    fn join_and_leave_name_the_channel_and_their_kind() {
+        let keys = Keys::generate();
+        let channel = "11111111-1111-4111-8111-111111111111";
+        let join = join_builder(channel).unwrap().sign_with_keys(&keys).unwrap();
+        assert_eq!(join.kind.as_u16(), 9021, "a join request");
+        assert_eq!(join.content, "");
+        assert!(join.tags.iter().any(|t| t.as_slice() == ["h", channel]), "the channel is the `h` tag: {:?}", join.tags);
+        let leave = leave_builder(channel).unwrap().sign_with_keys(&keys).unwrap();
+        assert_eq!(leave.kind.as_u16(), 9022, "a leave request");
+        assert!(leave.tags.iter().any(|t| t.as_slice() == ["h", channel]), "the channel is the `h` tag: {:?}", leave.tags);
+        assert!(join_builder("general").is_err(), "a name is not a channel id");
+        assert!(leave_builder("").is_err());
+    }
+
+    #[test]
+    fn the_roster_maps_each_channel_to_its_members() {
+        // A `kind:39002`: the channel in `d`, one `p` per member. The map is what marks membership and the counts in the browser.
+        let members = |chan: &str, who: &[&str]| {
+            let mut tags = vec![vec!["d".to_string(), chan.to_string()]];
+            tags.extend(who.iter().map(|p| vec!["p".to_string(), (*p).to_string()]));
+            Ev { id: format!("ev-{chan}"), pubkey: "alice".into(), created_at: 1000, kind: 39002, content: String::new(), tags }
+        };
+        let (a, b) = ("aa".repeat(32), "bb".repeat(32));
+        let map = roster_from(&[members("chan1", &[&a, &b]), members("chan2", &[&a]), members("empty", &[])]);
+        assert_eq!(map.get("chan1"), Some(&vec![a.clone(), b.clone()]));
+        assert_eq!(map.get("chan2"), Some(&vec![a.clone()]));
+        assert_eq!(map.get("empty"), Some(&vec![]), "an event with no members is an empty channel, not an unknown one");
+        assert_eq!(map.get("chan3"), None, "a channel the relay said nothing about is left out, so no count is shown for it");
+        assert!(roster_from(&[]).is_empty());
     }
 }
