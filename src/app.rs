@@ -138,6 +138,8 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("edit", "edit your own message N"),
     ("help", "the commands and how things work"),
     ("invite", "add someone to this channel: /invite NAME"),
+    ("join", "join a channel: /join NAME"),
+    ("leave", "leave this channel (asks first)"),
     ("more", "load older messages"),
     ("new", "create a channel: /new [private] name [about]"),
     ("plugins", "what is loaded, and the commands plugins added"),
@@ -219,6 +221,12 @@ pub enum Cmd {
     /// an empty `emoji` with `remove` set is the reaction going away.
     React { target: String, emoji: String, remove: Option<String> },
     CreateChannel { name: String, private: bool, about: Option<String> },
+    /// Ask to join an open channel (`kind:9021`).
+    JoinChannel { channel: String },
+    /// Leave a channel (`kind:9022`).
+    LeaveChannel { channel: String },
+    /// Who is in every channel, and whether we are: one `kind:39002` request (`relay::roster`).
+    LoadRoster { channels: Vec<String> },
     /// Ask the relay for the direct message with this person (`kind:41010`); it creates it when it does not exist yet.
     OpenDm { peer: String },
     /// Add someone to the open channel (`kind:9000`) or group DM (`kind:41011`).
@@ -230,6 +238,8 @@ pub enum Cmd {
     SaveRead(ReadState),
     /// Write the archived channel ids to disk (the loop owns the file).
     SaveArchived(HashSet<String>),
+    /// Write the messages typed but not sent, per channel and thread, to disk (the loop owns the file).
+    SaveDrafts(HashMap<(String, Option<String>), String>),
     /// Work for the plugin runtime (start, reload, or send a command to a plugin process).
     Plugin(PluginCmd),
 }
@@ -248,6 +258,12 @@ pub enum AppEvent {
     Sent(Result<String, String>),
     /// The id of the channel we asked to create.
     Created(Result<String, String>),
+    /// The relay took (or refused) our join request for a channel.
+    Joined { channel: String, result: Result<String, String> },
+    /// The relay took (or refused) our leave request for a channel.
+    Left { channel: String, result: Result<String, String> },
+    /// The answer to `Cmd::LoadRoster`: the members of every channel we asked about.
+    Roster(Result<HashMap<String, Vec<String>>, String>),
     /// The relay took (or found) the direct message we asked for; the channel list is reloaded to find its id.
     DmOpened(Result<(), String>),
     /// The answer to `Cmd::Invite`.
@@ -302,6 +318,13 @@ pub struct App {
     /// The channel ids the reader archived: kept out of the channel list, and brought back only from a search result. Like the
     /// read positions this is per-user view state, not a relay concept, so it lives on this device (`archived.json`).
     pub archived: HashSet<String>,
+    /// Messages typed but not sent, keyed by the channel and the thread they are a reply into (`None` is the channel's own
+    /// timeline). The input is a single box, but a draft belongs to the place it was typed: leaving that place stores it and
+    /// coming back restores it, so a half-written reply is never carried into another channel — or sent there by mistake.
+    pub drafts: HashMap<(String, Option<String>), String>,
+    /// The place the text now in the box was typed in, so it can be stored there when the box moves on (see `switch_draft`).
+    /// `None` while something else owns the box (an edit) or before the first channel opens.
+    draft_at: Option<(String, Option<String>)>,
     /// Where each channel's last visit stopped, for the "new messages" line: taken from `read` as a channel is opened and kept
     /// while we stay in it, so reading on does not move the line under the reader.
     new_since: HashMap<String, u64>,
@@ -342,12 +365,24 @@ pub struct App {
     /// The slash-command palette's row under the cursor. The palette itself is derived from the editor text (`command_rows`);
     /// this is only where the highlight sits, reset to the first row every time the command word changes.
     pub cmd_cursor: usize,
+    /// The input text the palette was closed on with Esc: while the editor still holds exactly that, `palette_up` stays false,
+    /// so Esc hides the pane without losing the command word that was typed. Any edit changes the text and the palette comes
+    /// back; submitting clears it (see `key_input` and `submit`).
+    cmd_hidden: Option<String>,
+    /// The channels we are a member of, from the relay's `kind:39002` (`Cmd::LoadRoster`): a channel we are not in offers to
+    /// join it instead of the composer, and Enter opens one we are in.
+    pub joined: HashSet<String>,
+    /// How many people are in each channel, from the same answer. A channel with no entry is one the relay told us nothing
+    /// about: it keeps no count, and it is not read as a channel we are not in (see `not_joined`).
+    pub member_counts: HashMap<String, usize>,
+    /// The channel a `/leave` is waiting on a yes/no for.
+    pub confirm_leave: Option<String>,
     pub search: Search,
     /// Somebody's profile card, while `Overlay::Whois` is up.
     pub whois: Option<Whois>,
     /// The person a fresh DM was asked for: the channel is opened as soon as the reloaded list has it.
     pending_dm: Option<String>,
-    /// What loaded plugins put on the screen: status items, badges, marks and `/commands`.
+    /// What loaded plugins put on the screen: status items, badges, marks, a pane and `/commands`.
     pub plugins: Registry,
     /// How this copy of buzzr was installed, for `/update`; the loop fills it in, tests set it directly.
     pub update_source: InstallSource,
@@ -365,6 +400,9 @@ fn now_secs() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
+/// How far a thread's replies are pushed over from its root, so the list reads as a thread rather than a flat feed.
+const THREAD_INDENT: usize = 2;
+
 /// The `─── new messages ───` rule drawn above the first message that arrived after the stored read position.
 fn new_messages_divider(width: usize) -> Line {
     let label = " new messages ";
@@ -372,6 +410,18 @@ fn new_messages_divider(width: usize) -> Line {
     let left = dashes / 2;
     let text = format!("{}{}{}", "─".repeat(left), label, "─".repeat(dashes - left));
     Line { spans: vec![Span::styled(text, Style::default().fg(crate::theme::get().warn))], links: Vec::new() }
+}
+
+/// Push a rendered message over by `n` columns, so a thread's replies sit under its root. The link columns move with the text,
+/// so a click on a link in a reply still lands on the link.
+fn indent_lines(r: &mut Rendered, n: usize) {
+    for line in r.lines.iter_mut() {
+        line.spans.insert(0, Span::raw(" ".repeat(n)));
+        for hit in line.links.iter_mut() {
+            hit.start += n;
+            hit.end += n;
+        }
+    }
 }
 
 impl App {
@@ -399,6 +449,8 @@ impl App {
             thread_read: HashMap::new(),
             marks: HashMap::new(),
             archived: HashSet::new(),
+            drafts: HashMap::new(),
+            draft_at: None,
             new_since: HashMap::new(),
             typing: HashMap::new(),
             flash: None,
@@ -424,6 +476,10 @@ impl App {
             confirm_invite: None,
             react: None,
             cmd_cursor: 0,
+            cmd_hidden: None,
+            joined: HashSet::new(),
+            member_counts: HashMap::new(),
+            confirm_leave: None,
             search: Search { query: Editor::default(), messages: Vec::new(), cursor: 0, seq: 0, asked: String::new(), edited_at: Instant::now(), loading: false },
             whois: None,
             pending_dm: None,
@@ -548,6 +604,11 @@ impl App {
         if f != self.focus && (self.focus == Focus::Channels || f == Focus::Channels) {
             self.chan_cursor = self.cur.unwrap_or(0);
             self.clamp_cursor();
+        }
+        if f != self.focus {
+            // The palette is a function of the input having the keyboard, so leaving the composer and coming back shows it
+            // again, whatever Esc last closed on (see `palette_up`).
+            self.cmd_hidden = None;
         }
         self.focus = f;
     }
@@ -789,6 +850,50 @@ impl App {
         vec![Cmd::SaveRead(self.read_state())]
     }
 
+    /// Right arrow on the message the cursor is on: open its thread. A message with no replies has nothing under it, so
+    /// the key does nothing there — the same quiet no-op as Up at the top of the list. Inside a thread there is nothing
+    /// further to go into either: every row is already the reply it looks like.
+    fn enter_thread_of_selected(&mut self) -> Vec<Cmd> {
+        if self.in_thread() {
+            return Vec::new();
+        }
+        let Some(m) = self.selected_msg() else { return Vec::new() };
+        let Some(store) = self.store() else { return Vec::new() };
+        let root = store.thread_root(&m).to_owned();
+        // The relay's summary counts replies that are not loaded yet, so a row that says "2 replies" opens.
+        if root == m.id && store.replies_of(&m).0 == 0 {
+            return Vec::new();
+        }
+        self.open_thread(root)
+    }
+
+    /// Left arrow on the message the cursor is on: go up one level. A reply goes to its root — the thread view is flat, so
+    /// that is the message it answers — and the root itself leaves the thread for the channel it came from. The channel
+    /// timeline is the top, so there the key does nothing.
+    fn leave_for_thread_root(&mut self) -> Vec<Cmd> {
+        let View::Thread(root) = self.view.clone() else { return Vec::new() };
+        let view_h = self.view_h;
+        let Some(layout) = self.layout.take() else { return Vec::new() };
+        let (w, layout) = layout;
+        let selected = list::selected_index(&layout, &self.state).and_then(|i| layout.items.get(i)).map(|it| it.id.clone());
+        match (selected.as_deref(), layout.index_of(&root)) {
+            // on the root: out of the thread, the way Esc goes
+            (Some(id), _) if id == root => {
+                self.layout = Some((w, layout));
+                self.back_to_channel()
+            }
+            (_, Some(i)) => {
+                list::select(&layout, &mut self.state, view_h, i);
+                self.layout = Some((w, layout));
+                Vec::new()
+            }
+            _ => {
+                self.layout = Some((w, layout));
+                Vec::new()
+            }
+        }
+    }
+
     // ---- layout ----------------------------------------------------------------------------------------------------------
 
     /// The messages the list shows, oldest first.
@@ -820,15 +925,31 @@ impl App {
     /// when the replies are loaded and can be counted, `● new` when only the relay's summary says so (they are not loaded yet).
     /// `None` when the thread is read, or has never been opened: with no stored position nothing is marked, as for a channel.
     fn thread_unread_badge(&self, store: &Store, root: &str) -> Option<Span<'static>> {
+        let loaded = self.thread_new_replies(store, root)?;
+        let text = if loaded == 0 { "  ● new".to_owned() } else { format!("  ● {loaded} new") };
+        Some(Span::styled(text, Style::default().fg(crate::theme::get().warn).add_modifier(Modifier::BOLD)))
+    }
+
+    /// How many of a thread's replies are loaded and newer than the reader's stored position in it, when the thread has any
+    /// news at all — `None` when it is read or was never opened (with no stored position nothing is marked, as for a channel).
+    /// The relay's summary covers replies it knows about but we have not fetched, so a row that already says `💬 2 replies` is
+    /// marked before they load, and a count of zero then means "there is news, but it is not loaded yet". This is the one
+    /// condition behind both the message list's thread mark and the channel list's `●`, so the two never drift apart.
+    fn thread_new_replies(&self, store: &Store, root: &str) -> Option<usize> {
         let at = *self.thread_read.get(root)?;
         let loaded = store.thread(root).iter().filter(|m| m.id != root && m.pubkey != self.me && m.created_at > at).count();
         let newer = store.summaries.get(root).and_then(|s| s.last_reply_at).map(|t| t > at).unwrap_or(false);
-        let text = match (loaded, newer) {
-            (0, false) => return None,
-            (0, true) => "  ● new".to_owned(),
-            (n, _) => format!("  ● {n} new"),
-        };
-        Some(Span::styled(text, Style::default().fg(crate::theme::get().warn).add_modifier(Modifier::BOLD)))
+        (loaded > 0 || newer).then_some(loaded)
+    }
+
+    /// Whether a channel's news is inside a thread rather than on its timeline: some thread in it has replies newer than the
+    /// reader's stored position, so the channel list marks the row with a `●` even though its counted unread — what `(N)`
+    /// stands for — is zero. It mirrors `thread_unread_badge` over every thread the store knows about, so the channel row and
+    /// the message list agree, and it clears when the thread is opened the same way. It holds only for a channel whose store
+    /// is loaded: a channel buzzr has not opened this run has no layer to look in (the startup count is timeline-only).
+    pub fn channel_thread_unread(&self, channel: &str) -> bool {
+        let Some(store) = self.stores.get(channel) else { return false };
+        Self::thread_roots(store).iter().any(|root| self.thread_new_replies(store, root).is_some())
     }
 
     fn render_message(&self, store: &Store, m: &Ev, number: usize, width: usize) -> Rendered {
@@ -877,6 +998,46 @@ impl App {
         Rendered { id: m.id.clone(), lines }
     }
 
+    /// The thread root at the top of a thread: one line — its head (number, time, author) and then the first line of what it
+    /// says, cut off with `…` when there is more. It is the thread's head, not another row in the feed; the replies below it
+    /// are indented (see `build_layout`).
+    fn render_thread_root(&self, store: &Store, m: &Ev, number: usize, width: usize) -> Rendered {
+        let th = crate::theme::get();
+        let dim = Style::default().fg(th.dim);
+        let mine = m.pubkey == self.me;
+        let (content, edited) = store.content_of(m);
+        let mut head: Vec<Span<'static>> = vec![
+            Span::styled(format!("#{number} "), dim),
+            Span::styled(format!("{} ", self.fmt_time(m.created_at)), Style::default().fg(th.time)),
+            Span::styled(self.name_of(&m.pubkey), Style::default().fg(if mine { th.ok } else { th.accent }).add_modifier(Modifier::BOLD)),
+        ];
+        if edited {
+            head.push(Span::styled(" (edited)", dim));
+        }
+        if let Some(mark) = self.plugins.message_mark(&m.id) {
+            head.insert(0, Span::styled(format!("{} ", mark.text), mark.tone.style()));
+        }
+        let span_w = |s: &Span| unicode_width::UnicodeWidthStr::width(s.content.as_ref());
+        while head.iter().map(span_w).sum::<usize>() > width && head.len() > 3 {
+            head.pop();
+        }
+        let head_w: usize = head.iter().map(span_w).sum();
+        // What the root says, after the head, on the same line: rendered at what is left of the width (one column kept for the
+        // `…`), so a narrow pane loses the tail rather than the whole line.
+        let avail = width.saturating_sub(head_w + 2);
+        if avail >= 8 && !content.trim().is_empty() {
+            let body = markdown::render(content, avail - 1);
+            if let Some(first) = body.first() {
+                head.push(Span::styled("  ", dim));
+                head.extend(first.spans.iter().cloned());
+                if body.len() > 1 {
+                    head.push(Span::styled("…", dim));
+                }
+            }
+        }
+        Rendered { id: m.id.clone(), lines: vec![Line { spans: head, links: Vec::new() }] }
+    }
+
     fn build_layout(&self, width: usize) -> Layout {
         let Some(store) = self.store() else { return Layout::default() };
         let first_unread = self.first_unread();
@@ -885,7 +1046,16 @@ impl App {
             .iter()
             .enumerate()
             .map(|(i, m)| {
-                let mut rendered = self.render_message(store, m, i + 1, width);
+                let mut rendered = match &self.view {
+                    // The thread's root is its header, and every reply is indented under it, so the list reads as a thread.
+                    View::Thread(root) if i == 0 && m.id == *root => self.render_thread_root(store, m, i + 1, width),
+                    View::Thread(_) => {
+                        let mut r = self.render_message(store, m, i + 1, width.saturating_sub(THREAD_INDENT));
+                        indent_lines(&mut r, THREAD_INDENT);
+                        r
+                    }
+                    _ => self.render_message(store, m, i + 1, width),
+                };
                 if Some(i) == first_unread {
                     rendered.lines.insert(0, new_messages_divider(width));
                 }
@@ -997,13 +1167,75 @@ impl App {
         }
     }
 
-    fn enter_view(&mut self, view: View) {
+    /// Where the composer is writing: the channel on screen, and the thread the text would be a reply into (`None` for the
+    /// channel's own timeline). This is the key a draft is stored under, so what is typed follows the place it belongs to.
+    /// `None` when no channel is open: there is nowhere to write, so there is nothing to keep.
+    fn draft_key(&self) -> Option<(String, Option<String>)> {
+        let c = self.channel()?;
+        let root = self.reply_target.clone().or_else(|| match &self.view {
+            View::Thread(r) => Some(r.clone()),
+            View::Channel => None,
+        });
+        Some((c.id.clone(), root))
+    }
+
+    /// Take the drafts read from disk; the loop fills this in before the first event, tests set it directly.
+    pub fn seed_drafts(&mut self, drafts: HashMap<(String, Option<String>), String>) {
+        self.drafts = drafts;
+    }
+
+    /// Move the text in the box into the draft store under the place it was typed, and forget which place the box belongs to.
+    /// Used when the box changes hands — the place a message would go moves, or an edit takes it over — and by the loop on
+    /// the way out, so the last thing typed is not lost. The write goes back to the caller when the stored drafts changed.
+    pub fn stash_draft(&mut self) -> Vec<Cmd> {
+        let Some(at) = self.draft_at.take() else { return Vec::new() };
+        let text = self.editor.text();
+        if text == self.drafts.get(&at).cloned().unwrap_or_default() {
+            return Vec::new();
+        }
+        if text.is_empty() {
+            self.drafts.remove(&at);
+        } else {
+            self.drafts.insert(at, text);
+        }
+        vec![Cmd::SaveDrafts(self.drafts.clone())]
+    }
+
+    /// Put what is in the box back where it was typed, and bring the new place's draft into the box: called wherever the
+    /// place a message would go changes — another channel, into or out of a thread, starting or cancelling a reply — so a
+    /// half-written message is never carried into another channel, nor left behind in the one it was written for.
+    fn switch_draft(&mut self) -> Vec<Cmd> {
+        let now = self.draft_key();
+        if now == self.draft_at {
+            return Vec::new();
+        }
+        let cmds = self.stash_draft();
+        self.draft_at = now;
+        self.editor.clear();
+        if let Some(text) = self.draft_at.as_ref().and_then(|k| self.drafts.get(k)).cloned() {
+            self.editor.insert_str(&text);
+        }
+        cmds
+    }
+
+    /// Forget the draft of the place the box is in: what was in it has just gone out. The place is taken before the reply
+    /// target is dropped, so the text is cleared from where it was written rather than from wherever the send leaves us.
+    fn clear_draft(&mut self, at: Option<(String, Option<String>)>) -> Vec<Cmd> {
+        let Some(at) = at else { return Vec::new() };
+        if self.drafts.remove(&at).is_none() {
+            return Vec::new();
+        }
+        vec![Cmd::SaveDrafts(self.drafts.clone())]
+    }
+
+    fn enter_view(&mut self, view: View) -> Vec<Cmd> {
         self.save_position();
         self.view = view;
         self.reply_target = None;
         self.layout = None;
         self.fresh_view = true;
         self.state = self.view_key().and_then(|k| self.saved.get(&k).cloned()).unwrap_or_default();
+        self.switch_draft()
     }
 
     fn open_channel(&mut self, index: usize) -> Vec<Cmd> {
@@ -1029,7 +1261,7 @@ impl App {
                 self.new_since.remove(&id);
             }
         }
-        let mut cmds = Vec::new();
+        let mut cmds = self.switch_draft();
         // opening a channel reads it: whatever we counted is now on screen
         if let Some(cmd) = self.read_through(&id) {
             cmds.push(cmd);
@@ -1082,12 +1314,61 @@ impl App {
         Some(Cmd::SaveArchived(self.archived.clone()))
     }
 
+    // ---- membership: channels we are in, and the ones we are not
+
+    /// Whether we are a member of a channel, as far as the relay has told us (`Cmd::LoadRoster`).
+    pub fn is_member(&self, id: &str) -> bool {
+        self.joined.contains(id)
+    }
+
+    /// Whether the relay has answered for a channel at all. A channel with no answer is one the relay said nothing about: it is
+    /// not read as a channel we are not in. The roster is also how the relay names who is in a channel, and a client that is in
+    /// a channel the relay did not describe must not lose its composer over it.
+    fn roster_known(&self, id: &str) -> bool {
+        self.member_counts.contains_key(id)
+    }
+
+    /// Whether a channel is one we know we are not in: the relay answered for it and we are not among its members. Only these
+    /// offer to join it. DMs are never joinable, and a channel we are in — or one the relay has not answered for — keeps the
+    /// ordinary composer.
+    pub fn not_joined(&self, id: &str) -> bool {
+        let dm = self.channels.iter().find(|c| c.id == id).map(|c| c.is_dm()).unwrap_or(true);
+        !dm && self.roster_known(id) && !self.is_member(id)
+    }
+
+    /// Whether the channel on screen is one we are not in (see `not_joined`): its composer is a Join button.
+    pub fn open_channel_not_joined(&self) -> bool {
+        self.channel().map(|c| self.not_joined(&c.id)).unwrap_or(false)
+    }
+
+    /// Ask the relay who is in every channel we know. The answer says which ones we are in, how many people are in each, and so
+    /// which channels offer to join us. One request for the whole list.
+    fn load_roster(&self) -> Vec<Cmd> {
+        let channels: Vec<String> = self.channels.iter().map(|c| c.id.clone()).collect();
+        if channels.is_empty() {
+            Vec::new()
+        } else {
+            vec![Cmd::LoadRoster { channels }]
+        }
+    }
+
+    /// Open a channel from the list or from a search result, bringing it back into the list first if it was archived. A channel
+    /// we are not in opens read-only: its composer is the Join button until it is joined.
+    fn open_from_list(&mut self, index: usize) -> Vec<Cmd> {
+        let mut cmds = Vec::new();
+        if let Some(cmd) = self.unarchive(index) {
+            cmds.push(cmd);
+        }
+        cmds.extend(self.open_channel(index));
+        self.set_focus(Focus::Messages);
+        cmds
+    }
+
     fn open_thread(&mut self, root: String) -> Vec<Cmd> {
         let Some(c) = self.channel() else { return Vec::new() };
         let channel = c.id.clone();
-        self.enter_view(View::Thread(root.clone()));
+        let mut cmds = self.enter_view(View::Thread(root.clone()));
         self.set_focus(Focus::Messages);
-        let mut cmds = Vec::new();
         // opening a thread reads it: the replies are on screen, so its row in the channel stops being marked unread
         if let Some(cmd) = self.read_through_thread(&channel, &root) {
             cmds.push(cmd);
@@ -1096,9 +1377,11 @@ impl App {
         cmds
     }
 
-    fn back_to_channel(&mut self) {
+    fn back_to_channel(&mut self) -> Vec<Cmd> {
         if self.in_thread() {
-            self.enter_view(View::Channel);
+            self.enter_view(View::Channel)
+        } else {
+            Vec::new()
         }
     }
 
@@ -1199,6 +1482,34 @@ impl App {
                 self.flash(format!("could not open the DM: {e}"));
                 Vec::new()
             }
+            AppEvent::Joined { channel, result } => match result {
+                // The channel is opened by the reloaded list: `open_after` still names it.
+                Ok(_) => self.reload_membership(),
+                Err(e) => {
+                    // Only drop the intent to open when this answer is about the channel it still names: a stale refusal must not
+                    // cancel a newer join.
+                    if self.open_after.as_deref() == Some(channel.as_str()) {
+                        self.open_after = None;
+                    }
+                    self.flash(format!("could not join the channel: {e}"));
+                    Vec::new()
+                }
+            },
+            AppEvent::Left { channel, result } => match result {
+                Ok(_) => {
+                    let mut cmds = Vec::new();
+                    if let Some(cmd) = self.forget_channel(&channel) {
+                        cmds.push(cmd);
+                    }
+                    cmds.extend(self.reload_membership());
+                    cmds
+                }
+                Err(e) => {
+                    self.flash(format!("could not leave the channel: {e}"));
+                    Vec::new()
+                }
+            },
+            AppEvent::Roster(r) => self.roster_loaded(r),
             AppEvent::Invited { channel, pubkey, result } => self.invited(channel, pubkey, result),
             AppEvent::Profile { pubkey, result } => {
                 // An answer for a card that has since been replaced by another person is dropped.
@@ -1296,6 +1607,31 @@ impl App {
         Vec::new()
     }
 
+    /// The relay's answer to `Cmd::LoadRoster` (`kind:39002`): who is in each channel. It is what says which channels we are a
+    /// member of and how many people are in each. A channel with no answer keeps no count, rather than a wrong one, and the
+    /// marks are rebuilt from this answer alone so a leave is not left looking like a join.
+    fn roster_loaded(&mut self, r: Result<HashMap<String, Vec<String>>, String>) -> Vec<Cmd> {
+        match r {
+            Ok(map) => {
+                let me = self.me.clone();
+                let known: HashSet<String> = self.channels.iter().map(|c| c.id.clone()).collect();
+                self.joined.clear();
+                self.member_counts.clear();
+                for (id, members) in map {
+                    if !known.contains(&id) {
+                        continue; // a channel that left the list between the two requests
+                    }
+                    if members.iter().any(|p| *p == me) {
+                        self.joined.insert(id.clone());
+                    }
+                    self.member_counts.insert(id, members.len());
+                }
+            }
+            Err(e) => self.flash(format!("could not load who is in the channels: {e}")),
+        }
+        Vec::new()
+    }
+
     fn channels_loaded(&mut self, r: Result<Vec<Channel>, String>) -> Vec<Cmd> {
         let mut list = match r {
             Ok(l) => l,
@@ -1322,6 +1658,8 @@ impl App {
         let mut cmds = Vec::new();
         if ids != old_ids {
             cmds.push(Cmd::Subscribe(ids.clone()));
+            // A channel that appeared or went away changes who is in what: the browser's marks and counts come from the relay.
+            cmds.push(Cmd::LoadRoster { channels: ids.clone() });
         }
         for c in self.channels.clone() {
             if c.is_dm() && !self.members.contains_key(&c.id) && self.loading.insert(format!("members:{}", c.id)) {
@@ -1540,6 +1878,9 @@ impl App {
         if self.confirm_invite.is_some() {
             return self.answer_invite(k);
         }
+        if self.confirm_leave.is_some() {
+            return self.answer_leave(k);
+        }
         if self.react.is_some() {
             return self.key_react(k);
         }
@@ -1581,8 +1922,7 @@ impl App {
                 return Vec::new();
             }
             KeyCode::Char('f') if ctrl => {
-                self.open_search(String::new());
-                return Vec::new();
+                return self.open_search(String::new());
             }
             KeyCode::Char('r') if ctrl => return self.refresh(),
             KeyCode::Char('o') if ctrl => return self.load_older(),
@@ -1675,10 +2015,7 @@ impl App {
                 }
                 None => Vec::new(),
             },
-            KeyCode::Char('r') => {
-                self.start_reply();
-                Vec::new()
-            }
+            KeyCode::Char('r') => self.start_reply(),
             KeyCode::Char('a') => {
                 if let Some(m) = self.selected_msg() {
                     self.open_react(&m);
@@ -1689,11 +2026,11 @@ impl App {
             }
             KeyCode::Char('e') => {
                 if let Some(m) = self.selected_msg() {
-                    self.start_edit(&m);
+                    self.start_edit(&m)
                 } else {
                     self.flash("select a message first (Up/Down)");
+                    Vec::new()
                 }
-                Vec::new()
             }
             KeyCode::Char('d') => {
                 if let Some(m) = self.selected_msg() {
@@ -1712,30 +2049,37 @@ impl App {
                 Vec::new()
             }
             KeyCode::Char('u') => self.mark_unread_from_selected(),
+            // Left and Right walk the thread: Right goes into the thread of the message under the cursor, Left goes up to
+            // its root and, from the root, out of the thread. Up and Down stay the cursor in the list (see `key_input` for
+            // the same keys in the composer).
+            KeyCode::Right => self.enter_thread_of_selected(),
+            KeyCode::Left => self.leave_for_thread_root(),
             KeyCode::Esc => {
                 // Escape backs out one level: leave a thread first, otherwise there is nothing left to close, so
                 // the keyboard goes back to the channel list.
                 if self.in_thread() {
-                    self.back_to_channel();
+                    self.back_to_channel()
                 } else {
                     self.set_focus(Focus::Channels);
+                    Vec::new()
                 }
-                Vec::new()
             }
             _ => Vec::new(),
         }
     }
 
-    fn start_reply(&mut self) {
+    fn start_reply(&mut self) -> Vec<Cmd> {
         let Some(m) = self.selected_msg() else {
             self.flash("select a message first (Up/Down)");
-            return;
+            return Vec::new();
         };
         let root = self.store().map(|s| s.thread_root(&m).to_owned()).unwrap_or(m.id.clone());
         self.reply_target = Some(root);
         self.set_focus(Focus::Input);
         let n = self.selected_number().unwrap_or(0);
         self.flash(format!("replying to #{n}: type your reply and press Enter; Esc cancels"));
+        // A reply is written into the thread it answers, so the box holds that thread's draft while it is aimed there.
+        self.switch_draft()
     }
 
     fn copy_message(&mut self, m: &Ev) {
@@ -1771,6 +2115,18 @@ impl App {
     }
 
     fn key_input(&mut self, k: KeyEvent, ctrl: bool, alt: bool, shift: bool) -> Vec<Cmd> {
+        // A channel we are not in has no composer — the input is a Join button instead (see `draw_input`). Tab, the function
+        // keys and the Ctrl shortcuts are handled before the focus is consulted, so only Enter and the way out are here.
+        if self.open_channel_not_joined() {
+            return match k.code {
+                KeyCode::Enter => self.join_open_channel(),
+                KeyCode::Esc => {
+                    self.set_focus(Focus::Messages);
+                    Vec::new()
+                }
+                _ => Vec::new(),
+            };
+        }
         let width = self.areas.input.width.saturating_sub(4).max(10) as usize;
         match k.code {
             KeyCode::Enter if shift || alt => self.editor.insert_char('\n'),
@@ -1779,12 +2135,21 @@ impl App {
             KeyCode::Enter if self.palette_up() => return self.palette_run(),
             KeyCode::Enter => return self.submit(),
             KeyCode::Esc => {
-                if self.editing.take().is_some() {
+                if self.palette_up() {
+                    // Esc closes the palette and keeps the command word in the input, so it can be finished or corrected:
+                    // the text is what holds the pane up, so remembering it is the whole state (`palette_up`). Esc again
+                    // then goes on to the next thing, and any edit brings the palette back.
+                    self.cmd_hidden = Some(self.editor.text());
+                } else if self.editing.take().is_some() {
                     self.editor.clear();
                     self.cmd_cursor = 0;
                     self.flash("edit cancelled");
+                    // the edit is over: the box goes back to the draft of the place we are in
+                    return self.switch_draft();
                 } else if self.reply_target.take().is_some() {
                     self.flash("reply cancelled");
+                    // the box is no longer aimed at that thread, so its draft goes back to the thread
+                    return self.switch_draft();
                 } else {
                     self.set_focus(Focus::Messages);
                 }
@@ -1856,6 +2221,8 @@ impl App {
     // ---- sending and commands --------------------------------------------------------------------------------------------
 
     fn submit(&mut self) -> Vec<Cmd> {
+        // Anything typed is settled here, so an Esc-closed palette starts fresh next time a `/` is typed.
+        self.cmd_hidden = None;
         let text = self.editor.text().trim().to_owned();
         if let Some(id) = self.editing.clone() {
             return self.finish_edit(id, text);
@@ -1869,6 +2236,8 @@ impl App {
             self.cmd_cursor = 0;
             return self.command(cmd, arg);
         }
+        // Where this text was written, taken before the reply target is dropped: that is part of the place it belongs to.
+        let at = self.draft_key();
         let root = self.reply_target.take().or_else(|| match &self.view {
             View::Thread(r) => Some(r.clone()),
             View::Channel => None,
@@ -1876,7 +2245,11 @@ impl App {
         self.editor.clear();
         self.cmd_cursor = 0;
         self.typing_sent = None;
-        self.send(text, root)
+        let mut cmds = self.clear_draft(at);
+        // the box is empty and belongs to wherever sending leaves us: a reply drops back to the channel's timeline
+        self.draft_at = self.draft_key();
+        cmds.extend(self.send(text, root));
+        cmds
     }
 
     fn command(&mut self, cmd: &str, arg: &str) -> Vec<Cmd> {
@@ -1908,12 +2281,14 @@ impl App {
                 }
             },
             "search" => {
-                self.open_search(arg.to_owned());
+                let mut cmds = self.open_search(arg.to_owned());
                 if arg.chars().count() >= 2 {
-                    return self.run_search();
+                    cmds.extend(self.run_search());
                 }
-                Vec::new()
+                cmds
             }
+            "join" => self.join_command(arg),
+            "leave" => self.ask_leave(),
             "new" => self.create_channel(arg),
             "dm" => {
                 if arg.trim().is_empty() {
@@ -1931,10 +2306,7 @@ impl App {
             "whois" => self.show_whois(arg),
             "invite" => self.invite(arg),
             "edit" | "delete" => match arg.parse::<usize>().ok().and_then(|n| self.message_number(n)) {
-                Some(m) if cmd == "edit" => {
-                    self.start_edit(&m);
-                    Vec::new()
-                }
+                Some(m) if cmd == "edit" => self.start_edit(&m),
                 Some(m) => {
                     self.ask_delete(&m);
                     Vec::new()
@@ -1944,10 +2316,7 @@ impl App {
                     Vec::new()
                 }
             },
-            "c" => {
-                self.back_to_channel();
-                Vec::new()
-            }
+            "c" => self.back_to_channel(),
             "t" | "copy" => match arg.parse::<usize>().ok().and_then(|n| self.message_number(n)) {
                 Some(m) if cmd == "t" => {
                     let root = self.store().map(|s| s.thread_root(&m).to_owned()).unwrap_or(m.id.clone());
@@ -2004,10 +2373,14 @@ impl App {
         Some(rest.to_owned())
     }
 
-    /// The palette is up while the input holds `/command` (see `command_query`), nothing is covering the screen, and the
-    /// keyboard is in the input. It is derived from that state: it needs no open/close of its own.
+    /// The palette is up while the input holds `/command` (see `command_query`), nothing is covering the screen, the keyboard
+    /// is in the input, and Esc has not closed it on exactly this text. It is derived from that state: it needs no open/close
+    /// of its own, and closing it leaves the command word in the input where it can be finished or corrected.
     pub fn palette_up(&self) -> bool {
-        self.focus == Focus::Input && self.overlay == Overlay::None && self.command_query().is_some()
+        self.focus == Focus::Input
+            && self.overlay == Overlay::None
+            && self.command_query().is_some()
+            && self.cmd_hidden.as_deref() != Some(self.editor.text().as_str())
     }
 
     /// The rows the palette shows: the built-ins whose name starts with what has been typed, then the commands loaded
@@ -2249,21 +2622,25 @@ impl App {
         true
     }
 
-    fn start_edit(&mut self, m: &Ev) {
+    fn start_edit(&mut self, m: &Ev) -> Vec<Cmd> {
         if self.read_only {
             self.flash("read-only mode: nothing is sent");
-            return;
+            return Vec::new();
         }
         if !self.own(m, "edit") {
-            return;
+            return Vec::new();
         }
         let text = self.store().map(|s| s.content_of(m).0.to_owned()).unwrap_or_else(|| m.content.clone());
+        // The edit takes the box over, so the draft that was in it goes back to the place it was typed and comes back
+        // when the edit is over (see `finish_edit` and the Esc arm in `key_input`).
+        let cmds = self.stash_draft();
         self.editor.clear();
         self.editor.insert_str(&text);
         self.editing = Some(m.id.clone());
         self.reply_target = None;
         self.set_focus(Focus::Input);
         self.flash("editing your message: Enter saves it, Esc cancels");
+        cmds
     }
 
     fn finish_edit(&mut self, id: String, text: String) -> Vec<Cmd> {
@@ -2274,12 +2651,15 @@ impl App {
         }
         self.editing = None;
         self.editor.clear();
+        // the edit is over: the box goes back to the draft of the place we are in
+        let mut cmds = self.switch_draft();
         if original.as_deref() == Some(text.as_str()) {
             self.flash("nothing changed");
-            return Vec::new();
+            return cmds;
         }
-        let Some(c) = self.channel() else { return Vec::new() };
-        vec![Cmd::Edit { channel: c.id.clone(), id, text }]
+        let Some(c) = self.channel() else { return cmds };
+        cmds.push(Cmd::Edit { channel: c.id.clone(), id, text });
+        cmds
     }
 
     /// `a`: open the reaction picker on the selected message. It starts on the reaction you already have there, when it is in the
@@ -2486,6 +2866,143 @@ impl App {
         vec![Cmd::CreateChannel { name: name.to_owned(), private, about: (!about.is_empty()).then(|| about.to_owned()) }]
     }
 
+    // ---- joining and leaving channels
+
+    /// Enter on the Join button: join the channel on screen. The relay re-publishes the group's state when membership changes,
+    /// so the reloaded roster turns the button back into the composer.
+    fn join_open_channel(&mut self) -> Vec<Cmd> {
+        let Some(index) = self.cur else { return Vec::new() };
+        self.join_channel(index)
+    }
+
+    /// Ask to join an open channel and open it when the answer comes back: the relay re-publishes the group's state when
+    /// membership changes, so the reloaded list and roster have us in it. A private channel is refused here — the relay would
+    /// refuse too, and there is nothing the user could type to change that.
+    fn join_channel(&mut self, index: usize) -> Vec<Cmd> {
+        if self.read_only {
+            self.flash("read-only mode: nothing is sent");
+            return Vec::new();
+        }
+        let Some(c) = self.channels.get(index) else { return Vec::new() };
+        let (id, label) = (c.id.clone(), c.label.clone());
+        if c.is_private && !self.is_member(&id) {
+            self.flash(format!("{label} is private, so it needs an invitation"));
+            return Vec::new();
+        }
+        self.open_after = Some(id.clone());
+        self.flash(format!("joining {label}…"));
+        vec![Cmd::JoinChannel { channel: id }]
+    }
+
+    /// `/join NAME`: the channel `NAME` names. One we are already in is simply opened; an open one we are not in is joined.
+    /// A leading `#` and the case are ignored, and a channel id works too.
+    fn join_command(&mut self, arg: &str) -> Vec<Cmd> {
+        let who = arg.trim();
+        let q = who.trim_start_matches('#').trim().to_lowercase();
+        if q.is_empty() {
+            self.flash("usage: /join NAME (a channel name, or its id) — Ctrl+F finds them");
+            return Vec::new();
+        }
+        let found = self.channel_matching(who, &q);
+        match found.len() {
+            0 => {
+                self.flash(format!("no channel here is called {who} — Ctrl+F lists the ones the relay shows"));
+                Vec::new()
+            }
+            1 => {
+                let index = found[0];
+                if self.is_member(&self.channels[index].id) {
+                    self.open_from_list(index)
+                } else {
+                    self.join_channel(index)
+                }
+            }
+            n => {
+                let names: Vec<String> = found.iter().take(4).map(|i| format!("#{}", self.channels[*i].label)).collect();
+                self.flash(format!("{who} could be any of {n}: {} — type more of the name", names.join(", ")));
+                Vec::new()
+            }
+        }
+    }
+
+    /// The channels `who` names: its id, else an exact name, else the names it is part of. DMs are left out: they are opened
+    /// with `/dm`, not joined.
+    fn channel_matching(&self, who: &str, q: &str) -> Vec<usize> {
+        if let Some(i) = self.channels.iter().position(|c| c.id == who) {
+            return vec![i];
+        }
+        let (mut exact, mut partial) = (Vec::new(), Vec::new());
+        for (i, c) in self.channels.iter().enumerate() {
+            if c.is_dm() {
+                continue;
+            }
+            let label = c.label.to_lowercase();
+            if label == q {
+                exact.push(i);
+            } else if label.contains(q) {
+                partial.push(i);
+            }
+        }
+        if exact.is_empty() {
+            partial
+        } else {
+            exact
+        }
+    }
+
+    /// `/leave`: leaving changes membership on the relay and takes the channel out of the list, so it asks first (`y`).
+    fn ask_leave(&mut self) -> Vec<Cmd> {
+        if self.read_only {
+            self.flash("read-only mode: nothing is sent");
+            return Vec::new();
+        }
+        let Some(c) = self.channel() else {
+            self.flash("usage: /leave (open the channel you want to leave first)");
+            return Vec::new();
+        };
+        let (id, label) = (c.id.clone(), c.label.clone());
+        if c.is_dm() {
+            self.flash("a DM is not a channel to leave");
+            return Vec::new();
+        }
+        self.confirm_leave = Some(id);
+        self.flash(format!("leave {label}? y confirms, any other key cancels"));
+        Vec::new()
+    }
+
+    /// The yes/no after `/leave`: `y` leaves, anything else cancels.
+    fn answer_leave(&mut self, k: KeyEvent) -> Vec<Cmd> {
+        let Some(id) = self.confirm_leave.take() else { return Vec::new() };
+        if !matches!(k.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
+            self.flash("not leaving");
+            return Vec::new();
+        }
+        let label = self.channels.iter().find(|c| c.id == id).map(|c| c.label.clone()).unwrap_or_default();
+        self.flash(format!("leaving {label}…"));
+        vec![Cmd::LeaveChannel { channel: id }]
+    }
+
+    /// The channel list and the roster both change when membership does: the relay re-publishes a group's state after a join or
+    /// a leave, so both are asked for again.
+    fn reload_membership(&mut self) -> Vec<Cmd> {
+        let channels: Vec<String> = self.channels.iter().map(|c| c.id.clone()).collect();
+        let mut cmds = vec![Cmd::LoadChannels];
+        if !channels.is_empty() {
+            cmds.push(Cmd::LoadRoster { channels });
+        }
+        cmds
+    }
+
+    /// Forget what a channel we have left held locally: the membership mark, the count, the members (they are who may be
+    /// mentioned in it) and the unread badge. The read position stays, so rejoining picks up where we left off.
+    fn forget_channel(&mut self, id: &str) -> Option<Cmd> {
+        self.joined.remove(id);
+        self.member_counts.remove(id);
+        self.members.remove(id);
+        self.unread.remove(id);
+        self.archived.remove(id).then(|| Cmd::SaveArchived(self.archived.clone()))
+    }
+
     // ---- people and DMs
 
     /// Everyone whose display name contains `q`, exact matches first. Names come from the relay's `kind:0` profiles, so this
@@ -2654,7 +3171,9 @@ impl App {
 
     // ---- search
 
-    pub fn open_search(&mut self, query: String) {
+    /// Open the search overlay. The channel rows carry what a channel is for, how many people are in it and whether we are one
+    /// of them, so the roster is asked for again as it opens — that detail is what search shows about a channel.
+    pub fn open_search(&mut self, query: String) -> Vec<Cmd> {
         self.overlay = Overlay::Search;
         self.search.query.clear();
         self.search.query.insert_str(&query);
@@ -2663,6 +3182,7 @@ impl App {
         self.search.cursor = 0;
         self.search.loading = false;
         self.search.edited_at = Instant::now();
+        self.load_roster()
     }
 
     fn run_search(&mut self) -> Vec<Cmd> {
@@ -2753,16 +3273,7 @@ impl App {
         let Some(row) = rows.into_iter().nth(self.search.cursor) else { return Vec::new() };
         self.overlay = Overlay::None;
         match row {
-            Row::Channel(i) => {
-                // An archived channel's row is its unarchive: Enter brings it back, then opens it.
-                let mut cmds = Vec::new();
-                if let Some(cmd) = self.unarchive(i) {
-                    cmds.push(cmd);
-                }
-                cmds.extend(self.open_channel(i));
-                self.set_focus(Focus::Messages);
-                cmds
-            }
+            Row::Channel(i) => self.open_from_list(i),
             Row::Person(pk) => self.open_dm(&pk),
             Row::Message(ev) => {
                 let Some(i) = ev.channel().and_then(|h| self.channels.iter().position(|c| c.id == h)) else { return Vec::new() };
@@ -2805,6 +3316,11 @@ impl App {
             PluginEvent::Status { id, segments } => {
                 // A status for a plugin that is not registered (gone, or not ready) is dropped: the plugin list says why.
                 self.plugins.set_status(&id, segments);
+                Vec::new()
+            }
+            PluginEvent::Pane { id, pane } => {
+                // Same rule as status: a pane for a plugin that is not registered is dropped, and the next draw shows it.
+                self.plugins.set_pane(&id, pane);
                 Vec::new()
             }
             PluginEvent::Panel { plugin, panel } => {
@@ -2863,7 +3379,7 @@ impl App {
     fn show_plugins(&mut self) {
         let mut rows = Vec::new();
         if self.plugin_meta.is_empty() {
-            rows.push(PanelRow { text: "No plugins found. Put a folder with a plugin.json in the plugins directory.".into(), tone: contrib::Tone::Dim, action: None });
+            rows.push(PanelRow { text: "No plugins found. Put a folder with an executable entry file in the plugins directory.".into(), tone: contrib::Tone::Dim, action: None });
         }
         for m in &self.plugin_meta {
             let tone = match m.state {
@@ -2895,7 +3411,7 @@ impl App {
         }
         rows.push(PanelRow { text: String::new(), tone: contrib::Tone::Default, action: None });
         rows.push(PanelRow {
-            text: "Put a folder with a plugin.json in the plugins directory; /plugins shows what loaded.".into(),
+            text: "Put a folder with an executable entry file (its shebang picks the language) in the plugins directory; /plugins shows what loaded.".into(),
             tone: contrib::Tone::Dim,
             action: None,
         });

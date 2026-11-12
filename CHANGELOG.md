@@ -5,6 +5,48 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
 
 ## [Unreleased]
 
+### Added
+
+- Ctrl+F finds a channel by name across every channel the relay lists, joined or not, and its row says what the channel is for, how
+  many people are in it and whether you are one of them (the membership and the counts come from NIP-29 `kind:39002`). A channel you
+  are not in opens read-only: in place of the composer there is a `[ Join ]` button, reached with Tab the way the input is, and Enter
+  on it asks the relay to join you (`kind:9021`) — its answer turns the button back into the composer. A private channel is not
+  offered, because a self-join needs an open one. `/join NAME` (a name, `#name` or a channel id) joins or opens one directly, and
+  `/leave` asks first (`y` confirms) before it sends `kind:9022` and drops the channel from the list. The list and the membership are
+  read again after a join or a leave.
+- A plugin can keep a **pane** under the channel list: a small block that is always on screen and takes no focus, key or click.
+  `examples/plugins/clock` shows the time in large digits there and redraws it from an opt-in heartbeat.
+- A plugin is now declared **entirely in its own code, with no manifest**: the folder name is the plugin's id, buzzr runs the first
+  executable entry file it finds in the folder through that file's own `#!` line (so the language is the author's choice, and a
+  JavaScript or TypeScript runtime needs nothing added to buzzr), and the plugin sends its display name, its permissions and its
+  heartbeat (`tickMs`) in its `ready` message. The contract version is now `apiVersion` 2. A folder that will not load — no entry
+  file, no executable bit, an id that is not safe — is listed with the reason instead of failing quietly.
+- A **typed SDK for TypeScript** (`sdk/typescript/buzzr.ts`): one dependency-free file that turns the protocol into a single
+  `definePlugin({ name, permissions, tickMs, ready, onTick, onCommand, … })` call, with `status`, `pane`, `panel`, `flash`, `draft`,
+  `send` and `log` on the handle it gives back. `examples/plugins/clock` is written with it.
+- The **channel list tells the two kinds of unread apart**: a channel with unseen top-level messages shows their count (`(2)`),
+  one whose only unseen news is inside a thread shows `●`, and a channel with both shows `(2) ●`. A thread reply still does not
+  add to the counted unread — a count for it could never be cleared by opening the channel, because a reply is not a timeline row.
+- **A draft belongs to the place it was typed**: switching channel, or going into or out of a thread, empties the box instead of
+  carrying a half-written message along, and the text is back when you return to that channel or thread. Sending clears that
+  place's draft. They are kept in `drafts.json` next to the read positions, so they survive a restart.
+
+### Changed
+
+- `←` / `→` walk a thread from the message list: with a message row selected, `→` opens its thread (a message with no replies has
+  nothing under it, so there the key does nothing) and `←` goes up to that thread's root and, from the root, out of the thread. Esc
+  still backs out the same way, wherever the cursor is.
+- The thread pane reads as a thread: its root sits at the top as one header line — the message number, the time, the author and
+  the first line of what was said, cut with `…` when there is more — and every reply is indented two columns under it. The root
+  keeps message number 1, so the numbers `/r N` and `/t N` take are the ones on screen, and links in an indented reply are still
+  where they look.
+
+### Fixed
+
+- Esc while the slash-command palette was up moved the keyboard out of the composer and left the `/command` behind in the input.
+  It now closes just the palette and keeps the keyboard — and the half-written command — where they are, so typing can go on; the
+  list comes back with the next edit.
+
 ## [0.2.0-rc.2] - 2026-11-11
 
 ### Added

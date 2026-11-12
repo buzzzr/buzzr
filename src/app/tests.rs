@@ -338,6 +338,236 @@ fn in_a_thread_plain_messages_are_replies() {
 }
 
 #[test]
+fn a_draft_stays_in_the_channel_it_was_typed_in() {
+    let mut app = app_with(3);
+    press(&mut app, KeyCode::Tab); // messages -> input
+    type_text(&mut app, "half a thought");
+    // leave for the next channel without sending: the box clears, and the draft stays behind in c1
+    press(&mut app, KeyCode::Esc); // input -> messages
+    press(&mut app, KeyCode::Esc); // messages -> the channel list
+    assert_eq!(app.focus, Focus::Channels);
+    press(&mut app, KeyCode::Down);
+    let cmds = press(&mut app, KeyCode::Enter);
+    assert!(app.editor.is_empty(), "the next channel's box is its own, not the last one's");
+    assert_eq!(app.drafts.get(&("c1".to_owned(), None)).map(String::as_str), Some("half a thought"));
+    assert!(
+        cmds.iter().any(|c| matches!(c, Cmd::SaveDrafts(d) if d.contains_key(&("c1".to_owned(), None)))),
+        "the draft goes to disk with the switch: {cmds:?}"
+    );
+    // and it is back in the box when the channel is
+    press(&mut app, KeyCode::Esc); // messages -> the channel list
+    press(&mut app, KeyCode::Up);
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(app.editor.text(), "half a thought");
+}
+
+#[test]
+fn a_draft_is_kept_per_thread_and_reply_target() {
+    let mut app = app_with(5);
+    app.handle(AppEvent::Live(Live::Event(reply("r1", 2000, "alice", "m004"))));
+    app.layout(78);
+    // into the thread of m004 and write there
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Tab);
+    type_text(&mut app, "a reply half written");
+    // leave the thread: the channel's own box is empty, and the text is stored under the thread it answers
+    press(&mut app, KeyCode::Esc); // input -> messages
+    press(&mut app, KeyCode::Esc); // the thread -> the channel
+    assert!(app.editor.is_empty(), "the channel timeline has its own box");
+    assert_eq!(app.drafts.get(&("c1".to_owned(), Some("m004".to_owned()))).map(String::as_str), Some("a reply half written"));
+    // opening the thread again brings it back
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(app.editor.text(), "a reply half written");
+    // and so does aiming a reply at it from the timeline: a reply is written into the thread it answers
+    press(&mut app, KeyCode::Esc); // out of the thread
+    press(&mut app, KeyCode::Char('r'));
+    assert_eq!(app.reply_target.as_deref(), Some("m004"));
+    assert_eq!(app.editor.text(), "a reply half written", "the thread's draft comes back with the aim");
+}
+
+#[test]
+fn cancelling_a_reply_puts_the_threads_draft_back_in_the_thread() {
+    let mut app = app_with(5);
+    app.handle(AppEvent::Live(Live::Event(reply("r1", 2000, "alice", "m004"))));
+    app.layout(78);
+    press(&mut app, KeyCode::Char('r')); // aim at m004's thread, from the timeline
+    type_text(&mut app, "reply draft");
+    press(&mut app, KeyCode::Esc); // cancel the reply
+    assert_eq!(app.reply_target, None);
+    assert!(app.editor.is_empty(), "the timeline's box is empty again");
+    assert_eq!(app.drafts.get(&("c1".to_owned(), Some("m004".to_owned()))).map(String::as_str), Some("reply draft"));
+    press(&mut app, KeyCode::Esc); // input -> messages
+    press(&mut app, KeyCode::Char('r')); // aim at the thread again
+    assert_eq!(app.editor.text(), "reply draft", "the draft belongs to the thread, not to the aim");
+}
+
+#[test]
+fn sending_a_message_leaves_no_draft_behind() {
+    let mut app = app_with(3);
+    press(&mut app, KeyCode::Tab);
+    type_text(&mut app, "sent, not kept");
+    let cmds = press(&mut app, KeyCode::Enter);
+    assert!(matches!(&cmds[0], Cmd::Send { .. }));
+    // leaving and coming back finds an empty box: what went out is not a draft
+    press(&mut app, KeyCode::Esc);
+    press(&mut app, KeyCode::Esc);
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Esc);
+    press(&mut app, KeyCode::Up);
+    press(&mut app, KeyCode::Enter);
+    assert!(app.editor.is_empty());
+    assert!(app.drafts.is_empty(), "nothing was left to write: {:?}", app.drafts);
+}
+
+#[test]
+fn an_edit_puts_the_draft_that_was_in_the_box_back_afterwards() {
+    let mut app = App::new(ME.into(), false, chrono_tz::UTC);
+    app.view_h = 10;
+    app.areas = Areas { channels: Rect::new(0, 1, 20, 20), msgs: Rect::new(20, 1, 80, 10), input: Rect::new(20, 12, 80, 3) };
+    app.handle(AppEvent::Channels(Ok(vec![chan("c1", "general")])));
+    app.handle(AppEvent::Window { channel: "c1".into(), cursor: None, result: Ok(Window { events: vec![msg("m000", 1000, ME, "mine to edit", &[])], has_more: false, next_cursor: None }) });
+    app.handle(key(KeyCode::Tab)); // channels -> messages
+    press(&mut app, KeyCode::Tab); // messages -> input
+    type_text(&mut app, "half written");
+    press(&mut app, KeyCode::Esc); // input -> messages
+    press(&mut app, KeyCode::End); // the message to edit
+    press(&mut app, KeyCode::Char('e'));
+    assert_eq!(app.editor.text(), "mine to edit", "the box holds the message being edited");
+    assert_eq!(app.drafts.get(&("c1".to_owned(), None)).map(String::as_str), Some("half written"), "the draft went back to the place it was typed");
+    press(&mut app, KeyCode::Esc); // cancel the edit
+    assert_eq!(app.editor.text(), "half written", "the draft is back in the box");
+}
+
+#[test]
+fn the_draft_written_to_disk_is_in_the_box_when_its_channel_opens_again() {
+    let mut app = App::new(ME.into(), false, chrono_tz::UTC);
+    app.view_h = 10;
+    app.areas = Areas { channels: Rect::new(0, 1, 20, 20), msgs: Rect::new(20, 1, 80, 10), input: Rect::new(20, 12, 80, 3) };
+    app.seed_drafts([(("c1".to_owned(), None), "written before the restart".to_owned())].into_iter().collect());
+    app.handle(AppEvent::Channels(Ok(vec![chan("dm1", "DM"), chan("c1", "general"), chan("c2", "random")])));
+    assert_eq!(app.editor.text(), "written before the restart", "the box comes back holding what it was left with");
+    // the other channel's box is still its own
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Enter);
+    assert!(app.editor.is_empty(), "a draft belongs to one place, not to every place");
+}
+
+#[test]
+fn a_thread_shows_its_root_as_one_header_line_and_indents_the_replies() {
+    let mut app = App::new(ME.into(), false, chrono_tz::UTC);
+    app.view_h = 10;
+    app.areas = Areas { channels: Rect::new(0, 1, 20, 20), msgs: Rect::new(20, 1, 80, 10), input: Rect::new(20, 12, 80, 3) };
+    app.handle(AppEvent::Channels(Ok(vec![chan("c1", "general")])));
+    let events = vec![msg("m000", 1000, BOB, "a first line\nand a second line the header leaves out", &[])];
+    app.handle(AppEvent::Window { channel: "c1".into(), cursor: None, result: Ok(Window { events, has_more: false, next_cursor: None }) });
+    app.layout(78);
+    press(&mut app, KeyCode::Enter); // channels -> the message list
+    press(&mut app, KeyCode::Enter); // into the thread of the selected message
+    assert!(app.in_thread());
+    app.handle(AppEvent::Thread { channel: "c1".into(), root: "m000".into(), result: Ok(vec![reply("t1", 3000, "alice", "m000"), reply("t2", 3001, ME, "m000")]) });
+    app.layout(78);
+    assert_eq!(app.shown_ids(), ["m000", "t1", "t2"]);
+
+    let (_, layout) = app.layout_ref().unwrap();
+    assert_eq!(layout.items[0].lines.len(), 1, "the root is a one-line header, not a row in the feed");
+    let header: String = layout.items[0].lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+    assert!(header.contains("a first line"), "the header previews the root: {header:?}");
+    assert!(header.ends_with('…'), "and says there is more of it: {header:?}");
+    assert!(!header.contains("second line"), "the rest of the root is left out of the header: {header:?}");
+
+    for item in &layout.items[1..] {
+        for line in &item.lines {
+            let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(text.starts_with("  "), "every reply line is indented under the root: {text:?}");
+        }
+    }
+    // the header is still message #1, so the numbers a reply names (`/r N`) are the ones on screen
+    assert_eq!(layout.items[1].id, "t1");
+    assert_eq!(app.message_number(1).map(|m| m.id), Some("m000".into()));
+    assert_eq!(app.message_number(2).map(|m| m.id), Some("t1".into()));
+}
+
+/// A `kind:39005` thread summary, the way the relay serves it with a channel window: `count` replies, the last one at `at`.
+fn summary(root: &str, count: u64, at: u64) -> Ev {
+    let mut e = msg(
+        &format!("sum-{root}"),
+        at,
+        BOB,
+        &format!(r#"{{"reply_count":{count},"last_reply_at":{at}}}"#),
+        &[&["e", root]],
+    );
+    e.kind = crate::model::KIND_THREAD_SUMMARY;
+    e
+}
+
+/// An app on one channel with `events` loaded, its keyboard on the messages (Tab), the way `app_with` leaves it.
+fn app_on(events: Vec<Ev>) -> App {
+    let mut app = App::new(ME.into(), false, chrono_tz::UTC);
+    app.view_h = 10;
+    app.areas = Areas { channels: Rect::new(0, 1, 20, 20), msgs: Rect::new(20, 1, 80, 10), input: Rect::new(20, 12, 80, 3) };
+    app.handle(AppEvent::Channels(Ok(vec![chan("c1", "general")])));
+    app.handle(AppEvent::Window { channel: "c1".into(), cursor: None, result: Ok(Window { events, has_more: false, next_cursor: None }) });
+    app.handle(key(KeyCode::Tab));
+    app.layout(78);
+    app
+}
+
+#[test]
+fn right_arrow_opens_the_thread_of_the_selected_message() {
+    // The relay says the message has two replies; they are not loaded until the thread is opened.
+    let mut app = app_on(vec![msg("m000", 1000, BOB, "the root", &[]), summary("m000", 2, 3000)]);
+    assert_eq!(selected(&app), "m000");
+    let cmds = press(&mut app, KeyCode::Right);
+    assert!(app.in_thread(), "Right goes into the thread");
+    assert_eq!(app.view_key(), Some(("c1".to_string(), Some("m000".to_string()))));
+    assert!(cmds.contains(&Cmd::LoadThread { channel: "c1".into(), root: "m000".into() }), "and asks for its replies: {cmds:?}");
+
+    app.handle(AppEvent::Thread { channel: "c1".into(), root: "m000".into(), result: Ok(vec![reply("t1", 3000, "alice", "m000"), reply("t2", 3001, "carol", "m000")]) });
+    app.layout(78);
+    assert_eq!(app.shown_ids(), ["m000", "t1", "t2"]);
+    // Inside a thread there is nothing further to go into: Right opens nothing and moves nothing.
+    let on = selected(&app);
+    let cmds = press(&mut app, KeyCode::Right);
+    assert!(cmds.is_empty(), "Right inside a thread opens nothing: {cmds:?}");
+    assert_eq!((app.in_thread(), selected(&app)), (true, on), "and moves nothing");
+}
+
+#[test]
+fn left_arrow_in_a_thread_goes_to_the_root_and_then_out_to_the_channel() {
+    let mut app = app_on(vec![msg("m000", 1000, BOB, "the root", &[]), summary("m000", 2, 3000)]);
+    press(&mut app, KeyCode::Right);
+    app.handle(AppEvent::Thread { channel: "c1".into(), root: "m000".into(), result: Ok(vec![reply("t1", 3000, "alice", "m000"), reply("t2", 3001, "carol", "m000")]) });
+    app.layout(78);
+    // the thread opens on its first row; Down walks into the replies
+    press(&mut app, KeyCode::Down);
+    assert_eq!(selected(&app), "t1", "a reply is selected");
+
+    press(&mut app, KeyCode::Left);
+    assert!(app.in_thread(), "Left from a reply stays in the thread");
+    assert_eq!(selected(&app), "m000", "and lands on the message it answers");
+
+    press(&mut app, KeyCode::Left);
+    assert!(!app.in_thread(), "Left again, on the root, leaves the thread");
+    assert_eq!(app.view_key(), Some(("c1".to_string(), None)));
+}
+
+#[test]
+fn the_arrows_leave_a_message_with_no_thread_alone() {
+    let mut app = app_with(3);
+    assert_eq!(selected(&app), "m002");
+    for k in [KeyCode::Right, KeyCode::Left] {
+        let cmds = press(&mut app, k);
+        assert!(cmds.is_empty(), "{k:?} on a message with no replies does nothing: {cmds:?}");
+        assert_eq!((app.in_thread(), app.focus, selected(&app)), (false, Focus::Messages, "m002".to_string()));
+    }
+    // A stray reply whose root is not loaded is listed on the timeline; Right opens the thread it belongs to, as Enter does.
+    let mut app = app_on(vec![msg("t1", 1000, BOB, "an orphan reply", &[&["e", "gone", "", "reply"]])]);
+    let cmds = press(&mut app, KeyCode::Right);
+    assert!(app.in_thread() && cmds.contains(&Cmd::LoadThread { channel: "c1".into(), root: "gone".into() }), "{cmds:?}");
+}
+
+#[test]
 fn read_only_never_sends() {
     let mut app = app_with(2);
     app.read_only = true;
@@ -746,6 +976,43 @@ fn read_all_clears_thread_marks_too() {
     let saved = cmds.iter().find_map(|c| match c { Cmd::SaveRead(m) => Some(m.clone()), _ => None }).expect("the positions are written");
     assert!(saved.threads.get("m000").map(|at| *at > 9000).unwrap_or(false), "every thread is marked read: {saved:?}");
     assert!(!row_text(&mut app, "m000").contains("new"));
+}
+
+#[test]
+fn a_thread_reply_marks_its_channel_in_the_list_without_counting_as_unread() {
+    let mut app = app_with(2);
+    seed_threads(&mut app, &[("m000", 1500)]);
+    live_reply(&mut app, "r1", 2000, "alice", "m000");
+    assert_eq!(app.unread.get("c1"), None, "a reply is not on the timeline, so the counted unread stays at zero");
+    assert!(app.channel_thread_unread("c1"), "but the channel list marks the news inside its thread");
+    assert!(!app.channel_thread_unread("c2"), "a channel with no thread is not marked");
+}
+
+#[test]
+fn the_channel_lists_thread_mark_clears_when_the_thread_is_read() {
+    let mut app = app_with(2);
+    seed_threads(&mut app, &[("m000", 1500)]);
+    live_reply(&mut app, "r1", 2000, "alice", "m000");
+    assert!(app.channel_thread_unread("c1"));
+    app.state.selected = Some("m000".into());
+    press(&mut app, KeyCode::Enter); // open the thread, which reads it
+    press(&mut app, KeyCode::Esc);
+    assert!(!app.channel_thread_unread("c1"), "reading the thread clears the channel row with it");
+}
+
+#[test]
+fn a_thread_the_relay_only_summarised_still_marks_the_channel_list() {
+    let mut app = app_with(2);
+    seed_threads(&mut app, &[("m000", 1500)]);
+    // The replies are not loaded, but the relay's summary says the thread has news after our stored position.
+    let summary = Ev {
+        kind: crate::model::KIND_THREAD_SUMMARY,
+        content: r#"{"reply_count":3,"last_reply_at":5000}"#.into(),
+        tags: vec![vec!["e".into(), "m000".into()]],
+        ..msg("s1", 5001, "alice", "", &[])
+    };
+    app.handle(AppEvent::Live(Live::Event(summary)));
+    assert!(app.channel_thread_unread("c1"), "the summary alone is enough to mark the channel");
 }
 
 #[test]
@@ -1363,7 +1630,7 @@ fn opening_a_search_hit_goes_to_its_channel_and_selects_the_message() {
     app.focus = Focus::Input;
     type_text(&mut app, "/search sailing");
     let cmds = press(&mut app, KeyCode::Enter);
-    assert!(matches!(cmds.as_slice(), [Cmd::Search { query, .. }] if query == "sailing"));
+    assert!(matches!(cmds.as_slice(), [Cmd::LoadRoster { .. }, Cmd::Search { query, .. }] if query == "sailing"), "{cmds:?}");
     assert_eq!(app.overlay, Overlay::Search);
 }
 
@@ -2031,7 +2298,8 @@ fn enter_runs_the_command_on_the_cursor_line() {
     let mut app = at_input(3);
     type_text(&mut app, "/sea");
     assert_eq!(app.command_rows().len(), 1, "only /search starts with \"sea\"");
-    assert!(press(&mut app, KeyCode::Enter).is_empty(), "opening the search overlay sends nothing");
+    let cmds = press(&mut app, KeyCode::Enter);
+    assert!(matches!(cmds.as_slice(), [Cmd::LoadRoster { .. }]), "opening the search asks who is in the channels, and sends nothing else: {cmds:?}");
     assert_eq!(app.overlay, Overlay::Search);
     assert!(app.editor.is_empty(), "the input is cleared, as a submitted command is");
 }
@@ -2065,16 +2333,57 @@ fn a_changed_command_word_drops_the_highlight_back_to_the_first_row() {
 }
 
 #[test]
+fn esc_closes_the_palette_and_keeps_the_command_in_the_input() {
+    let mut app = at_input(3);
+    type_text(&mut app, "/inv");
+    assert!(app.palette_up(), "the palette is up over a command word");
+
+    assert!(press(&mut app, KeyCode::Esc).is_empty(), "Esc closes the list; nothing is sent or opened");
+    assert!(!app.palette_up(), "the palette is closed");
+    assert_eq!(app.focus, Focus::Input, "the keyboard stays in the composer");
+    assert_eq!(app.editor.text(), "/inv", "the half-written command stays in the input");
+
+    type_text(&mut app, "ite");
+    assert_eq!(app.editor.text(), "/invite");
+    assert!(app.palette_up(), "typing on makes it a new command word, so the list comes back");
+
+    press(&mut app, KeyCode::Esc);
+    assert_eq!(app.focus, Focus::Input, "the list closed again; the composer still has the keyboard");
+    press(&mut app, KeyCode::Esc);
+    assert_eq!(app.focus, Focus::Messages, "with the list already closed, Esc steps back to the messages");
+    assert_eq!(app.editor.text(), "/invite", "and the command is still in the input");
+}
+
+#[test]
+fn a_lone_slash_closed_with_esc_lists_again_after_the_next_one() {
+    let mut app = at_input(3);
+    type_text(&mut app, "/");
+    assert!(app.palette_up());
+    press(&mut app, KeyCode::Esc);
+    assert!(!app.palette_up(), "Esc closes the palette on a lone slash too");
+    // Enter settles what is typed (the empty command is reported as unknown) and clears the input, so the next `/`
+    // is a new command word rather than the one the palette was closed on.
+    press(&mut app, KeyCode::Enter);
+    assert!(app.editor.is_empty(), "the input is cleared, as a submitted command is");
+    type_text(&mut app, "/");
+    assert!(app.palette_up(), "a fresh slash lists the commands again");
+}
+
+#[test]
 fn the_palette_belongs_to_the_input_and_not_to_an_edit() {
     let mut app = at_input(3);
     type_text(&mut app, "/he");
     assert!(app.palette_up());
-    press(&mut app, KeyCode::Esc); // nothing to cancel: back to the messages
-    assert_eq!(app.focus, Focus::Messages);
-    assert!(!app.palette_up(), "the palette is shown only while the input has the keyboard");
-    press(&mut app, KeyCode::Tab);
+    press(&mut app, KeyCode::Esc); // the list closes, but the composer keeps the keyboard (see the Esc case above)
     assert_eq!(app.focus, Focus::Input);
-    assert!(app.palette_up(), "the draft is still a command word");
+    assert!(!app.palette_up());
+    press(&mut app, KeyCode::Tab); // with the palette down, Tab switches panes again
+    assert_eq!(app.focus, Focus::Channels);
+    assert!(!app.palette_up(), "the palette is shown only while the input has the keyboard");
+    press(&mut app, KeyCode::Tab); // channels -> messages
+    press(&mut app, KeyCode::Tab); // messages -> input
+    assert_eq!(app.focus, Focus::Input);
+    assert!(app.palette_up(), "the draft is still a command word, and the list is back with the keyboard");
 
     // while editing a message a leading slash is message text, not a command
     let mut app = at_input(3);
@@ -2116,4 +2425,245 @@ fn the_palette_names_every_command_that_is_handled() {
         let flash = app.flash_text().unwrap_or_default();
         assert!(!flash.starts_with("unknown command"), "/{name} is in the palette but not handled: {flash:?}");
     }
+}
+
+// ---- joining and leaving channels -------------------------------------------------------------------------------------------
+
+/// A channel with its own visibility, for the join/leave cases.
+fn chan_priv(id: &str, name: &str, private: bool) -> Channel {
+    Channel { id: id.into(), name: name.into(), about: String::new(), created_at: 1, section: Section::Channels, label: name.into(), is_private: private }
+}
+
+/// A roster answer saying who is in each channel.
+fn roster(entries: &[(&str, &[&str])]) -> AppEvent {
+    AppEvent::Roster(Ok(entries.iter().map(|(id, members)| ((*id).to_string(), members.iter().map(|m| (*m).to_string()).collect())).collect()))
+}
+
+#[test]
+fn a_channel_the_relay_has_not_answered_for_is_not_read_as_one_you_are_not_in() {
+    let app = app_with(1);
+    // Nothing is known about c1 or the DM: a channel the relay said nothing about keeps its composer rather than offering a join.
+    assert!(!app.not_joined("c1"), "no roster answer is not a channel we are not in");
+    assert!(!app.not_joined("dm1"));
+}
+
+#[test]
+fn a_channel_the_relay_says_you_are_not_in_is_one_to_join_and_a_dm_never_is() {
+    let mut app = app_with(1);
+    app.handle(roster(&[("c2", &[BOB]), ("dm1", &[BOB])]));
+    assert!(app.not_joined("c2"), "the relay answered and we are not among its members");
+    assert!(!app.not_joined("dm1"), "a DM is never a channel to join");
+    assert!(!app.not_joined("c1"), "the relay still said nothing about c1");
+}
+
+#[test]
+fn a_channel_you_are_not_in_has_no_composer_only_the_join_button() {
+    let mut app = app_with(1);
+    app.handle(roster(&[("c2", &[BOB])]));
+    app.open_channel(1); // random (c2)
+    assert!(app.open_channel_not_joined(), "the channel on screen is one we are not in");
+    press(&mut app, KeyCode::Tab); // messages -> input
+    assert_eq!(app.focus, Focus::Input, "the Join button is reached like the input");
+    type_text(&mut app, "hello");
+    assert!(app.editor.is_empty(), "there is no text field to type into");
+    let cmds = press(&mut app, KeyCode::Enter);
+    assert!(matches!(cmds.as_slice(), [Cmd::JoinChannel { channel }] if channel == "c2"), "Enter joins: {cmds:?}");
+    assert_eq!(app.open_after.as_deref(), Some("c2"), "and the channel is opened once the list comes back with us in it");
+}
+
+#[test]
+fn the_join_button_turns_back_into_the_composer_once_the_relay_has_us_in_the_channel() {
+    let mut app = app_with(1);
+    app.handle(roster(&[("c2", &[BOB])]));
+    app.open_channel(1);
+    assert!(app.open_channel_not_joined());
+    app.handle(AppEvent::Joined { channel: "c2".into(), result: Ok("ev".into()) });
+    app.handle(roster(&[("c2", &[BOB, ME])]));
+    assert!(!app.open_channel_not_joined(), "we are a member now: the composer is back");
+    assert!(app.is_member("c2"));
+}
+
+#[test]
+fn a_private_channel_offers_no_join() {
+    let mut app = App::new(ME.into(), false, chrono_tz::UTC);
+    app.handle(AppEvent::Channels(Ok(vec![chan_priv("p1", "secret", true)])));
+    app.handle(roster(&[("p1", &[BOB])]));
+    app.handle(key(KeyCode::Tab)); // channels -> messages
+    app.handle(key(KeyCode::Tab)); // messages -> input
+    assert!(app.open_channel_not_joined(), "we are not in it");
+    let cmds = app.handle(key(KeyCode::Enter));
+    assert!(cmds.is_empty(), "no join is sent: {cmds:?}");
+    assert_eq!(app.open_after, None);
+    assert!(app.flash_text().unwrap().contains("needs an invitation"), "{:?}", app.flash_text());
+}
+
+#[test]
+fn opening_the_search_asks_the_relay_who_is_in_the_channels() {
+    let mut app = app_with(1);
+    let cmds = app.open_search(String::new());
+    assert_eq!(app.overlay, Overlay::Search);
+    assert!(matches!(cmds.as_slice(), [Cmd::LoadRoster { channels }] if channels.len() == 3), "one request for every channel: {cmds:?}");
+}
+
+#[test]
+fn enter_on_a_search_row_for_a_channel_you_are_not_in_opens_it_without_joining() {
+    let mut app = app_with(1);
+    app.handle(roster(&[("c2", &[BOB])]));
+    app.open_search("random".into());
+    app.search.asked = "random".into(); // the search has already run, so Enter opens the row on the cursor
+    let cmds = app.handle(key(KeyCode::Enter));
+    assert_eq!(app.overlay, Overlay::None, "the search closes");
+    assert_eq!(app.channel().map(|c| c.id.as_str()), Some("c2"), "the channel is opened");
+    assert!(!cmds.iter().any(|c| matches!(c, Cmd::JoinChannel { .. })), "nothing is sent: it opens read-only, with the Join button: {cmds:?}");
+    assert!(app.open_channel_not_joined());
+}
+
+#[test]
+fn join_by_name_finds_the_channel_by_name_hash_or_id() {
+    for typed in ["/join general", "/join #GENERAL", "/join gen", "/join c1"] {
+        let mut app = at_input(1);
+        type_text(&mut app, typed);
+        let cmds = press(&mut app, KeyCode::Enter);
+        assert!(matches!(cmds.as_slice(), [Cmd::JoinChannel { channel }] if channel == "c1"), "{typed}: {cmds:?}");
+        assert_eq!(app.open_after.as_deref(), Some("c1"), "{typed}");
+    }
+}
+
+#[test]
+fn join_by_name_opens_a_channel_you_are_already_in_instead_of_joining() {
+    let mut app = at_input(1);
+    app.joined.insert("c1".into());
+    type_text(&mut app, "/join general");
+    let cmds = press(&mut app, KeyCode::Enter);
+    assert!(!cmds.iter().any(|c| matches!(c, Cmd::JoinChannel { .. })), "no join for a channel you are in: {cmds:?}");
+    assert_eq!(app.channel().map(|c| c.id.as_str()), Some("c1"));
+}
+
+#[test]
+fn join_by_name_says_when_it_finds_nothing_or_too_much() {
+    let mut app = at_input(1);
+    type_text(&mut app, "/join nope");
+    let cmds = press(&mut app, KeyCode::Enter);
+    assert!(cmds.is_empty());
+    assert!(app.flash_text().unwrap().contains("no channel here is called nope"), "{:?}", app.flash_text());
+
+    let mut app = at_input(1);
+    type_text(&mut app, "/join");
+    let cmds = press(&mut app, KeyCode::Enter);
+    assert!(cmds.is_empty());
+    assert!(app.flash_text().unwrap().contains("usage: /join"), "{:?}", app.flash_text());
+
+    let mut app = at_input(1);
+    type_text(&mut app, "/join a"); // both general and random contain an "a": nothing to choose between them
+    let cmds = press(&mut app, KeyCode::Enter);
+    assert!(cmds.is_empty());
+    assert!(app.flash_text().unwrap().contains("could be any of 2"), "{:?}", app.flash_text());
+}
+
+#[test]
+fn leave_asks_first_and_only_y_leaves() {
+    let mut app = at_input(1);
+    type_text(&mut app, "/leave");
+    let cmds = press(&mut app, KeyCode::Enter);
+    assert!(cmds.is_empty(), "nothing is sent until it is confirmed: {cmds:?}");
+    assert_eq!(app.confirm_leave.as_deref(), Some("c1"));
+    assert!(app.flash_text().unwrap().contains("leave general?"), "{:?}", app.flash_text());
+
+    let cmds = press(&mut app, KeyCode::Char('n'));
+    assert!(cmds.is_empty(), "anything but y cancels");
+    assert_eq!(app.confirm_leave, None);
+    assert!(app.flash_text().unwrap().contains("not leaving"), "{:?}", app.flash_text());
+
+    type_text(&mut app, "/leave");
+    press(&mut app, KeyCode::Enter);
+    let cmds = press(&mut app, KeyCode::Char('y'));
+    assert!(matches!(cmds.as_slice(), [Cmd::LeaveChannel { channel }] if channel == "c1"), "{cmds:?}");
+    assert_eq!(app.confirm_leave, None);
+}
+
+#[test]
+fn a_dm_is_not_a_channel_to_leave() {
+    let mut app = at_input(1);
+    app.open_channel(2); // the DM row
+    type_text(&mut app, "/leave");
+    let cmds = press(&mut app, KeyCode::Enter);
+    assert!(cmds.is_empty());
+    assert_eq!(app.confirm_leave, None);
+    assert!(app.flash_text().unwrap().contains("not a channel to leave"), "{:?}", app.flash_text());
+}
+
+#[test]
+fn leaving_drops_the_channel_from_the_local_state_when_the_relay_takes_it() {
+    let mut app = app_with(1);
+    app.joined.insert("c1".into());
+    app.member_counts.insert("c1".into(), 3);
+    app.members.insert("c1".into(), vec![("bob".into(), "member".into())]);
+    app.unread.insert("c1".into(), 2);
+    let cmds = app.handle(AppEvent::Left { channel: "c1".into(), result: Ok("ev".into()) });
+    assert!(!app.joined.contains("c1"), "the membership mark goes");
+    assert!(!app.member_counts.contains_key("c1"), "and the count");
+    assert!(!app.members.contains_key("c1"), "and who may be mentioned in it");
+    assert!(!app.unread.contains_key("c1"), "and the unread badge");
+    assert!(cmds.iter().any(|c| matches!(c, Cmd::LoadChannels)), "the list is reloaded: {cmds:?}");
+    assert!(cmds.iter().any(|c| matches!(c, Cmd::LoadRoster { .. })), "and who is in what: {cmds:?}");
+}
+
+#[test]
+fn a_refused_join_is_reported_and_only_cancels_the_open_it_names() {
+    let mut app = app_with(1);
+    app.open_after = Some("c2".into());
+    let cmds = app.handle(AppEvent::Joined { channel: "c2".into(), result: Err("not an open channel".into()) });
+    assert!(cmds.is_empty());
+    assert_eq!(app.open_after, None, "the channel it was waiting to open is given up");
+    assert!(app.flash_text().unwrap().contains("could not join the channel"), "{:?}", app.flash_text());
+
+    app.open_after = Some("c9".into());
+    app.handle(AppEvent::Joined { channel: "c2".into(), result: Err("no".into()) });
+    assert_eq!(app.open_after.as_deref(), Some("c9"), "an answer for another channel does not cancel a newer join");
+}
+
+#[test]
+fn a_refused_leave_is_reported_and_leaves_the_channel_alone() {
+    let mut app = app_with(1);
+    app.joined.insert("c1".into());
+    let cmds = app.handle(AppEvent::Left { channel: "c1".into(), result: Err("the last owner cannot leave".into()) });
+    assert!(cmds.is_empty());
+    assert!(app.joined.contains("c1"), "still a member");
+    assert!(app.flash_text().unwrap().contains("could not leave the channel"), "{:?}", app.flash_text());
+}
+
+#[test]
+fn the_roster_marks_membership_and_counts_and_is_rebuilt_from_each_answer() {
+    let mut app = app_with(1);
+    let members = |who: &[&str]| who.iter().map(|p| (*p).to_string()).collect::<Vec<String>>();
+    let cmds = app.handle(AppEvent::Roster(Ok([("c1".to_string(), members(&["me", "bob"])), ("c2".to_string(), members(&["bob"]))].into())));
+    assert!(cmds.is_empty());
+    assert!(app.is_member("c1"), "you are in c1");
+    assert!(!app.is_member("c2"));
+    assert_eq!(app.member_counts.get("c1"), Some(&2));
+    assert_eq!(app.member_counts.get("c2"), Some(&1));
+
+    // Each answer replaces the last: a channel it says nothing about keeps no count, and the marks come from it alone.
+    app.handle(AppEvent::Roster(Ok([("c2".to_string(), members(&["me"]))].into())));
+    assert!(app.is_member("c2"));
+    assert!(!app.is_member("c1"), "rebuilt from the answer, not remembered");
+    assert_eq!(app.member_counts.get("c1"), None, "an unanswered channel keeps no count");
+}
+
+#[test]
+fn the_roster_drops_a_channel_that_left_the_list_between_the_two_requests() {
+    let mut app = app_with(1);
+    app.handle(AppEvent::Roster(Ok([("gone".to_string(), vec!["me".to_string()])].into())));
+    assert!(!app.is_member("gone"), "a channel that is not in the list is not tracked");
+    assert_eq!(app.member_counts.get("gone"), None);
+}
+
+#[test]
+fn a_channel_list_that_appears_or_changes_asks_who_is_in_what() {
+    let mut app = App::new(ME.into(), false, chrono_tz::UTC);
+    let cmds = app.handle(AppEvent::Channels(Ok(vec![chan("c1", "general")])));
+    assert!(
+        cmds.iter().any(|c| matches!(c, Cmd::LoadRoster { channels } if channels.len() == 1 && channels[0] == "c1")),
+        "the marks and counts come from the relay: {cmds:?}"
+    );
 }

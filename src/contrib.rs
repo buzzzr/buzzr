@@ -13,6 +13,8 @@ use unicode_width::UnicodeWidthChar;
 pub const MAX_TEXT: usize = 2000;
 /// The most rows a panel may send.
 pub const MAX_ROWS: usize = 500;
+/// The most rows a pane may carry. A pane lives under the channel list, so a plugin cannot ask for the whole screen.
+pub const MAX_PANE_ROWS: usize = 20;
 const MAX_SEGMENTS: usize = 32;
 const MAX_MARKS: usize = 500;
 const MAX_COMMANDS: usize = 64;
@@ -157,6 +159,35 @@ pub struct Panel {
     pub rows: Vec<PanelRow>,
 }
 
+/// A small region a plugin owns that is always on screen: buzzr draws it under the channel list, and it is not
+/// opened, focused or clicked. One pane per plugin. `rows` are single lines, clipped to the column's width.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct Pane {
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub rows: Vec<Segment>,
+}
+
+impl Pane {
+    /// Nothing a plugin sends is trusted to be printable; run this before it reaches `Registry`.
+    pub fn clean(mut self) -> Pane {
+        self.title = clean_line(&self.title);
+        self.rows = self.rows.into_iter().take(MAX_PANE_ROWS).map(Segment::clean).collect();
+        self
+    }
+
+    /// A pane the host would draw nothing for: an empty title and no rows (what `{"type":"pane"}` means).
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty() && self.title.is_empty()
+    }
+
+    /// The rows it takes in the channel column: one for the title rule, plus one per line of content.
+    pub fn height(&self) -> usize {
+        self.rows.len() + 1
+    }
+}
+
 /// Everything a plugin registers when it says it is ready.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -173,6 +204,9 @@ pub struct Contributions {
     pub message_marks: Vec<Mark>,
     #[serde(default)]
     pub channel_marks: Vec<Mark>,
+    /// An always-visible region under the channel list; `status`/`header` are one line, this is a block.
+    #[serde(default)]
+    pub pane: Option<Pane>,
 }
 
 impl Contributions {
@@ -200,6 +234,7 @@ impl Contributions {
         }
         self.message_marks.retain(|m| !m.text.is_empty() && !m.target.is_empty());
         self.channel_marks.retain(|m| !m.text.is_empty() && !m.target.is_empty());
+        self.pane = self.pane.map(Pane::clean);
         self
     }
 }
@@ -237,6 +272,7 @@ struct Entry {
     header: Vec<Segment>,
     message_marks: BTreeMap<String, Mark>,
     channel_marks: BTreeMap<String, Mark>,
+    pane: Option<Pane>,
 }
 
 impl Registry {
@@ -248,6 +284,7 @@ impl Registry {
             header: c.header,
             message_marks: c.message_marks.into_iter().map(|m| (m.target.clone(), m)).collect(),
             channel_marks: c.channel_marks.into_iter().map(|m| (m.target.clone(), m)).collect(),
+            pane: c.pane,
         };
         self.plugins.insert(id.to_owned(), entry);
     }
@@ -312,6 +349,22 @@ impl Registry {
     pub fn channel_mark(&self, id: &str) -> Option<&Mark> {
         self.plugins.values().find_map(|e| e.channel_marks.get(id))
     }
+
+    /// Replace one plugin's pane (`pane` is shorthand for a plugin that only ever sends that); `None` clears it.
+    pub fn set_pane(&mut self, id: &str, pane: Option<Pane>) -> bool {
+        match self.plugins.get_mut(id) {
+            Some(e) => {
+                e.pane = pane;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Every plugin's pane, in plugin-id order — the order the channel column stacks them in. Empty panes are skipped.
+    pub fn panes(&self) -> Vec<(&str, &Pane)> {
+        self.plugins.iter().filter_map(|(id, e)| e.pane.as_ref().filter(|p| !p.is_empty()).map(|p| (id.as_str(), p))).collect()
+    }
 }
 
 /// Where a discovered plugin is in its life. Shown by `/plugins`.
@@ -343,7 +396,7 @@ pub struct PluginMeta {
     pub id: String,
     pub name: String,
     pub state: PluginState,
-    /// A manifest problem or the last runtime error; empty when all is well.
+    /// Why the plugin is not running: a folder that would not load, or the last runtime error; empty when all is well.
     pub detail: String,
     pub permissions: Vec<String>,
     pub commands: usize,
@@ -355,6 +408,8 @@ pub enum PluginEvent {
     Ready { id: String, name: String, contributions: Contributions },
     Meta(Vec<PluginMeta>),
     Status { id: String, segments: Vec<Segment> },
+    /// A plugin replaced (or cleared) its pane under the channel list.
+    Pane { id: String, pane: Option<Pane> },
     Panel { plugin: String, panel: Panel },
     Flash { text: String },
     Draft { plugin: String, text: String },
@@ -424,6 +479,49 @@ mod tests {
     }
 
     #[test]
+    fn a_pane_is_cleaned_capped_and_owned_by_its_plugin() {
+        let dirty = Contributions {
+            pane: Some(Pane {
+                title: "Clock\u{1b}[31m".into(),
+                rows: (0..MAX_PANE_ROWS + 5).map(|i| if i == 0 { seg("12\u{7}:00") } else { seg("x") }).collect(),
+            }),
+            ..Contributions::default()
+        };
+        let c = dirty.clean();
+        let pane = c.pane.as_ref().expect("a pane survives cleaning");
+        assert_eq!(pane.title, "Clock[31m");
+        assert_eq!(pane.rows[0].text, "12:00");
+        assert_eq!(pane.rows.len(), MAX_PANE_ROWS, "a pane cannot take the whole screen");
+
+        let mut reg = Registry::default();
+        reg.set("clock", "Clock", c);
+        assert_eq!(reg.panes().len(), 1);
+        assert_eq!(reg.panes()[0].0, "clock");
+        assert_eq!(reg.panes()[0].1.height(), MAX_PANE_ROWS + 1);
+
+        // a plugin may replace its pane, and clearing it takes the space back
+        assert!(reg.set_pane("clock", Some(Pane { title: "Later".into(), rows: vec![seg("x")] })));
+        assert_eq!(reg.panes()[0].1.title, "Later");
+        assert!(reg.set_pane("clock", None));
+        assert!(reg.panes().is_empty());
+        // an empty pane is the same as none: it is not drawn, so it takes no height
+        reg.set_pane("clock", Some(Pane::default()));
+        assert!(reg.panes().is_empty());
+        assert!(reg.set_pane("clock", Some(Pane { title: "Clock".into(), rows: vec![seg("x")] })));
+
+        // one pane per plugin; the stack follows the plugin id order
+        reg.set("aaa", "A", Contributions { pane: Some(Pane { title: "A".into(), rows: vec![seg("a")] }), ..Contributions::default() });
+        reg.set("zzz", "Z", Contributions { pane: Some(Pane { title: "Z".into(), rows: vec![seg("z")] }), ..Contributions::default() });
+        assert_eq!(reg.panes().iter().map(|(id, _)| *id).collect::<Vec<_>>(), vec!["aaa", "clock", "zzz"]);
+        assert_eq!(reg.panes().iter().map(|(_, p)| p.height()).sum::<usize>(), 6, "a title rule plus one row each");
+        assert!(reg.remove("clock"));
+        assert_eq!(reg.panes().len(), 2, "a gone plugin takes its pane with it");
+        // a status update for a plugin with a pane leaves the pane alone
+        assert!(reg.set_status("aaa", vec![seg("up")]));
+        assert_eq!(reg.panes()[0].1.title, "A");
+    }
+
+    #[test]
     fn a_plugin_can_replace_and_lose_all_of_its_contributions() {
         let mut reg = Registry::default();
         let c = Contributions {
@@ -432,6 +530,7 @@ mod tests {
             header: vec![Segment::new("gh", Tone::Dim)],
             message_marks: vec![Mark { target: "m1".into(), text: "PR".into(), tone: Tone::Accent }],
             channel_marks: vec![Mark { target: "c1".into(), text: "3".into(), tone: Tone::Warn }],
+            pane: Some(Pane { title: "Clock".into(), rows: vec![Segment::new("12:00", Tone::Accent)] }),
         };
         reg.set("github", "GitHub", c.clone().clean());
         assert_eq!(reg.command("prs").map(|(p, _)| p), Some("github"));
@@ -439,6 +538,7 @@ mod tests {
         assert_eq!(reg.message_mark("m1").map(|m| m.text.as_str()), Some("PR"));
         assert_eq!(reg.channel_mark("c1").map(|m| m.text.as_str()), Some("3"));
         assert_eq!(reg.header()[0].text, "gh");
+        assert_eq!(reg.panes()[0].1.rows[0].text, "12:00");
 
         // two plugins: statuses are joined in id order
         reg.set("zzz", "Last", Contributions { status: vec![Segment::new("z", Tone::Default)], ..Contributions::default() });
@@ -449,6 +549,7 @@ mod tests {
         assert!(!reg.remove("github"));
         assert!(reg.command("prs").is_none());
         assert!(reg.message_mark("m1").is_none());
+        assert!(reg.panes().is_empty(), "the pane goes with the plugin");
         assert!(reg.status().iter().all(|s| s.text != "2 PRs"));
     }
 }

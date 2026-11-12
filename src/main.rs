@@ -148,24 +148,26 @@ async fn main() -> Result<()> {
 
 /// `buzzr plugins list | enable <id> | disable <id>`: the same folders the TUI reads, without starting a terminal or a key.
 fn plugins_cli(cmd: &PluginsCmd, dir: &std::path::Path) -> Result<()> {
-    use plugins::manifest;
+    use plugins::discover;
     match cmd {
         PluginsCmd::List => {
             println!("plugins in {}", dir.display());
-            let found = manifest::scan(dir);
+            let found = discover::scan(dir);
             if found.is_empty() {
                 println!("  (none)");
             }
             for d in found {
+                // The display name is the plugin's own to declare, and it only does that once it is running, so the
+                // list shows the id and the file buzzr would run.
                 let state = if d.disabled {
                     "off"
-                } else if d.manifest.is_some() {
+                } else if d.entry.is_some() {
                     "on"
                 } else {
                     "broken"
                 };
-                match &d.manifest {
-                    Some(m) => println!("  {:<20} {state:<6} {}   [{}]", m.id, m.name, m.entry.join(" ")),
+                match &d.entry {
+                    Some(entry) => println!("  {:<20} {state:<6} {}", d.id(), entry.display()),
                     None => println!("  {:<20} {state:<6} {}", d.id(), d.problem.clone().unwrap_or_default()),
                 }
             }
@@ -177,11 +179,11 @@ fn plugins_cli(cmd: &PluginsCmd, dir: &std::path::Path) -> Result<()> {
 }
 
 fn set_plugin(dir: &std::path::Path, id: &str, on: bool) -> Result<()> {
-    use plugins::manifest;
-    let Some(d) = manifest::scan(dir).into_iter().find(|d| d.id() == id) else {
+    use plugins::discover;
+    let Some(d) = discover::scan(dir).into_iter().find(|d| d.id() == id) else {
         return Err(anyhow!("no plugin {id} in {}", dir.display()));
     };
-    manifest::set_enabled(&d.dir, on).with_context(|| format!("could not change {}", d.dir.display()))?;
+    discover::set_enabled(&d.dir, on).with_context(|| format!("could not change {}", d.dir.display()))?;
     println!("{}: {}", d.id(), if on { "on" } else { "off" });
     Ok(())
 }
@@ -247,6 +249,8 @@ async fn run_tui(relay: Arc<Relay>, read_only: bool, send_typing: bool, mouse: b
     app.seed_read(config::load_read_state(&paths.read_state()));
     // The channels archived on this device: they have no row in the channel list until a search brings one back.
     app.seed_archived(config::load_archived(&paths.archived()));
+    // What was typed but not sent, per channel and thread: it comes back into the box where it was written.
+    app.seed_drafts(config::load_drafts(&paths.drafts()));
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
     // The release feed: seed the notice from what the last check learned, and ask GitHub again only when that is stale. A failure
     // (offline, no release yet) is silent — see `release.rs`.
@@ -282,6 +286,10 @@ async fn run_tui(relay: Arc<Relay>, read_only: bool, send_typing: bool, mouse: b
             out.flush()?;
         }
         if app.quit {
+            // What is still in the box goes to disk before we go: quitting is not a reason to lose a half-written message.
+            for cmd in app.stash_draft() {
+                run(cmd, &relay, &tx, &live.channels, &host, paths);
+            }
             host.shutdown();
             return Ok(exit_notice(&app));
         }
@@ -296,6 +304,9 @@ async fn run_tui(relay: Arc<Relay>, read_only: bool, send_typing: bool, mouse: b
                     return Err(e.into());
                 }
                 None => {
+                    for cmd in app.stash_draft() {
+                        run(cmd, &relay, &tx, &live.channels, &host, paths);
+                    }
                     host.shutdown();
                     return Ok(exit_notice(&app));
                 }
@@ -349,6 +360,10 @@ fn run(cmd: Cmd, relay: &Arc<Relay>, tx: &UnboundedSender<AppEvent>, subscriptio
             // Written here for the same reason as the read positions: the whole set goes out each time, and a spawned write
             // could race an older one.
             let _ = config::save_archived(&paths.archived(), &ids);
+        }
+        Cmd::SaveDrafts(drafts) => {
+            // Written here too: each save is the whole map, so an older one must not land after a newer one.
+            let _ = config::save_drafts(&paths.drafts(), &drafts);
         }
         Cmd::LoadWindow { channel, cursor } => {
             tokio::spawn(async move {
@@ -427,6 +442,23 @@ fn run(cmd: Cmd, relay: &Arc<Relay>, tx: &UnboundedSender<AppEvent>, subscriptio
                 .await
                 .map_err(e);
                 let _ = tx.send(AppEvent::Created(result));
+            });
+        }
+        Cmd::JoinChannel { channel } => {
+            tokio::spawn(async move {
+                let result = async { relay.submit(relay::join_builder(&channel)?).await }.await.map_err(e);
+                let _ = tx.send(AppEvent::Joined { channel, result });
+            });
+        }
+        Cmd::LeaveChannel { channel } => {
+            tokio::spawn(async move {
+                let result = async { relay.submit(relay::leave_builder(&channel)?).await }.await.map_err(e);
+                let _ = tx.send(AppEvent::Left { channel, result });
+            });
+        }
+        Cmd::LoadRoster { channels } => {
+            tokio::spawn(async move {
+                let _ = tx.send(AppEvent::Roster(relay.roster(&channels).await.map_err(e)));
             });
         }
         Cmd::OpenDm { peer } => {
