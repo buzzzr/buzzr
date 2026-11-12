@@ -172,11 +172,11 @@ impl Session {
             .stdin(Stdio::from(inp.try_clone().unwrap()))
             .stdout(Stdio::from(inp.try_clone().unwrap()))
             .stderr(Stdio::from(inp));
-        // The harness the agents flow starts is not installed in a test environment: put the stub first on `PATH`.
-        let mut stub_path = stub_harness_dir().as_os_str().to_owned();
-        stub_path.push(":");
-        stub_path.push(std::env::var_os("PATH").unwrap_or_default());
-        cmd.env("PATH", stub_path);
+        // The harness the agents flow starts is not installed in a test environment: put the fake first on `PATH`.
+        let mut harness_path = fake_acp_dir().as_os_str().to_owned();
+        harness_path.push(":");
+        harness_path.push(std::env::var_os("PATH").unwrap_or_default());
+        cmd.env("PATH", harness_path);
         if keyboard_enhanced {
             // Make the pty the child's controlling terminal, the way a terminal emulator does: the app asks for the
             // keyboard protocol on /dev/tty, and a test runner started from a terminal has a /dev/tty of its own.
@@ -425,37 +425,24 @@ fn empty_plugins_dir() -> PathBuf {
     dir
 }
 
-/// A stub `claude-code-acp` on a directory of its own, made once and put first on every session's `PATH`.
+/// The fake `claude-code-acp` on a directory of its own, made once and put first on every session's `PATH`.
 ///
 /// `/agents create` starts the harness and reads what it offers over ACP before it makes anything, and no real harness
-/// is installed in a test environment. The stub answers `initialize` and `session/new` with two models and three
-/// thinking levels, and `session/set_config_option` with the levels of the model it is moved to — which is all the
-/// probe reads. It sits on every session's `PATH`: only the agents flow ever starts a harness, so nothing else notices.
-fn stub_harness_dir() -> &'static PathBuf {
+/// is installed in a test environment. The fake is the script committed at `tests/fixtures/claude-code-acp` (the same
+/// one the unit tests in `src/harness/acp.rs` drive); it is copied out, and made executable, so every session can find
+/// it by name on `PATH`. Only the agents flow ever starts a harness, so nothing else notices it.
+fn fake_acp_dir() -> &'static PathBuf {
     static DIR: OnceLock<PathBuf> = OnceLock::new();
     DIR.get_or_init(|| {
         let dir = std::env::temp_dir().join(format!("buzzr-e2e-harness-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("could not make the stub harness directory");
+        std::fs::create_dir_all(&dir).expect("could not make the fake harness directory");
         let path = dir.join("claude-code-acp");
-        std::fs::write(&path, STUB_HARNESS).expect("could not write the stub harness");
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("could not make the stub harness executable");
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/claude-code-acp");
+        std::fs::copy(fixture, &path).expect("could not copy the fake harness");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("could not make the fake harness executable");
         dir
     })
 }
-
-/// The stub harness: one JSON-RPC request per line in, one answer per line out, echoing the request id.
-const STUB_HARNESS: &str = r#"#!/bin/sh
-while IFS= read -r line; do
-  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
-  case "$line" in
-    *'"initialize"'*) result='{"protocolVersion":1,"agentCapabilities":{}}' ;;
-    *'"session/new"'*) result='{"sessionId":"s1","configOptions":[{"id":"model","category":"model","currentValue":"sonnet","options":[{"value":"sonnet","name":"Sonnet"},{"value":"opus","name":"Opus"}]},{"id":"thought_level","category":"thought_level","currentValue":"medium","options":[{"value":"low"},{"value":"medium"},{"value":"high"}]}]}' ;;
-    *'"session/set_config_option"'*) result='{"configOptions":[{"id":"model","category":"model","currentValue":"opus","options":[{"value":"sonnet"},{"value":"opus"}]},{"id":"thought_level","category":"thought_level","currentValue":"high","options":[{"value":"low"},{"value":"high"}]}]}' ;;
-    *) result='{}' ;;
-  esac
-  printf '{"jsonrpc":"2.0","id":%s,"result":%s}\n' "$id" "$result"
-done
-"#;
 
 /// Like `session`, but with plugins on and an empty plugins folder, so a compiled-in plugin is there and no
 /// runtime-loaded one is.
@@ -935,7 +922,7 @@ fn esc_closes_the_command_palette_and_keeps_what_was_typed() {
 /// asked what it offers (its models on a panel, a model's thinking levels on another), and the pick makes a local
 /// agent — a key of its own, a folder of its own, and a record on disk — which the list then shows. The flow reads and
 /// writes only the config directory, so a session with its own temp config is safe to run it in. The harness is the
-/// stub on `PATH` (see `stub_harness_dir`), since no real one is installed here.
+/// fake on `PATH` (see `fake_acp_dir`), since no real one is installed here.
 #[test]
 fn agents_are_listed_and_a_new_one_is_created_through_the_composer() {
     let Some(relay) = relay_or_skip("agents_are_listed_and_a_new_one_...") else { return };

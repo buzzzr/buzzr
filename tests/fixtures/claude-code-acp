@@ -1,0 +1,16 @@
+#!/bin/sh
+# A fake `claude-code-acp` for the tests: one JSON-RPC request per line on stdin, one answer per line on stdout,
+# echoing the request id back. It answers the ACP a probe reads and nothing more — `initialize`, `session/new`
+# (two models and three thinking levels) and `session/set_config_option` (the levels of the model it is moved to).
+# No real harness is installed in a test environment, so this stands in for one; both the unit tests in
+# `src/harness/acp.rs` and the end-to-end suite drive this same file.
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+  case "$line" in
+    *'"initialize"'*) result='{"protocolVersion":1,"agentCapabilities":{}}' ;;
+    *'"session/new"'*) result='{"sessionId":"s1","configOptions":[{"id":"model","category":"model","currentValue":"sonnet","options":[{"value":"sonnet","name":"Sonnet"},{"value":"opus","name":"Opus"}]},{"id":"thought_level","category":"thought_level","currentValue":"medium","options":[{"value":"low"},{"value":"medium"},{"value":"high"}]}]}' ;;
+    *'"session/set_config_option"'*) result='{"configOptions":[{"id":"model","category":"model","currentValue":"opus","options":[{"value":"sonnet"},{"value":"opus"}]},{"id":"thought_level","category":"thought_level","currentValue":"high","options":[{"value":"low"},{"value":"high"}]}]}' ;;
+    *) result='{}' ;;
+  esac
+  printf '{"jsonrpc":"2.0","id":%s,"result":%s}\n' "$id" "$result"
+done

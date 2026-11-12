@@ -173,23 +173,13 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
 
-    /// A stub harness: a shell script that answers `initialize`, `session/new` and `session/set_config_option` with
-    /// canned ACP, echoing the request id back.
-    fn stub(dir: &Path) -> PathBuf {
-        let path = dir.join("stub-acp");
-        let script = r#"#!/bin/sh
-while IFS= read -r line; do
-  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
-  case "$line" in
-    *'"initialize"'*) result='{"protocolVersion":1,"agentCapabilities":{}}' ;;
-    *'"session/new"'*) result='{"sessionId":"s1","configOptions":[{"id":"model","category":"model","currentValue":"sonnet","options":[{"value":"sonnet","name":"Sonnet"},{"value":"opus","name":"Opus"}]},{"id":"thought_level","category":"thought_level","currentValue":"medium","options":[{"value":"low"},{"value":"medium"},{"value":"high"}]}]}' ;;
-    *'"session/set_config_option"'*) result='{"configOptions":[{"id":"model","category":"model","currentValue":"opus","options":[{"value":"sonnet"},{"value":"opus"}]},{"id":"thought_level","category":"thought_level","currentValue":"high","options":[{"value":"low"},{"value":"high"}]}]}' ;;
-    *) result='{}' ;;
-  esac
-  printf '{"jsonrpc":"2.0","id":%s,"result":%s}\n' "$id" "$result"
-done
-"#;
-        std::fs::write(&path, script).unwrap();
+    /// The fake harness the tests drive: the shell script committed at `tests/fixtures/claude-code-acp`, copied into
+    /// `dir` and made executable so it can be started by path. The end-to-end suite drives the same file, so there is
+    /// one fake to keep in step with the client.
+    fn fake_acp(dir: &Path) -> PathBuf {
+        let path = dir.join("claude-code-acp");
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/claude-code-acp");
+        std::fs::copy(fixture, &path).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         path
     }
@@ -207,7 +197,7 @@ done
     #[test]
     fn a_probe_reads_the_models_and_levels_a_harness_offers() {
         let dir = tempdir();
-        let program = stub(&dir);
+        let program = fake_acp(&dir);
         let offer = probe(program.to_str().unwrap(), &dir, None, "missing").unwrap();
         assert_eq!(values(&offer.models), vec!["sonnet", "opus"]);
         assert_eq!(offer.models[0].label, "Sonnet", "a choice's name is its label");
@@ -220,7 +210,7 @@ done
     #[test]
     fn putting_the_session_on_a_model_reads_that_model_s_levels() {
         let dir = tempdir();
-        let program = stub(&dir);
+        let program = fake_acp(&dir);
         let offer = probe(program.to_str().unwrap(), &dir, Some("opus"), "missing").unwrap();
         assert_eq!(offer.model, "opus", "the chosen model comes back as the current one");
         assert_eq!(values(&offer.efforts), vec!["low", "high"], "and its levels are the ones offered");

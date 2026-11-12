@@ -44,3 +44,7 @@ A plain pty answers nothing, so `buzzr` treats it as a terminal that cannot repo
 `Session::start_enhanced` answers the keyboard-enhancement probe (`CSI ? u` and `CSI c`) the way a
 kitty-protocol terminal does, so a test can drive the Shift+Enter that kitty, foot, WezTerm, Ghostty
 and iTerm2 send.
+
+A test of the agents flow needs a harness — `claude-code-acp` — which is not installed in a test
+environment. `tests/fixtures/claude-code-acp` is a fake that answers the ACP that flow reads, and the
+suite puts it first on `PATH`; the unit tests in `src/harness/acp.rs` drive the same file.
