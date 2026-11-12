@@ -1,14 +1,23 @@
 #!/bin/sh
-# A tiny buzzr plugin. It reads one JSON message per line on stdin and answers with one
-# JSON message per line on stdout. See PLUGIN.md in the repository root.
+# A tiny buzzr plugin. It reads one JSON message per line on stdin and answers with one JSON message per line on
+# stdout. See PLUGIN.md in the repository root.
+#
+# This is the same protocol the TypeScript SDK speaks (see examples/plugins/clock); it is spelled out by hand here so a
+# plugin in any language, with no library at all, has something to copy.
 #
 # Try it:  cp -r examples/plugins/hello ~/.config/buzzr/plugins/ && buzzr
 # then type /hello.
 while IFS= read -r line; do
   case "$line" in
     *'"type":"hello"'*)
-      # Register the /hello command and a status item.
-      printf '%s\n' '{"type":"ready","contributions":{"commands":[{"id":"hello","title":"Hello","usage":"/hello"}],"status":[{"text":"hello","tone":"ok"}]}}'
+      # buzzr greets us with the contract version it speaks; refuse a host we do not understand.
+      case "$line" in
+        *'"apiVersion":2'*) ;;
+        *) printf '%s\n' '{"type":"log","level":"error","text":"this plugin speaks apiVersion 2"}'; exit 1 ;;
+      esac
+      # Declare everything in code: buzzr reads no manifest, so `name` and `permissions` come from here. `read:visible` lets us
+      # see the projection (nothing here uses it, but it is what a real plugin asks for).
+      printf '%s\n' '{"type":"ready","name":"Hello","permissions":["read:visible"],"contributions":{"commands":[{"id":"hello","title":"Hello","usage":"/hello"}],"status":[{"text":"hello","tone":"ok"}]}}'
       ;;
     *'"type":"snapshot"'*)
       # A projection of what is on screen arrived; a real plugin would react to it here.

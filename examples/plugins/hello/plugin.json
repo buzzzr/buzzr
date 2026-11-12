@@ -1,8 +1,0 @@
-{
-  "id": "hello",
-  "name": "Hello",
-  "apiVersion": 1,
-  "description": "A tiny example plugin: a /hello command, a status item, and a panel with one actionable row.",
-  "entry": ["sh", "main.sh"],
-  "permissions": ["read:visible"]
-}

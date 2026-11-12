@@ -12,6 +12,7 @@
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Read, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -22,8 +23,9 @@ use std::time::{Duration, Instant};
 const ROWS: u16 = 36;
 const COLS: u16 = 110;
 /// A pane short enough that a channel's history is taller than the message pane. The fake relay gives every
-/// channel a single message, so only in a short pane can the newest one fall out of view.
-const SHORT_ROWS: u16 = 14;
+/// channel a single message, so only in a short pane can the newest one fall out of view. Twelve rows leave a
+/// five-line pane, one line short of #general's seven-line thread (its root header, and two two-line replies).
+const SHORT_ROWS: u16 = 12;
 /// Any fixed key: the fake relay accepts AUTH without checking it.
 const KEY: &str = "0505050505050505050505050505050505050505050505050505050505050505";
 /// How long to wait for the screen to show something. Generous: a loaded machine must not flake.
@@ -132,6 +134,16 @@ impl Session {
     }
 
     fn start_sized(relay: &Relay, config: PathBuf, keyboard_enhanced: bool, rows: u16) -> Session {
+        Session::start_full(relay, config, keyboard_enhanced, rows, None)
+    }
+
+    /// Like `start_sized`, but with plugins on and `dir` as their folder, so a test can see what a plugin draws
+    /// (every other session starts with `--no-plugins`).
+    fn start_with_plugins(relay: &Relay, dir: PathBuf, rows: u16) -> Session {
+        Session::start_full(relay, fresh_config_dir(), false, rows, Some(dir))
+    }
+
+    fn start_full(relay: &Relay, config: PathBuf, keyboard_enhanced: bool, rows: u16, plugins: Option<PathBuf>) -> Session {
         let pty = nix::pty::openpty(
             Some(&nix::pty::Winsize { ws_row: rows, ws_col: COLS, ws_xpixel: 0, ws_ypixel: 0 }),
             None,
@@ -147,8 +159,11 @@ impl Session {
         let out = std::fs::File::from(pty.master);
         let inp = std::fs::File::from(pty.slave);
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_buzzr"));
-        cmd.arg("--no-plugins")
-            .env("BUZZR_CONFIG_DIR", &config)
+        match &plugins {
+            Some(dir) => cmd.env("BUZZR_PLUGINS_DIR", dir),
+            None => cmd.arg("--no-plugins"),
+        };
+        cmd.env("BUZZR_CONFIG_DIR", &config)
             .env("BUZZ_RELAY_URL", &relay.url)
             .env("BUZZ_PRIVATE_KEY", KEY)
             .env("BUZZR_NO_UPDATE_CHECK", "1")
@@ -300,6 +315,8 @@ fn key_bytes(key: &str) -> (Vec<u8>, Duration) {
         "backtab" => b"\x1b[Z".to_vec(),
         "up" => b"\x1b[A".to_vec(),
         "down" => b"\x1b[B".to_vec(),
+        "right" => b"\x1b[C".to_vec(),
+        "left" => b"\x1b[D".to_vec(),
         "home" => b"\x1b[H".to_vec(),
         "end" => b"\x1b[F".to_vec(),
         "f1" => b"\x1bOP".to_vec(),
@@ -341,6 +358,34 @@ fn bar_on(screen: &str) -> Option<String> {
 /// The header line: `buzzr`, the open channel or thread, and the connection state.
 fn header(screen: &str) -> String {
     screen.lines().next().unwrap_or_default().trim_end().to_string()
+}
+
+/// The lines of the messages pane, top to bottom: what sits right of the divider that separates it from the
+/// channel list. Lines that are not part of the pane (the sidebar's own rows, the footer) come back empty.
+fn messages_pane(screen: &str) -> Vec<String> {
+    screen
+        .lines()
+        .skip(1) // the header row
+        .map(|l| match l.split_once('│') {
+            Some((_, right)) => right.trim_end().to_string(),
+            None => String::new(),
+        })
+        .collect()
+}
+
+/// How far a pane line is pushed in: its count of leading spaces. The cursor bar (`▌`) covers the line's first
+/// column, so it is read as the blank it hides (`unbarred` first).
+fn indent_of(line: &str) -> usize {
+    let line = match line.strip_prefix('▌') {
+        Some(rest) => format!(" {rest}"),
+        None => line.to_string(),
+    };
+    line.chars().take_while(|c| *c == ' ').count()
+}
+
+/// The line of the messages pane the cursor bar (`▌`) is on, if any — the selected message's first line.
+fn cursor_row(screen: &str) -> Option<String> {
+    messages_pane(screen).into_iter().find(|l| l.starts_with('▌'))
 }
 
 /// How many lines the input box is showing: the rows between its top border (which carries the ` message ` title)
@@ -476,6 +521,132 @@ fn enter_on_a_message_opens_its_thread_and_esc_goes_back_to_the_channel() {
 }
 
 #[test]
+fn a_thread_reads_as_a_root_header_line_with_the_replies_indented_under_it() {
+    let Some(relay) = relay_or_skip("a_thread_reads_as_a_root_header_line_...") else { return };
+    let s = session(&relay);
+    // #general is the third channel, and its newest message carries a two-reply thread.
+    s.press_all(&["down", "down", "enter"]);
+    s.expect("the general channel", "hello from c-general");
+    s.press("enter"); // open the thread of the selected message
+    s.expect("the thread view", "› thread");
+    // The root is the thread's header: its number, time and author share the line with the first line of
+    // what it says, instead of taking a row of its own in the reply feed.
+    let screen = s.until("the root on the first line of the pane", |sc| {
+        messages_pane(sc).first().is_some_and(|l| l.contains("hello from c-general"))
+    });
+    let pane = messages_pane(&screen);
+    let root = pane[0].clone();
+    assert!(
+        root.contains("#1") && root.contains("hello from c-general"),
+        "the root's number and text are on one header line: {root:?}"
+    );
+    let root_indent = indent_of(&root);
+
+    // Every reply sits two columns further in than the root — head line and body alike — so the pane reads
+    // as a root with replies under it.
+    for (head, body) in [
+        ("#2", "the sidebar keeps a fixed order"),
+        ("#3", "and Enter opens the thread"),
+    ] {
+        let head_line = pane
+            .iter()
+            .find(|l| l.trim_start_matches('▌').trim_start().starts_with(head))
+            .unwrap_or_else(|| panic!("reply {head} is on screen. The pane is:\n{}", pane.join("\n")));
+        let body_line = pane
+            .iter()
+            .find(|l| l.contains(body))
+            .unwrap_or_else(|| panic!("reply {body:?} is on screen. The pane is:\n{}", pane.join("\n")));
+        assert_eq!(
+            indent_of(head_line),
+            root_indent + 2,
+            "reply {head} is indented under the root: {head_line:?} (root {root:?})"
+        );
+        assert_eq!(
+            indent_of(body_line),
+            root_indent + 2,
+            "reply {head}'s text lines up with its head: {body_line:?} (root {root:?})"
+        );
+    }
+}
+
+/// With a message row selected, Right walks into its thread and Left walks back out, the up/down of the tree
+/// rather than of the list. A message with no replies has nothing under it, so there both keys do nothing.
+#[test]
+fn the_arrow_keys_walk_into_a_thread_and_back_out_of_it() {
+    let Some(relay) = relay_or_skip("the_arrow_keys_walk_...") else { return };
+    let s = session(&relay);
+    // #general is the third channel; its newest message carries a two-reply thread. Enter opens the channel and
+    // leaves the keyboard on the messages, on that message.
+    s.press_all(&["down", "down", "enter"]);
+    s.expect("the general channel", "hello from c-general");
+    s.expect("its thread summary", "2 replies");
+
+    // Right, on the selected message, opens its thread the way Enter does.
+    s.press("right");
+    s.expect("the thread view", "› thread");
+    s.expect("the first reply, which is only in the thread", "the sidebar keeps a fixed order");
+    let pane = messages_pane(&s.screen());
+    let root_row = pane.first().cloned().unwrap_or_default();
+    assert!(root_row.contains("#1") && root_row.contains("hello from c-general"), "the thread holds its root: {root_row:?}");
+
+    // Home puts the cursor on the root; Down walks down into its replies.
+    s.press("home");
+    let screen = s.until("the cursor on the root", |sc| cursor_row(sc).is_some_and(|l| l.contains("#1")));
+    assert!(cursor_row(&screen).unwrap().contains("hello from c-general"), "the root is the message the thread is about");
+    s.press("down");
+    let screen = s.until("the cursor on the first reply", |sc| cursor_row(sc).is_some_and(|l| l.contains("#2")));
+    assert!(
+        messages_pane(&screen).iter().any(|l| l.contains("the sidebar keeps a fixed order")),
+        "Down walks down to the first reply. The pane is:\n{}",
+        messages_pane(&screen).join("\n")
+    );
+
+    // Right inside a thread opens nothing: the cursor stays on the reply it is on.
+    s.press("right");
+    let screen = s.screen();
+    assert!(header(&screen).contains("› thread"), "Right inside a thread opens no other thread: {:?}", header(&screen));
+    assert!(
+        cursor_row(&screen).is_some_and(|l| l.contains("#2")),
+        "and leaves the cursor where it was. The pane is:\n{}",
+        messages_pane(&screen).join("\n")
+    );
+
+    // Left goes back up to the root, still in the thread.
+    s.press("left");
+    let screen = s.until("the cursor back on the root, still in the thread", |sc| {
+        header(sc).contains("› thread") && cursor_row(sc).is_some_and(|l| l.contains("#1"))
+    });
+    assert!(header(&screen).contains("› thread"), "Left from a reply stays in the thread: {:?}", header(&screen));
+
+    // Left again, on the root, leaves the thread for the channel, the way Esc does.
+    s.press("left");
+    let screen = s.until("the header to go back to the channel", |sc| header(sc).contains("#general") && !header(sc).contains("› thread"));
+    let h = header(&screen);
+    assert!(h.contains("#general"), "back in the channel: {h:?}");
+    s.expect("the thread summary again", "2 replies");
+}
+
+#[test]
+fn the_arrows_leave_a_message_with_no_thread_alone() {
+    let Some(relay) = relay_or_skip("the_arrows_leave_a_message_...") else { return };
+    let s = session(&relay);
+    // #design opens by itself, and its one message has no replies: neither arrow opens anything.
+    s.expect("the design channel", "hello from c-design");
+    s.press("tab"); // the channel list -> the messages
+    s.expect("the messages pane", "Open thread");
+    for key in ["right", "left"] {
+        s.press(key);
+        let screen = s.screen();
+        assert!(!header(&screen).contains("› thread"), "{key} on a message with no replies opens no thread: {:?}", header(&screen));
+        assert!(
+            cursor_row(&screen).is_some_and(|l| l.contains("#1")) && messages_pane(&screen).iter().any(|l| l.contains("hello from c-design")),
+            "{key} leaves the cursor on the message. The pane is:\n{}",
+            messages_pane(&screen).join("\n")
+        );
+    }
+}
+
+#[test]
 fn ctrl_f_searches_channels_and_messages_and_esc_closes_the_overlay() {
     let Some(relay) = relay_or_skip("ctrl_f_searches_...") else { return };
     let s = session(&relay);
@@ -512,6 +683,39 @@ fn x_archives_the_channel_under_the_bar_and_a_search_result_brings_it_back() {
     assert!(header(&screen).contains("#design"), "and the channel was opened: {:?}", header(&screen));
 }
 
+/// A channel we are not in opens read-only: its composer is a Join button, not a text field. Ctrl+F says the
+/// same about the channel first (the relay's roster), and Enter on the button sends the join.
+#[test]
+fn a_channel_we_are_not_in_opens_with_a_join_button_in_place_of_the_composer() {
+    let Some(relay) = relay_or_skip("a_channel_we_are_not_in_opens_...") else { return };
+    let s = session(&relay);
+    // Ctrl+F finds #random; its row carries the relay's roster (who is in it) and says what Enter does.
+    s.press("ctrl+f");
+    s.expect("the search overlay", "Search · Enter opens");
+    s.type_text("random");
+    s.expect("the channel row to count the members the relay named", "2 members");
+    s.expect("and to say we are not one of them", "not joined · Enter opens");
+    // Enter opens the row on the cursor, which needs the search to have run: wait for the relay's answer (its message
+    // hit) first, or the Enter just starts the search.
+    s.expect("the relay's answer to the search", "hello from c-random");
+    s.press("enter");
+    let screen = s.until("the channel to open", |sc| header(sc).contains("#random"));
+    assert!(screen.contains("[ Join ]"), "the composer is a Join button:\n{screen}");
+    assert!(screen.contains("join this channel"), "and says what it is:\n{screen}");
+    assert!(!screen.contains("Type a message"), "there is no text field to type into:\n{screen}");
+    // The button takes the focus the way the input does, and the footer names it.
+    s.press("tab"); // messages -> input
+    s.expect("the footer to name the join key", "Join  esc  Messages");
+    // Enter on the button sends the join. The relay's rooms carry placeholder ids, not the UUIDs the protocol
+    // uses, so the send is refused and reported; the point here is that the button is wired to the join at all.
+    s.press("enter");
+    s.expect("the join to be attempted and its refusal reported", "could not join the channel");
+    // The channel is still not ours, so the button is still there, and Esc leaves it for the messages.
+    s.expect("the join button to stay", "join this channel");
+    s.press("esc");
+    s.expect("the messages footer", "Open thread");
+}
+
 #[test]
 fn f1_lists_the_keys_and_esc_closes_them() {
     let Some(relay) = relay_or_skip("f1_lists_the_keys_...") else { return };
@@ -544,6 +748,41 @@ fn typing_reaches_the_input_box() {
     s.expect("the typed text in the input box", "a message for the fake relay");
     s.press("esc"); // empty and not replying: back to the messages
     s.expect("the messages pane again", "Open thread");
+}
+
+#[test]
+fn a_draft_comes_back_with_its_channel_and_is_still_there_after_a_restart() {
+    let Some(relay) = relay_or_skip("a_draft_comes_back_...") else { return };
+    let mut s = session(&relay);
+    let config = s.config.clone();
+    s.press_all(&["tab", "tab"]); // channels -> messages -> input
+    s.expect("the input box to take focus", "Send");
+    s.type_text("half a thought");
+    s.expect("the draft in the box", "half a thought");
+    // Leave for #dev without sending: the box clears, and the draft stays behind in #design.
+    s.press("esc"); // input -> messages
+    s.press("esc"); // -> the channel list
+    s.expect("the channel list", "Open channel");
+    s.press_all(&["down", "enter"]);
+    s.expect("the dev channel", "hello from c-dev");
+    s.expect_gone("the other channel's draft", "half a thought");
+    // Back in #design it is in the box again.
+    s.press("esc");
+    s.expect("the channel list again", "Open channel");
+    s.press_all(&["up", "enter"]);
+    s.expect("the design channel again", "hello from c-design");
+    s.expect("the draft back in the box", "half a thought");
+    // Quit, and start again on what it left behind: the draft comes back with the channel.
+    s.press("ctrl+q");
+    s.wait_exit(Duration::from_secs(10)).expect("buzzr should exit on Ctrl+Q");
+    let written = std::fs::read_to_string(config.join("drafts.json")).expect("the draft is on disk");
+    assert!(written.contains("half a thought"), "the draft is stored for the channel it was typed in: {written}");
+    drop(s); // the session takes its config directory with it
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(config.join("drafts.json"), &written).unwrap();
+    let again = session_in(&relay, config);
+    again.expect("the channel it opens by itself", "#design");
+    again.expect("the draft it was left holding", "half a thought");
 }
 
 /// A message that `@mentions` someone the channel does not have is held back, and the status line asks whether to
@@ -608,6 +847,27 @@ fn a_slash_opens_the_command_palette_and_enter_runs_the_command() {
     s.expect_gone("the palette closed once a space ends the word", "Commands · Enter runs · Tab completes");
     s.press("enter"); // /search with no argument opens the search overlay
     s.expect("the completed command to run", "Search · Enter opens");
+}
+
+/// Esc closes the palette but keeps the composer and the `/command` in it, so a half-written command can be finished or
+/// corrected; the text is still a command, so Enter runs it.
+#[test]
+fn esc_closes_the_command_palette_and_keeps_what_was_typed() {
+    let Some(relay) = relay_or_skip("esc_closes_the_command_palette_...") else { return };
+    let s = session(&relay);
+    s.press_all(&["tab", "tab"]); // channels -> messages -> input
+    s.expect("the input box to take focus", "Send");
+    s.type_text("/help");
+    s.expect("the command palette", "Commands · Enter runs · Tab completes");
+    s.expect("the footer to follow the palette", "Close");
+    s.press("esc");
+    s.expect_gone("the palette to close", "Commands · Enter runs · Tab completes");
+    s.expect("the composer to keep the keyboard", "Send");
+    s.expect("the command to stay in the input", "/help");
+    // The palette went away with the list, not with the text, so Enter still runs the command.
+    s.press("enter");
+    s.expect("the command left in the input to run", "/r N text");
+    s.press("esc");
 }
 
 #[test]
@@ -729,22 +989,27 @@ fn a_thread_with_replies_since_the_last_visit_is_marked_unread_on_its_message() 
 }
 
 #[test]
-fn a_thread_reply_is_not_counted_as_a_channel_unread() {
-    let Some(relay) = relay_or_skip("a_thread_reply_is_not_counted_...") else { return };
-    // #general carries a thread with two replies, both newer than its own message. Open the channel once,
-    // which reads its timeline and stores where the channel was left, then restart on that state.
+fn a_thread_reply_marks_its_channel_with_a_circle_not_a_count() {
+    let Some(relay) = relay_or_skip("a_thread_reply_marks_its_channel_...") else { return };
+    // #general carries a thread with two replies, both newer than its own message. Read the channel and its
+    // thread once (so both positions are stored), then restart with the thread position far in the past: only
+    // the replies are unread, and nothing on the channel's own timeline is.
     let first = session(&relay);
     first.press_all(&["down", "down", "enter"]);
     first.expect("the general channel", "hello from c-general");
+    first.press("enter"); // open the thread, which records its own read position
+    first.expect("the thread view", "the sidebar keeps a fixed order");
     let stored = wait_for_stored_channel(&first.config.join("read-state.json"), "c-general");
+    let root = wait_for_stored_thread(&first.config.join("read-state.json"));
+    let at = stored_position(&stored, "c-general");
     let config = first.config.clone();
     drop(first); // kills the app and clears the config directory
     std::fs::create_dir_all(&config).unwrap();
-    std::fs::write(config.join("read-state.json"), stored).unwrap();
+    std::fs::write(config.join("read-state.json"), format!("{{\"channels\":{{\"c-general\":{at}}},\"threads\":{{\"{root}\":1}}}}")).unwrap();
 
     let s = session_in(&relay, config);
-    // #design opens on start, so #general is off screen and its count is asked from the relay. Nothing arrived
-    // on its timeline since it was read, so it carries no badge: the thread replies are not channel rows.
+    // #design opens on start, so #general is off screen and its count is asked from the relay. Nothing arrived on
+    // its timeline, so it is not a *counted* unread — a thread reply is not a channel row.
     s.expect("the channel list", "#general");
     std::thread::sleep(Duration::from_millis(800)); // long enough for a startup count to arrive if one were coming
     let screen = s.screen();
@@ -753,6 +1018,30 @@ fn a_thread_reply_is_not_counted_as_a_channel_unread() {
         "a thread reply must not count as a channel unread:\n{}\n{screen}",
         ruler()
     );
+    // Open the channel: the message list marks the thread, and the channel row now says the same thing — one circle,
+    // still no count.
+    s.press_all(&["down", "down", "enter"]);
+    s.expect("the general channel", "hello from c-general");
+    s.expect("the thread's own mark", "● 2 new");
+    let screen = s.until("the channel row's circle", |sc| sidebar(sc).iter().any(|row| row == "#general ●"));
+    assert!(
+        !sidebar(&screen).iter().any(|row| row.starts_with("#general (")),
+        "the row carries the circle without a count:\n{screen}"
+    );
+    // Reading the thread clears both markers together.
+    s.press("enter");
+    s.expect("the thread view", "the sidebar keeps a fixed order");
+    s.press("esc");
+    s.expect_gone("the thread's message mark", "● 2 new");
+    s.until("the channel row's circle to clear", |sc| !sidebar(sc).iter().any(|row| row == "#general ●"));
+}
+
+/// The `created_at` stored for `channel` in a `read-state.json` body (the file is pretty-printed, so the value is after
+/// the key's colon and some whitespace).
+fn stored_position(text: &str, channel: &str) -> u64 {
+    let needle = format!("\"{channel}\"");
+    let i = text.find(&needle).expect("the channel is in the read state") + needle.len();
+    text[i..].chars().skip_while(|c| *c == ':' || c.is_ascii_whitespace()).take_while(char::is_ascii_digit).collect::<String>().parse().expect("a position")
 }
 
 /// The whole `read-state.json` once it records a position for `channel`, waiting for the file to appear.
@@ -858,4 +1147,48 @@ fn the_selftest_passes_against_the_fake_relay() {
     let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert!(out.status.success(), "buzzr --selftest failed against the fake relay:\n{text}");
     assert!(text.contains("selftest ok"), "buzzr --selftest did not say it was ok:\n{text}");
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Plugins: what a plugin puts on screen. Every other session starts with `--no-plugins`; this one turns
+// them on and points at a folder of its own, so the check runs through the real host and child process.
+
+/// A plugin that declares a pane and asks for a heartbeat, both in its `ready`, then replaces the
+/// pane on every tick — the shape `examples/plugins/clock` uses, with fixed text so the test can
+/// assert on it.
+const PANE_PLUGIN_MAIN: &str = r#"#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    *'"type":"hello"'*) printf '%s\n' '{"type":"ready","tickMs":250,"contributions":{"pane":{"title":"Demo pane","rows":[{"text":"pane one","tone":"accent"}]}}}' ;;
+    *'"type":"tick"'*) printf '%s\n' '{"type":"pane","title":"Demo pane","rows":[{"text":"pane two","tone":"accent"}]}' ;;
+  esac
+done
+"#;
+
+#[test]
+fn a_plugin_pane_is_drawn_under_the_channel_list_and_a_heartbeat_refreshes_it() {
+    let Some(relay) = relay_or_skip("a_plugin_pane_is_drawn_...") else { return };
+    let dir = std::env::temp_dir().join(format!("buzzr-e2e-plugins-{}", std::process::id()));
+    let plugin = dir.join("demo");
+    std::fs::create_dir_all(&plugin).expect("could not make the plugin folder");
+    let entry = plugin.join("main.sh");
+    std::fs::write(&entry, PANE_PLUGIN_MAIN).unwrap();
+    // buzzr runs the entry file itself, so it has to be executable.
+    std::fs::set_permissions(&entry, std::fs::Permissions::from_mode(0o755)).expect("chmod +x main.sh");
+
+    let s = Session::start_with_plugins(&relay, dir.clone(), ROWS);
+    settle(&s);
+    // The pane is always on screen: under the channel list, with its title on the rule above its rows, and
+    // the channel list keeps its own rows.
+    let screen = s.until("the plugin's pane", |sc| sc.contains("pane one"));
+    let lines: Vec<&str> = screen.lines().collect();
+    let row = lines.iter().position(|l| l.contains("pane one")).expect("the pane row");
+    let last_channel = lines.iter().rposition(|l| l.contains("#random")).expect("a channel row");
+    assert!(row > last_channel, "the pane sits under the channel list:\n{screen}");
+    assert!(screen.contains("Demo pane"), "the pane's title is on its rule:\n{screen}");
+    assert!(screen.contains("#design"), "the channel list keeps its rows:\n{screen}");
+    // The heartbeat the plugin asked for in its `ready` reaches the child, which replaces the pane from it.
+    let screen = s.until("the heartbeat to refresh the pane", |sc| sc.contains("pane two"));
+    assert!(!screen.contains("pane one"), "the pane is replaced, not stacked:\n{screen}");
+    let _ = std::fs::remove_dir_all(&dir);
 }

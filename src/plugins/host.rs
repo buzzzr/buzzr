@@ -6,7 +6,7 @@
 
 use crate::app::AppEvent;
 use crate::contrib::{PluginCmd, PluginEvent, PluginMeta, PluginState, Projection};
-use crate::plugins::manifest::{self, Manifest, DISABLED};
+use crate::plugins::discover::{self, DISABLED};
 use crate::plugins::proto::{self, FromPlugin, ToPlugin};
 use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
@@ -23,6 +23,9 @@ pub const HANDSHAKE: Duration = Duration::from_secs(2);
 pub const POLL: Duration = Duration::from_secs(2);
 /// An editor writing a file twice must not start two revisions.
 pub const DEBOUNCE: Duration = Duration::from_millis(300);
+/// How often the runtime looks at which plugins are due a heartbeat. A plugin's `tickMs` is honoured to this
+/// granularity, so it is the same number as `discover::MIN_TICK_MS`.
+pub const TICK_CHECK: Duration = Duration::from_millis(discover::MIN_TICK_MS);
 /// A plugin may post this often, no more. The user always sees it happen.
 const SEND_INTERVAL: Duration = Duration::from_secs(1);
 const SENDS_PER_MINUTE: usize = 20;
@@ -88,10 +91,17 @@ struct Proc {
 
 #[derive(Default)]
 struct Info {
-    manifest: Option<Manifest>,
+    /// The file buzzr runs for this plugin; `None` when the folder did not load, and `detail` says why.
+    entry: Option<PathBuf>,
     disabled: bool,
     state: PluginState,
     detail: String,
+    /// What the plugin called itself when it said `ready`; empty means "call it by its id".
+    name: String,
+    /// What the plugin asked to be allowed to do, filtered to what this build enforces.
+    permissions: Vec<String>,
+    /// The heartbeat it asked for in `ready`; `0` means never.
+    tick_ms: u64,
     commands: usize,
 }
 
@@ -108,6 +118,9 @@ struct Runtime {
     last_snapshot: Option<Projection>,
     seq: u64,
     invoke: u64,
+    /// When each running plugin last got a heartbeat, and the number to put on the next one.
+    ticks: HashMap<String, Instant>,
+    tick_seq: u64,
     sends: HashMap<String, Vec<Instant>>,
     published: Vec<PluginMeta>,
 }
@@ -127,6 +140,8 @@ impl Runtime {
             last_snapshot: None,
             seq: 0,
             invoke: 0,
+            ticks: HashMap::new(),
+            tick_seq: 0,
             sends: HashMap::new(),
             published: Vec::new(),
         }
@@ -138,6 +153,9 @@ impl Runtime {
         self.publish();
         let mut poll = tokio::time::interval(POLL);
         poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // A separate, faster timer: only a plugin whose own code asked for a heartbeat is woken by it.
+        let mut heartbeat = tokio::time::interval(TICK_CHECK);
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
                 Some(msg) = rx.recv() => match msg {
@@ -151,6 +169,7 @@ impl Runtime {
                     self.check_deadlines();
                     self.scan_for_changes();
                 }
+                _ = heartbeat.tick() => self.send_ticks(),
             }
         }
         self.stop_all();
@@ -160,7 +179,7 @@ impl Runtime {
     // ---- discovery --------------------------------------------------------------------------------------------------------
 
     fn rescan(&mut self, proc_tx: &UnboundedSender<ProcMsg>) {
-        let found = manifest::scan(&self.root);
+        let found = discover::scan(&self.root);
         let seen: Vec<String> = found.iter().map(|d| d.id()).collect();
         let gone: Vec<String> = self.plugins.keys().filter(|id| !seen.contains(id)).cloned().collect();
         for id in gone {
@@ -173,10 +192,9 @@ impl Runtime {
             .map(|d| {
                 let id = d.id();
                 let dir = d.dir;
-                let man = d.manifest.clone();
-                let mut info = Info { manifest: man, disabled: d.disabled, ..Info::default() };
-                if let Some(m) = &info.manifest {
-                    match self.spawn(m, &dir, 1, proc_tx) {
+                let mut info = Info { entry: d.entry.clone(), disabled: d.disabled, ..Info::default() };
+                if let Some(entry) = &info.entry {
+                    match self.spawn(&id, entry, &dir, 1, proc_tx) {
                         Ok(proc) => {
                             info.state = PluginState::Starting;
                             self.pending.insert(id.clone(), proc);
@@ -188,12 +206,12 @@ impl Runtime {
                     }
                 } else {
                     info.state = if info.disabled { PluginState::Disabled } else { PluginState::Failed };
-                    info.detail = d.problem.clone().unwrap_or_else(|| "no manifest".into());
+                    info.detail = d.problem.clone().unwrap_or_else(|| "no entry file".into());
                 }
                 (id, info)
             })
             .collect();
-        self.last_stamp = manifest::stamps(&self.root);
+        self.last_stamp = discover::stamps(&self.root);
         // a plugin may have been removed while it was running
         for id in self.running.keys().cloned().collect::<Vec<_>>() {
             if !self.plugins.contains_key(&id) {
@@ -205,7 +223,7 @@ impl Runtime {
 
     fn scan_for_changes(&mut self) {
         // A folder that went away or appeared, and edits inside one, both show up as a changed stamp.
-        let current = manifest::stamps(&self.root);
+        let current = discover::stamps(&self.root);
         let mut changed: Vec<String> = Vec::new();
         for (dir, stamp) in &current {
             if self.last_stamp.get(dir) != Some(stamp) {
@@ -241,11 +259,11 @@ impl Runtime {
             return;
         }
         let disabled = dir.join(DISABLED).exists();
-        match manifest::load(&dir) {
-            Ok(m) => {
+        match discover::load(&dir) {
+            Ok(entry) => {
                 let was_running = self.running.contains_key(folder);
-                self.plugins.entry(folder.to_owned()).or_insert_with(Info::default).manifest = Some(m.clone());
-                let info = self.plugins.get_mut(folder).expect("just inserted");
+                let info = self.plugins.entry(folder.to_owned()).or_insert_with(Info::default);
+                info.entry = Some(entry.clone());
                 info.disabled = disabled;
                 if disabled {
                     self.stop(folder);
@@ -260,7 +278,7 @@ impl Runtime {
                 if let Some(mut old) = self.pending.remove(folder) {
                     let _ = old.child.start_kill();
                 }
-                match self.spawn(&m, &dir, rev, proc_tx) {
+                match self.spawn(folder, &entry, &dir, rev, proc_tx) {
                     Ok(p) => {
                         self.pending.insert(folder.to_owned(), p);
                         let info = self.plugins.get_mut(folder).expect("present");
@@ -272,7 +290,7 @@ impl Runtime {
             }
             Err(e) => {
                 if let Some(info) = self.plugins.get_mut(folder) {
-                    info.manifest = None;
+                    info.entry = None;
                     info.state = PluginState::Failed;
                     info.detail = e.clone();
                 }
@@ -284,45 +302,47 @@ impl Runtime {
 
     // ---- processes --------------------------------------------------------------------------------------------------------
 
-    fn spawn(&mut self, m: &Manifest, dir: &Path, rev: u64, proc_tx: &UnboundedSender<ProcMsg>) -> Result<Proc, String> {
+    fn spawn(&mut self, id: &str, entry: &Path, dir: &Path, rev: u64, proc_tx: &UnboundedSender<ProcMsg>) -> Result<Proc, String> {
         // The child gets a clean environment: on purpose, so BUZZ_PRIVATE_KEY / BUZZ_AUTH_TAG in buzzr's own environment
         // cannot leak into a plugin. Only what a program needs to run is passed on.
-        let mut cmd = Command::new(&m.entry[0]);
+        // The entry is run through its own shebang, so the only thing buzzr decides is which file that is. Canonicalise
+        // it: the child is started after buzzr changes into the plugin folder, so a relative path would land elsewhere.
+        let entry = std::fs::canonicalize(entry).unwrap_or_else(|_| entry.to_path_buf());
+        let mut cmd = Command::new(&entry);
         cmd.kill_on_drop(true)
-            .args(&m.entry[1..])
             .current_dir(dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(self.log_file(&m.id))
+            .stderr(self.log_file(id))
             .env_clear();
         for key in ["PATH", "HOME", "LANG", "LC_ALL", "TZ"] {
             if let Ok(v) = std::env::var(key) {
                 cmd.env(key, v);
             }
         }
-        cmd.env("BUZZR_PLUGIN_ID", &m.id);
+        cmd.env("BUZZR_PLUGIN_ID", id);
         cmd.env("BUZZR_PLUGIN_DIR", dir);
         if let Some(dir) = self.root.parent() {
             cmd.env("BUZZR_CONFIG_DIR", dir);
         }
         cmd.env("TMPDIR", std::env::temp_dir());
-        let mut child = cmd.spawn().map_err(|e| format!("could not start {:?}: {e}", m.entry[0]))?;
+        let mut child = cmd.spawn().map_err(|e| format!("could not start {}: {e}", entry.display()))?;
         let stdout = child.stdout.take().ok_or("no stdout")?;
         let stdin = child.stdin.take().ok_or("no stdin")?;
         let (line_tx, line_rx) = mpsc::unbounded_channel::<String>();
         tokio::spawn(write_stdin(stdin, line_rx));
-        let plugin = m.id.clone();
+        let plugin = id.to_owned();
         let tx = proc_tx.clone();
         tokio::spawn(async move { read_stdout(stdout, plugin, rev, tx).await });
         let _ = line_tx.send(
-            ToPlugin::Hello { protocol: proto::PROTOCOL, api_version: proto::API_VERSION, host: concat!("buzzr/", env!("CARGO_PKG_VERSION")), plugin: &m.id }
-                .line(),
+            ToPlugin::Hello { protocol: proto::PROTOCOL, api_version: proto::API_VERSION, host: concat!("buzzr/", env!("CARGO_PKG_VERSION")), plugin: id }.line(),
         );
-        self.log(&m.id, &format!("started revision {rev}: {:?}", m.entry));
+        self.log(id, &format!("started revision {rev}: {}", entry.display()));
         Ok(Proc { rev, child, stdin: line_tx, started: Instant::now() })
     }
 
     fn stop(&mut self, id: &str) {
+        self.ticks.remove(id);
         for proc in [self.running.remove(id), self.pending.remove(id)].into_iter().flatten() {
             let mut proc = proc;
             let _ = proc.stdin.send(ToPlugin::Bye.line());
@@ -372,7 +392,7 @@ impl Runtime {
             }
         };
         match parsed {
-            FromPlugin::Ready { contributions } => {
+            FromPlugin::Ready { declaration, contributions } => {
                 let Some(proc) = self.pending.remove(plugin).filter(|p| p.rev == rev) else {
                     self.log(plugin, "ready for a revision that is no longer pending");
                     return;
@@ -382,18 +402,24 @@ impl Runtime {
                     let _ = old.child.start_kill();
                     self.log(plugin, "replaced the previous revision");
                 }
+                let name = if declaration.name.is_empty() { plugin.to_owned() } else { declaration.name.clone() };
                 if let Some(info) = self.plugins.get_mut(plugin) {
                     info.state = PluginState::Running;
                     info.detail.clear();
                     info.commands = contributions.commands.len();
+                    // What the plugin declared about itself in its own code, kept for `/plugins` and the permission checks.
+                    info.name = name.clone();
+                    info.permissions = declaration.permissions.clone();
+                    info.tick_ms = declaration.tick_ms;
                 }
-                let name = self.plugins.get(plugin).and_then(|i| i.manifest.as_ref()).map(|m| m.name.clone()).unwrap_or_else(|| plugin.into());
                 self.emit(PluginEvent::Ready { id: plugin.to_owned(), name, contributions });
                 if let Some(snapshot) = &self.last_snapshot {
                     self.seq += 1;
                     let _ = proc.stdin.send(ToPlugin::Snapshot { seq: self.seq, projection: snapshot }.line());
                 }
                 self.running.insert(plugin.to_owned(), proc);
+                // The first heartbeat comes one interval after `ready`, not the moment the plugin loaded.
+                self.ticks.insert(plugin.to_owned(), Instant::now());
                 self.publish();
             }
             other => {
@@ -404,6 +430,7 @@ impl Runtime {
                 }
                 match other {
                     FromPlugin::Status { segments } => self.emit(PluginEvent::Status { id: plugin.to_owned(), segments }),
+                    FromPlugin::Pane(pane) => self.emit(PluginEvent::Pane { id: plugin.to_owned(), pane }),
                     FromPlugin::Panel(panel) => self.emit(PluginEvent::Panel { plugin: plugin.to_owned(), panel }),
                     FromPlugin::Flash { text } => self.emit(PluginEvent::Flash { text }),
                     FromPlugin::Draft { text } => self.emit(PluginEvent::Draft { plugin: plugin.to_owned(), text }),
@@ -430,6 +457,7 @@ impl Runtime {
         if let Some(proc) = self.running.remove(plugin) {
             if proc.rev == rev {
                 gone = true;
+                self.ticks.remove(plugin);
                 if let Some(info) = self.plugins.get_mut(plugin) {
                     info.state = PluginState::Failed;
                     info.detail = why.clone();
@@ -452,7 +480,7 @@ impl Runtime {
             self.emit(PluginEvent::Flash { text: format!("plugin {plugin} tried to send in read-only mode") });
             return;
         }
-        let allowed = self.plugins.get(plugin).and_then(|i| i.manifest.as_ref()).map(|m| m.permissions.iter().any(|p| p == "messages:write")).unwrap_or(false);
+        let allowed = self.plugins.get(plugin).map(|i| i.permissions.iter().any(|p| p == "messages:write")).unwrap_or(false);
         if !allowed {
             self.emit(PluginEvent::Flash { text: format!("plugin {plugin} needs the messages:write permission to send") });
             return;
@@ -466,6 +494,35 @@ impl Runtime {
         }
         times.push(now);
         self.emit(PluginEvent::Send { plugin: plugin.to_owned(), channel, text });
+    }
+
+    // ---- heartbeats ------------------------------------------------------------------------------------------------------
+
+    /// A running plugin whose code set `tickMs` is sent a `tick` on that interval, no faster than `TICK_CHECK`. It is
+    /// how a pane that shows something time-based (a clock, a build) redraws without the plugin running its own timer.
+    fn send_ticks(&mut self) {
+        if self.running.is_empty() {
+            return;
+        }
+        let now = Instant::now();
+        let mut due: Vec<String> = Vec::new();
+        for id in self.running.keys() {
+            let every = self.plugins.get(id).map(|i| i.tick_ms).unwrap_or(0);
+            if every == 0 {
+                continue;
+            }
+            let last = *self.ticks.entry(id.clone()).or_insert(now);
+            if now.duration_since(last) >= Duration::from_millis(every) {
+                due.push(id.clone());
+            }
+        }
+        for id in due {
+            self.ticks.insert(id.clone(), now);
+            self.tick_seq += 1;
+            if let Some(proc) = self.running.get(&id) {
+                let _ = proc.stdin.send(ToPlugin::Tick { seq: self.tick_seq }.line());
+            }
+        }
     }
 
     fn failed(&mut self, id: &str, why: String, flash: bool) {
@@ -523,10 +580,10 @@ impl Runtime {
             .iter()
             .map(|(id, info)| PluginMeta {
                 id: id.clone(),
-                name: info.manifest.as_ref().map(|m| m.name.clone()).unwrap_or_else(|| id.clone()),
+                name: if info.name.is_empty() { id.clone() } else { info.name.clone() },
                 state: info.state,
                 detail: info.detail.clone(),
-                permissions: info.manifest.as_ref().map(|m| m.permissions.clone()).unwrap_or_default(),
+                permissions: info.permissions.clone(),
                 commands: info.commands,
             })
             .collect();
@@ -601,15 +658,33 @@ mod tests {
         std::env::temp_dir().join(format!("buzzr-test-{name}-{}", uuid::Uuid::new_v4()))
     }
 
-    fn install(root: &Path, id: &str, script: &str, permissions: &str) {
+    /// Install a plugin folder the way one ships now: a single executable entry file and nothing else.
+    fn install(root: &Path, id: &str, script: &str) {
         let dir = root.join(id);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("plugin.sh"), script).unwrap();
-        std::fs::write(
-            dir.join("plugin.json"),
-            format!(r#"{{"id":"{id}","name":"{id}","apiVersion":1,"entry":["sh","plugin.sh"],"permissions":[{permissions}]}}"#),
-        )
-        .unwrap();
+        let path = dir.join("main.sh");
+        std::fs::write(&path, script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    /// Copy a plugin folder out of `examples/plugins`, entry file and all (`fs::copy` keeps the executable bit).
+    fn install_example(root: &Path, id: &str) -> PathBuf {
+        let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/plugins").join(id);
+        let dst = root.join(id);
+        std::fs::create_dir_all(&dst).unwrap();
+        for entry in std::fs::read_dir(&src).unwrap().flatten() {
+            std::fs::copy(entry.path(), dst.join(entry.file_name())).unwrap();
+        }
+        dst
+    }
+
+    /// Is a program on `PATH`? The TypeScript example needs a JS runtime, which a build host may not have.
+    fn on_path(program: &str) -> bool {
+        std::env::var_os("PATH").map(|paths| std::env::split_paths(&paths).any(|dir| dir.join(program).is_file())).unwrap_or(false)
     }
 
     async fn next_plugin(rx: &mut UnboundedReceiver<AppEvent>) -> PluginEvent {
@@ -626,7 +701,7 @@ mod tests {
     const ECHO: &str = r#"#!/bin/sh
 while IFS= read -r line; do
   case "$line" in
-    *'"type":"hello"'*) printf '%s\n' '{"type":"ready","contributions":{"commands":[{"id":"hi","title":"Say hi"}],"status":[{"text":"up","tone":"ok"}]}}' ;;
+    *'"type":"hello"'*) printf '%s\n' '{"type":"ready","name":"Echo","contributions":{"commands":[{"id":"hi","title":"Say hi"}],"status":[{"text":"up","tone":"ok"}]}}' ;;
     *'"type":"invoke"'*) printf '%s\n' '{"type":"panel","id":"hi","title":"Hello","rows":[{"text":"from the plugin","action":"ok"}]}' ;;
   esac
 done
@@ -634,9 +709,9 @@ done
 
     #[tokio::test]
     #[cfg(unix)]
-    async fn a_plugin_says_ready_answers_a_command_and_is_stopped() {
+    async fn a_plugin_declares_itself_in_code_says_ready_answers_a_command_and_is_stopped() {
         let root = temp("plugin");
-        install(&root, "echo", ECHO, "");
+        install(&root, "echo", ECHO);
         let (tx, mut rx) = mpsc::unbounded_channel();
         let host = Host::start(root.clone(), root.join("logs"), tx, false);
         host.snapshot(Projection { me: "me".into(), connection: "live".into(), view: "channel".into(), ..Projection::default() });
@@ -644,8 +719,9 @@ done
         // Discovery publishes the "starting" state before the child can say ready, so skip Meta here.
         loop {
             match next_plugin(&mut rx).await {
-                PluginEvent::Ready { id, contributions, .. } => {
-                    assert_eq!(id, "echo");
+                PluginEvent::Ready { id, name, contributions } => {
+                    assert_eq!(id, "echo", "the id is always the folder name");
+                    assert_eq!(name, "Echo", "the name comes from the plugin's own `ready`, not from a file");
                     assert_eq!(contributions.status[0].text, "up");
                     assert_eq!(contributions.commands[0].id, "hi");
                     break;
@@ -670,11 +746,47 @@ done
         std::fs::remove_dir_all(root).ok();
     }
 
+    const TICKER: &str = r#"#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    *'"type":"hello"'*) printf '%s\n' '{"type":"ready","name":"Ticker","tickMs":250,"contributions":{"pane":{"title":"Clock","rows":[{"text":"one","tone":"accent"}]}}}' ;;
+    *'"type":"tick"'*) printf '%s\n' '{"type":"pane","title":"Clock","rows":[{"text":"two","tone":"accent"}]}' ;;
+  esac
+done
+"#;
+
+    /// A plugin may ask for a heartbeat in its own code; it then gets a `tick` and can replace its pane from it.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn a_plugin_that_asks_for_a_heartbeat_in_its_code_gets_ticks_and_can_refresh_its_pane() {
+        let root = temp("ticker");
+        install(&root, "ticker", TICKER);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let host = Host::start(root.clone(), root.join("logs"), tx, false);
+
+        loop {
+            if let PluginEvent::Ready { contributions, .. } = next_plugin(&mut rx).await {
+                let pane = contributions.pane.expect("the ticker declared a pane");
+                assert_eq!(pane.rows[0].text, "one");
+                break;
+            }
+        }
+        loop {
+            if let PluginEvent::Pane { id, pane: Some(pane) } = next_plugin(&mut rx).await {
+                assert_eq!(id, "ticker");
+                assert_eq!(pane.rows[0].text, "two", "the heartbeat reached the plugin");
+                break;
+            }
+        }
+        host.shutdown();
+        std::fs::remove_dir_all(root).ok();
+    }
+
     #[tokio::test]
     #[cfg(unix)]
     async fn a_plugin_is_reloaded_when_its_files_change_and_a_broken_one_keeps_the_old() {
         let root = temp("reload");
-        install(&root, "echo", ECHO, "");
+        install(&root, "echo", ECHO);
         let (tx, mut rx) = mpsc::unbounded_channel();
         let host = Host::start(root.clone(), root.join("logs"), tx, false);
         let mut seen = 0;
@@ -684,7 +796,7 @@ done
             }
         }
         std::thread::sleep(Duration::from_millis(50));
-        std::fs::write(root.join("echo/plugin.sh"), ECHO.replace("\"up\"", "\"up again\"")).unwrap();
+        std::fs::write(root.join("echo/main.sh"), ECHO.replace("\"up\"", "\"up again\"")).unwrap();
 
         let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
         let mut reloaded = false;
@@ -700,11 +812,49 @@ done
         std::fs::remove_dir_all(root).ok();
     }
 
+    /// The demo in `examples/plugins/clock`, built on the TypeScript SDK: it declares a pane and refreshes it from the
+    /// heartbeat it asked for in code. Needs a JS runtime on `PATH`, which a build host may not have.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn the_clock_example_declares_a_pane_and_refreshes_it_on_the_heartbeat() {
+        if !on_path("node") {
+            eprintln!("skipping: examples/plugins/clock needs node on PATH");
+            return;
+        }
+        let root = temp("clock");
+        install_example(&root, "clock");
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let host = Host::start(root.clone(), root.join("logs"), tx, false);
+
+        loop {
+            if let PluginEvent::Ready { id, name, contributions } = next_plugin(&mut rx).await {
+                assert_eq!(id, "clock");
+                assert_eq!(name, "Clock");
+                let pane = contributions.pane.expect("the clock declares a pane");
+                assert_eq!(pane.title, "Clock");
+                assert_eq!(pane.rows.len(), 5, "the time is five rows of block digits");
+                let top = &pane.rows[0].text;
+                assert!(top.contains('█'), "the digits are drawn with block characters: {top:?}");
+                assert!(top.chars().count() <= 28, "and fit the channel column: {top:?}");
+                break;
+            }
+        }
+        loop {
+            if let PluginEvent::Pane { id, pane: Some(pane) } = next_plugin(&mut rx).await {
+                assert_eq!(id, "clock");
+                assert_eq!(pane.rows.len(), 5, "the heartbeat redrew the clock");
+                break;
+            }
+        }
+        host.shutdown();
+        std::fs::remove_dir_all(root).ok();
+    }
+
     #[tokio::test]
     #[cfg(unix)]
     async fn a_plugin_that_exits_is_reported_as_gone() {
         let root = temp("crash");
-        install(&root, "crash", "#!/bin/sh\nread line\nprintf '%s\\n' '{\"type\":\"ready\",\"contributions\":{}}'\nexit 3\n", "");
+        install(&root, "crash", "#!/bin/sh\nread line\nprintf '%s\\n' '{\"type\":\"ready\",\"contributions\":{}}'\nexit 3\n");
         let (tx, mut rx) = mpsc::unbounded_channel();
         let host = Host::start(root.clone(), root.join("logs"), tx, false);
         let mut ready = false;
@@ -725,26 +875,38 @@ done
         std::fs::remove_dir_all(root).ok();
     }
 
+    /// A folder that cannot be loaded is still listed, named after the folder, and says why in its own row.
     #[tokio::test]
     #[cfg(unix)]
-    async fn a_broken_manifest_is_shown_in_the_plugin_list() {
+    async fn a_folder_that_would_not_load_is_shown_in_the_plugin_list() {
         let root = temp("broken");
-        std::fs::create_dir_all(root.join("broken")).unwrap();
-        std::fs::write(root.join("broken/plugin.json"), r#"{"id":"broken","name":"Broken","apiVersion":99,"entry":["sh"]}"#).unwrap();
+        // No entry file at all: the folder is not a plugin.
+        std::fs::create_dir_all(root.join("empty")).unwrap();
+        // A folder name that could reach a path or a JSON key: refused before anything runs.
+        std::fs::create_dir_all(root.join("Bad Name")).unwrap();
+
         let (tx, mut rx) = mpsc::unbounded_channel();
         let host = Host::start(root.clone(), root.join("logs"), tx, false);
-        let mut found = false;
-        for _ in 0..3 {
+        let mut seen = 0;
+        for _ in 0..4 {
             if let PluginEvent::Meta(meta) = next_plugin(&mut rx).await {
-                if let Some(m) = meta.iter().find(|m| m.id == "broken") {
+                if let Some(m) = meta.iter().find(|m| m.id == "empty") {
                     assert_eq!(m.state, PluginState::Failed);
-                    assert!(m.detail.contains("not supported"), "{:?}", m.detail);
-                    found = true;
+                    assert_eq!(m.name, "empty", "a folder that never said its name is named after the folder");
+                    assert!(m.detail.contains("no entry file"), "{:?}", m.detail);
+                    seen += 1;
+                }
+                if let Some(m) = meta.iter().find(|m| m.id == "Bad Name") {
+                    assert_eq!(m.state, PluginState::Failed);
+                    assert!(m.detail.contains("lowercase"), "{:?}", m.detail);
+                    seen += 1;
+                }
+                if seen == 2 {
                     break;
                 }
             }
         }
-        assert!(found, "the broken plugin was not reported");
+        assert_eq!(seen, 2, "both broken folders were reported");
         host.shutdown();
         std::fs::remove_dir_all(root).ok();
     }
@@ -760,12 +922,7 @@ done
     #[cfg(unix)]
     async fn the_example_plugin_works_with_the_host() {
         let root = temp("example");
-        let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/plugins/hello");
-        let dst = root.join("hello");
-        std::fs::create_dir_all(&dst).unwrap();
-        for file in ["plugin.json", "main.sh"] {
-            std::fs::copy(src.join(file), dst.join(file)).unwrap();
-        }
+        install_example(&root, "hello");
         let (tx, mut rx) = mpsc::unbounded_channel();
         let host = Host::start(root.clone(), root.join("logs"), tx, false);
         host.snapshot(Projection { me: "me".into(), connection: "live".into(), view: "channel".into(), ..Projection::default() });
