@@ -201,6 +201,22 @@ pub fn create(paths: &Paths, name: &str, instructions: &str) -> Result<Agent, St
     commit(paths, &pending)
 }
 
+/// Delete an agent's record — its identity, and the only copy of its key — from `agents.json`, returning it as it was.
+///
+/// The folder the agent worked in is left alone: deleting an agent in Buzz deletes its key from the device and leaves
+/// its working directory (it may hold the agent's own work). A pubkey that is not in the file is refused, and a file
+/// that cannot be read is not written over, so nothing else in it is lost.
+pub fn remove(paths: &Paths, pubkey: &str) -> Result<Agent, String> {
+    let mut file = read(&paths.agents())?;
+    let Some(at) = file.agents.iter().position(|r| r.pubkey == pubkey) else {
+        return Err(format!("{pubkey} is not an agent on this device"));
+    };
+    let gone = file.agents.remove(at).agent();
+    let doc = Zeroizing::new(serde_json::to_string_pretty(&file).expect("a json value serialises") + "\n");
+    config::write_private(&paths.agents(), &doc).map_err(|e| format!("could not write {}: {e}", paths.agents().display()))?;
+    Ok(gone)
+}
+
 /// The agent's own key, read back from the record file — the only place it is kept. Used to sign the agent's own
 /// events (its kind-0 profile), which are the agent's, not the person's.
 pub fn keys_of(path: &Path, pubkey: &str) -> Result<Keys, String> {
@@ -396,6 +412,36 @@ mod tests {
         assert_eq!(b.workspace, a.workspace.replace("scout", "scout-2"), "a taken folder gets a suffix");
         assert!(create(&paths, "Scout", "").unwrap_err().contains("already exists"));
         assert_eq!(load(&paths.agents()).len(), 2);
+        std::fs::remove_dir_all(paths.dir()).unwrap();
+    }
+
+    #[test]
+    fn removing_an_agent_drops_its_record_and_keeps_the_others() {
+        let paths = temp_paths();
+        let a = create(&paths, "Scout", "watch the repo").unwrap();
+        let b = create(&paths, "Ranger", "watch the other repo").unwrap();
+        // the record that was removed is returned as it was, and it is gone from the file
+        let gone = remove(&paths, &a.pubkey).unwrap();
+        assert_eq!(gone, a, "the agent that was removed is returned");
+        assert_eq!(load(&paths.agents()), vec![b.clone()], "the other agent is left alone");
+        assert_eq!(mode(&paths.agents()), 0o600, "the record file stays private");
+        // the folder is left alone: it may hold the agent's own work
+        assert!(Path::new(&gone.workspace).is_dir(), "its working directory is kept");
+        // a pubkey that is not an agent here is refused, and the file is not touched
+        let err = remove(&paths, &"00".repeat(32)).unwrap_err();
+        assert!(err.contains("not an agent"), "{err}");
+        assert_eq!(load(&paths.agents()), vec![b], "nothing else was dropped");
+        std::fs::remove_dir_all(paths.dir()).unwrap();
+    }
+
+    #[test]
+    fn removing_from_a_damaged_record_file_writes_nothing() {
+        let paths = temp_paths();
+        std::fs::create_dir_all(paths.dir()).unwrap();
+        std::fs::write(paths.agents(), "not json").unwrap();
+        let err = remove(&paths, &"aa".repeat(32)).unwrap_err();
+        assert!(err.contains("not readable JSON"), "{err}");
+        assert_eq!(std::fs::read_to_string(paths.agents()).unwrap(), "not json", "the file is left alone");
         std::fs::remove_dir_all(paths.dir()).unwrap();
     }
 

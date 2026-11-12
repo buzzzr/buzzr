@@ -1,9 +1,9 @@
 //! The wire between buzzr and a plugin process: one JSON object per line, both ways.
 //!
 //! Host to plugin: `hello`, `snapshot`, `tick`, `invoke`, `panel_action`, `prompt_answer`, `agents`, `harness_offer`,
-//! `created`, `bye`.
+//! `created`, `deleted`, `bye`.
 //! Plugin to host: `ready`, `status`, `pane`, `panel`, `flash`, `draft`, `send`, `prompt`, `list_agents`, `probe_harness`,
-//! `create_agent`, `log`.
+//! `create_agent`, `delete_agent`, `log`.
 //! Unknown message types and unknown fields are ignored (and logged), so a newer plugin can talk to an older buzzr; a
 //! plugin that cannot speak the `apiVersion` in `hello` refuses it and exits instead.
 
@@ -46,6 +46,14 @@ pub enum ToPlugin<'a> {
         id: &'a str,
         #[serde(skip_serializing_if = "Option::is_none")]
         agent: Option<&'a crate::plugin::CreatedAgent>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<&'a str>,
+    },
+    /// The answer to the plugin's `delete_agent`: the name of the agent that was deleted (`name`), or why not (`error`).
+    Deleted {
+        id: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        name: Option<&'a str>,
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<&'a str>,
     },
@@ -93,6 +101,8 @@ pub enum FromPlugin {
     ProbeHarness { id: String, harness: String, model: Option<String> },
     /// Ask buzzr to make and publish a local agent; the answer comes back as `created` with this `id`.
     CreateAgent { id: String, name: String, instructions: String, harness: String, model: String, effort: String },
+    /// Ask buzzr to delete the local agent `pubkey`; the answer comes back as `deleted` with this `id`.
+    DeleteAgent { id: String, pubkey: String },
     Log { level: String, text: String },
 }
 
@@ -197,6 +207,16 @@ pub fn parse(line: &str) -> Result<Option<FromPlugin>, String> {
             level: clean_line(field("level").and_then(Value::as_str).unwrap_or("info")),
             text: clean_line(field("text").and_then(Value::as_str).unwrap_or_default()),
         },
+        "delete_agent" => {
+            let id = clean_line(field("id").and_then(Value::as_str).unwrap_or_default());
+            if id.is_empty() {
+                return Err("a delete_agent needs an id".into());
+            }
+            FromPlugin::DeleteAgent {
+                id,
+                pubkey: clean_line(field("pubkey").and_then(Value::as_str).unwrap_or_default()),
+            }
+        }
         _ => return Ok(None),
     };
     Ok(Some(msg))
@@ -394,5 +414,23 @@ mod tests {
         assert!(line.contains(r#""type":"harness_offer""#) && line.contains(r#""offer":{"models""#), "{line}");
         let line = ToPlugin::HarnessOffer { id: "offer", offer: None, error: Some("claude-agent-acp is not installed") }.line();
         assert!(line.contains(r#""error":"claude-agent-acp is not installed""#) && !line.contains(r#""offer":"#), "{line}");
+    }
+
+    #[test]
+    fn a_delete_agent_carries_the_pubkey_and_its_answer_the_name() {
+        let Some(FromPlugin::DeleteAgent { id, pubkey }) =
+            parse("{\"type\":\"delete_agent\",\"id\":\"delete\",\"pubkey\":\"00ff\\u001b[31m\"}").unwrap()
+        else {
+            panic!("not a delete")
+        };
+        assert_eq!(id, "delete");
+        assert_eq!(pubkey, "00ff[31m", "control characters never survive");
+        // a delete with no id cannot be answered, so it is refused
+        assert!(parse(r#"{"type":"delete_agent","pubkey":"ab"}"#).is_err(), "a delete needs an id");
+        // the answer carries the name of the agent that was deleted, or why it was not
+        let line = ToPlugin::Deleted { id: "delete", name: Some("Scout"), error: None }.line();
+        assert!(line.contains(r#""type":"deleted""#) && line.contains(r#""name":"Scout""#), "{line}");
+        let line = ToPlugin::Deleted { id: "delete", name: None, error: Some("the relay returned 500") }.line();
+        assert!(line.contains(r#""error":"the relay returned 500""#) && !line.contains(r#""name":"#), "{line}");
     }
 }

@@ -2747,6 +2747,56 @@ fn the_answer_to_a_creation_lands_in_the_list_and_is_reported() {
 }
 
 #[test]
+fn an_agent_is_deleted_from_the_panel_after_a_confirmation() {
+    let mut app = agent_app();
+    let scout = agent("Scout");
+    app.seed_agents(vec![scout.clone()]);
+    app.command("agents", "");
+    // each agent has a row that offers to delete it; walking to it and pressing Enter asks for a confirmation first
+    let action = format!("delete:{}", scout.pubkey);
+    let at = app.panel.as_ref().unwrap().rows.iter().position(|r| r.action.as_deref() == Some(action.as_str())).expect("a delete row");
+    for _ in 0..at {
+        press(&mut app, KeyCode::Down);
+    }
+    let cmds = press(&mut app, KeyCode::Enter);
+    assert!(cmds.is_empty(), "opening the confirmation sends nothing: {cmds:?}");
+    assert_eq!(app.panel.as_ref().unwrap().title, "delete Scout");
+    // the confirmation's first row is the deletion itself
+    assert_eq!(press(&mut app, KeyCode::Enter), vec![Cmd::DeleteAgent { pubkey: scout.pubkey.clone() }]);
+    // the answer drops it from the list here and says so, and the refreshed list comes up
+    app.handle(AppEvent::AgentDeleted(Ok(scout.clone())));
+    assert!(app.agents.is_empty(), "the deleted agent is out of the list");
+    assert!(app.flash_text().unwrap().contains("Scout deleted"), "{:?}", app.flash_text());
+
+    // a relay that refused to take it off left it in place: the failure is said, and it stays in the list
+    app.seed_agents(vec![scout.clone()]);
+    app.handle(AppEvent::AgentDeleted(Err("the relay returned 500".into())));
+    assert_eq!(app.agents.len(), 1, "a refused deletion deletes nothing");
+    assert!(app.flash_text().unwrap().contains("could not delete"), "{:?}", app.flash_text());
+}
+
+#[test]
+fn deleting_an_agent_is_refused_in_read_only_and_only_one_at_a_time() {
+    let mut app = agent_app();
+    let scout = agent("Scout");
+    app.seed_agents(vec![scout.clone()]);
+    let ask = |app: &mut App| app.handle(AppEvent::Plugin(PluginEvent::DeleteAgent { plugin: "agents".into(), id: "delete".into(), pubkey: scout.pubkey.clone() }));
+    // read-only refuses it the same way every other write is refused
+    app.read_only = true;
+    assert!(ask(&mut app).is_empty());
+    assert!(app.flash_text().unwrap().contains("read-only"), "{:?}", app.flash_text());
+    // writable, the first ask goes to the host; a second while it is in flight is refused, not queued
+    app.read_only = false;
+    assert_eq!(ask(&mut app), vec![Cmd::DeleteAgent { pubkey: scout.pubkey.clone() }]);
+    assert!(ask(&mut app).is_empty(), "a second deletion while one is in flight is refused");
+    assert!(app.flash_text().unwrap().contains("already being deleted"), "{:?}", app.flash_text());
+    // and the answer clears the way for the next one
+    app.handle(AppEvent::AgentDeleted(Ok(scout.clone())));
+    app.seed_agents(vec![scout.clone()]);
+    assert_eq!(ask(&mut app), vec![Cmd::DeleteAgent { pubkey: scout.pubkey.clone() }]);
+}
+
+#[test]
 fn read_only_still_lists_agents_and_refuses_to_make_one() {
     let mut app = agent_app();
     app.read_only = true;

@@ -310,6 +310,10 @@ pub enum Cmd {
     /// `harness` and its `model`/`effort` (either may be empty), then publish it to the relay (the agent's own profile
     /// and this identity's listing of it).
     CreateAgent { name: String, instructions: String, harness: String, model: String, effort: String },
+    /// Delete an agent: take it off the relay (its own kind-0 profile and this identity's kind-30177 listing of it)
+    /// and then delete its key and record from `agents.json` (the loop owns the file). The relay comes first, so a
+    /// relay that refuses it leaves the agent in place, listed and running.
+    DeleteAgent { pubkey: String },
     /// Ask a harness what it offers for a new agent — its models, and a model's thinking levels. The answer comes back
     /// as `AppEvent::HarnessOffer`; the plugin that asked is answered with it. Runs off the loop: a harness that will
     /// not answer is waited on, never the event loop.
@@ -351,6 +355,9 @@ pub enum AppEvent {
     Unread { channel: String, count: u32 },
     /// The answer to `Cmd::CreateAgent`: the agent that was made, or why it was not (including a relay that refused it).
     AgentCreated(Result<crate::agents::Agent, String>),
+    /// The answer to `Cmd::DeleteAgent`: the agent that was deleted, or why it was not (including a relay that refused
+    /// to take it off, which leaves it in place).
+    AgentDeleted(Result<crate::agents::Agent, String>),
     /// The answer to `Cmd::ProbeHarness`: what the harness offers for a new agent, or why it could not be asked (it is
     /// not installed, or it did not answer).
     HarnessOffer(Result<crate::plugin::HarnessOffer, String>),
@@ -485,6 +492,8 @@ pub struct App {
     pub prompt: Option<PromptState>,
     /// The plugin waiting on a `Cmd::CreateAgent` result, and the id it will be answered with.
     pending_create: Option<(String, String)>,
+    /// The plugin waiting on a `Cmd::DeleteAgent` result, and the id it will be answered with.
+    pending_delete: Option<(String, String)>,
     /// The plugin waiting on a `Cmd::ProbeHarness` result, and the id it will be answered with.
     pending_probe: Option<(String, String)>,
     /// When each compiled-in plugin last got a heartbeat, and when each last sent (the same limits the host applies to
@@ -594,6 +603,7 @@ impl App {
             internal_declared: BTreeMap::new(),
             prompt: None,
             pending_create: None,
+            pending_delete: None,
             pending_probe: None,
             plugin_ticks: HashMap::new(),
             plugin_sends: HashMap::new(),
@@ -1679,6 +1689,27 @@ impl App {
                         Some((plugin, id)) => self.plugin_input(&plugin, PluginInput::Created { id, result: Err(e) }),
                         None => {
                             self.flash(format!("could not create the agent: {e}"));
+                            Vec::new()
+                        }
+                    },
+                }
+            }
+            AppEvent::AgentDeleted(result) => {
+                // The host took the agent off the relay and deleted it here (or could not — a relay that refused it
+                // leaves nothing deleted). The plugin that asked owns the flow and the words, so the result goes back
+                // to it as `PluginInput::Deleted`; the agent is also dropped from the list kept here.
+                match result {
+                    Ok(agent) => {
+                        self.agents.retain(|a| a.pubkey != agent.pubkey);
+                        match self.pending_delete.take() {
+                            Some((plugin, id)) => self.plugin_input(&plugin, PluginInput::Deleted { id, result: Ok(agent.name) }),
+                            None => Vec::new(),
+                        }
+                    }
+                    Err(e) => match self.pending_delete.take() {
+                        Some((plugin, id)) => self.plugin_input(&plugin, PluginInput::Deleted { id, result: Err(e) }),
+                        None => {
+                            self.flash(format!("could not delete the agent: {e}"));
                             Vec::new()
                         }
                     },
@@ -3765,6 +3796,7 @@ fn plugin_cmd(plugin: &str, input: PluginInput) -> Option<PluginCmd> {
         PluginInput::Prompt { id, text } => PluginCmd::PromptAnswer { plugin, id, text },
         PluginInput::Agents { id, agents } => PluginCmd::Agents { plugin, id, agents },
         PluginInput::Created { id, result } => PluginCmd::Created { plugin, id, result },
+        PluginInput::Deleted { id, result } => PluginCmd::Deleted { plugin, id, result },
         PluginInput::HarnessOffer { id, result } => PluginCmd::HarnessOffer { plugin, id, result },
         PluginInput::Snapshot(_) | PluginInput::Tick => return None,
     })
@@ -3926,6 +3958,25 @@ impl App {
                 // The result comes back as `AppEvent::AgentCreated`; the plugin that asked is answered with it.
                 self.pending_create = Some((plugin, id));
                 vec![Cmd::CreateAgent { name, instructions, harness, model, effort }]
+            }
+            PluginEvent::DeleteAgent { plugin, id, pubkey } => {
+                if self.read_only {
+                    self.flash("read-only mode: nothing is written");
+                    return Vec::new();
+                }
+                if !self.plugin_may(&plugin, plugin::AGENTS_WRITE) {
+                    self.flash(format!("{} is not allowed to delete agents", self.plugin_name(&plugin)));
+                    return Vec::new();
+                }
+                // One deletion at a time, like a creation: a second while one is in flight is refused rather than
+                // letting its answer clobber the first.
+                if self.pending_delete.is_some() {
+                    self.flash(format!("{} asked to delete an agent, but one is already being deleted", self.plugin_name(&plugin)));
+                    return Vec::new();
+                }
+                // The result comes back as `AppEvent::AgentDeleted`; the plugin that asked is answered with it.
+                self.pending_delete = Some((plugin, id));
+                vec![Cmd::DeleteAgent { pubkey }]
             }
             PluginEvent::Gone { id, why } => {
                 self.plugins.remove(&id);
