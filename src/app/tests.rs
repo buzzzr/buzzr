@@ -454,7 +454,7 @@ fn the_draft_written_to_disk_is_in_the_box_when_its_channel_opens_again() {
 }
 
 #[test]
-fn a_thread_shows_its_root_as_one_header_line_and_indents_the_replies() {
+fn a_thread_pins_its_root_as_a_header_and_indents_the_replies_under_it() {
     let mut app = App::new(ME.into(), false, chrono_tz::UTC);
     app.view_h = 10;
     app.areas = Areas { channels: Rect::new(0, 1, 20, 20), msgs: Rect::new(20, 1, 80, 10), input: Rect::new(20, 12, 80, 3) };
@@ -467,25 +467,33 @@ fn a_thread_shows_its_root_as_one_header_line_and_indents_the_replies() {
     assert!(app.in_thread());
     app.handle(AppEvent::Thread { channel: "c1".into(), root: "m000".into(), result: Ok(vec![reply("t1", 3000, "alice", "m000"), reply("t2", 3001, ME, "m000")]) });
     app.layout(78);
-    assert_eq!(app.shown_ids(), ["m000", "t1", "t2"]);
+    assert_eq!(app.shown_ids(), ["m000", "t1", "t2"], "the thread still counts its root first");
 
+    // The root is not a row in the feed: it is the one-line header the pane pins above the scrolling replies, so it stays
+    // on screen while they move (see `thread_header`).
     let (_, layout) = app.layout_ref().unwrap();
-    assert_eq!(layout.items[0].lines.len(), 1, "the root is a one-line header, not a row in the feed");
-    let header: String = layout.items[0].lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
-    assert!(header.contains("a first line"), "the header previews the root: {header:?}");
-    assert!(header.ends_with('…'), "and says there is more of it: {header:?}");
-    assert!(!header.contains("second line"), "the rest of the root is left out of the header: {header:?}");
+    assert_eq!(layout.items.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["t1", "t2"], "only the replies are rows");
+    let header = app.thread_header(78).expect("a thread with its root loaded has a pinned header");
+    assert_eq!(header.lines.len(), 1, "the root is a one-line header, not a row in the feed");
+    let text: String = header.lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+    assert!(text.contains("a first line"), "the header previews the root: {text:?}");
+    assert!(text.ends_with('…'), "and says there is more of it: {text:?}");
+    assert!(!text.contains("second line"), "the rest of the root is left out of the header: {text:?}");
 
-    for item in &layout.items[1..] {
+    // The thread opens at the bottom, on its newest reply, as a channel does; with everything on screen nothing scrolls,
+    // and the pinned root stays above the replies.
+    assert_eq!((selected(&app), app.state.scroll), ("t2".to_string(), 0));
+
+    for item in &layout.items {
         for line in &item.lines {
             let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
             assert!(text.starts_with("  "), "every reply line is indented under the root: {text:?}");
         }
     }
-    // the header is still message #1, so the numbers a reply names (`/r N`) are the ones on screen
-    assert_eq!(layout.items[1].id, "t1");
+    // the pinned root is still message #1, so the numbers a reply names (`/r N`) are the ones on screen
     assert_eq!(app.message_number(1).map(|m| m.id), Some("m000".into()));
     assert_eq!(app.message_number(2).map(|m| m.id), Some("t1".into()));
+    assert_eq!(app.message_number(3).map(|m| m.id), Some("t2".into()));
 }
 
 /// A `kind:39005` thread summary, the way the relay serves it with a channel window: `count` replies, the last one at `at`.
@@ -534,22 +542,24 @@ fn right_arrow_opens_the_thread_of_the_selected_message() {
 }
 
 #[test]
-fn left_arrow_in_a_thread_goes_to_the_root_and_then_out_to_the_channel() {
-    let mut app = app_on(vec![msg("m000", 1000, BOB, "the root", &[]), summary("m000", 2, 3000)]);
-    press(&mut app, KeyCode::Right);
+fn left_arrow_in_a_thread_leaves_for_the_timeline_on_the_message_it_hangs_off() {
+    // Two top-level messages; the older one carries a thread. The cursor starts on the newest row.
+    let mut app = app_on(vec![msg("m000", 1000, BOB, "the root", &[]), msg("m001", 1500, BOB, "a later message", &[]), summary("m000", 2, 3000)]);
+    assert_eq!(selected(&app), "m001");
+    press(&mut app, KeyCode::Up); // onto the thread's root
+    assert_eq!(selected(&app), "m000");
+    let cmds = press(&mut app, KeyCode::Right);
+    assert!(app.in_thread(), "Right opens the thread: {cmds:?}");
     app.handle(AppEvent::Thread { channel: "c1".into(), root: "m000".into(), result: Ok(vec![reply("t1", 3000, "alice", "m000"), reply("t2", 3001, "carol", "m000")]) });
     app.layout(78);
-    // the thread opens on its first row; Down walks into the replies
-    press(&mut app, KeyCode::Down);
-    assert_eq!(selected(&app), "t1", "a reply is selected");
+    assert_eq!(selected(&app), "t2", "the thread opens at the bottom, on its newest reply");
 
+    // Left does not walk up to the root and stop there — the root is the pinned header, not a row — it leaves the thread
+    // in one go, and the cursor lands back on the message the thread hangs off.
     press(&mut app, KeyCode::Left);
-    assert!(app.in_thread(), "Left from a reply stays in the thread");
-    assert_eq!(selected(&app), "m000", "and lands on the message it answers");
-
-    press(&mut app, KeyCode::Left);
-    assert!(!app.in_thread(), "Left again, on the root, leaves the thread");
+    assert!(!app.in_thread(), "Left from a reply leaves the thread");
     assert_eq!(app.view_key(), Some(("c1".to_string(), None)));
+    assert_eq!(selected(&app), "m000", "and the cursor is back on the message the thread hangs off");
 }
 
 #[test]

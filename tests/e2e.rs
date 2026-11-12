@@ -22,9 +22,10 @@ use std::time::{Duration, Instant};
 /// The pane the app thinks it is drawing into, and the size the screenshots use.
 const ROWS: u16 = 36;
 const COLS: u16 = 110;
-/// A pane short enough that a channel's history is taller than the message pane. The fake relay gives every
-/// channel a single message, so only in a short pane can the newest one fall out of view. Twelve rows leave a
-/// five-line pane, one line short of #general's seven-line thread (its root header, and two two-line replies).
+/// A pane short enough that a thread is taller than the message pane. The fake relay gives every channel a
+/// single message, so only in a short pane can the newest reply fall out of view. Twelve rows leave a
+/// five-line pane: the pinned root header on the first row, and four rows under it for #general's two
+/// two-line replies, whose six lines (each reply's two lines and its blank separator) do not all fit.
 const SHORT_ROWS: u16 = 12;
 /// Any fixed key: the fake relay accepts AUTH without checking it.
 const KEY: &str = "0505050505050505050505050505050505050505050505050505050505050505";
@@ -569,8 +570,8 @@ fn a_thread_reads_as_a_root_header_line_with_the_replies_indented_under_it() {
     }
 }
 
-/// With a message row selected, Right walks into its thread and Left walks back out, the up/down of the tree
-/// rather than of the list. A message with no replies has nothing under it, so there both keys do nothing.
+/// With a message row selected, Right walks into its thread and Left leaves it, the up/down of the tree rather
+/// than of the list. A message with no replies has nothing under it, so there both keys do nothing.
 #[test]
 fn the_arrow_keys_walk_into_a_thread_and_back_out_of_it() {
     let Some(relay) = relay_or_skip("the_arrow_keys_walk_...") else { return };
@@ -585,19 +586,32 @@ fn the_arrow_keys_walk_into_a_thread_and_back_out_of_it() {
     s.press("right");
     s.expect("the thread view", "› thread");
     s.expect("the first reply, which is only in the thread", "the sidebar keeps a fixed order");
+    // The thread opens at its bottom, on the newest reply. Its root is the header pinned to the top of the pane, so
+    // it is the pane's first row and not a row the cursor can move onto.
     let pane = messages_pane(&s.screen());
     let root_row = pane.first().cloned().unwrap_or_default();
-    assert!(root_row.contains("#1") && root_row.contains("hello from c-general"), "the thread holds its root: {root_row:?}");
+    assert!(
+        root_row.contains("#1") && root_row.contains("hello from c-general"),
+        "the pane pins its root as the first row, not a row in the feed: {root_row:?}"
+    );
+    let screen = s.until("the cursor on the newest reply", |sc| cursor_row(sc).is_some_and(|l| l.contains("#3")));
+    assert!(
+        messages_pane(&screen).iter().any(|l| l.contains("and Enter opens the thread")),
+        "the newest reply is the one the cursor is on. The pane is:\n{}",
+        messages_pane(&screen).join("\n")
+    );
 
-    // Home puts the cursor on the root; Down walks down into its replies.
-    s.press("home");
-    let screen = s.until("the cursor on the root", |sc| cursor_row(sc).is_some_and(|l| l.contains("#1")));
-    assert!(cursor_row(&screen).unwrap().contains("hello from c-general"), "the root is the message the thread is about");
-    s.press("down");
+    // Up walks up into the replies, and the pinned root stays the first row while the cursor moves under it.
+    s.press("up");
     let screen = s.until("the cursor on the first reply", |sc| cursor_row(sc).is_some_and(|l| l.contains("#2")));
     assert!(
         messages_pane(&screen).iter().any(|l| l.contains("the sidebar keeps a fixed order")),
-        "Down walks down to the first reply. The pane is:\n{}",
+        "Up walks up to the first reply. The pane is:\n{}",
+        messages_pane(&screen).join("\n")
+    );
+    assert!(
+        messages_pane(&screen).first().is_some_and(|l| l.contains("#1") && l.contains("hello from c-general")),
+        "the root stays pinned to the top. The pane is:\n{}",
         messages_pane(&screen).join("\n")
     );
 
@@ -611,18 +625,18 @@ fn the_arrow_keys_walk_into_a_thread_and_back_out_of_it() {
         messages_pane(&screen).join("\n")
     );
 
-    // Left goes back up to the root, still in the thread.
+    // Left leaves the thread in one go — it does not walk up to the root first, because the root is the pinned
+    // header rather than a row — and the cursor lands on the message the thread hangs off, back in the channel.
     s.press("left");
-    let screen = s.until("the cursor back on the root, still in the thread", |sc| {
-        header(sc).contains("› thread") && cursor_row(sc).is_some_and(|l| l.contains("#1"))
+    let screen = s.until("the channel again, on the message the thread hangs off", |sc| {
+        header(sc).contains("#general") && !header(sc).contains("› thread") && cursor_row(sc).is_some_and(|l| l.contains("#1"))
     });
-    assert!(header(&screen).contains("› thread"), "Left from a reply stays in the thread: {:?}", header(&screen));
-
-    // Left again, on the root, leaves the thread for the channel, the way Esc does.
-    s.press("left");
-    let screen = s.until("the header to go back to the channel", |sc| header(sc).contains("#general") && !header(sc).contains("› thread"));
-    let h = header(&screen);
-    assert!(h.contains("#general"), "back in the channel: {h:?}");
+    assert!(header(&screen).contains("#general"), "Left leaves the thread for the channel: {:?}", header(&screen));
+    assert!(
+        messages_pane(&screen).iter().any(|l| l.contains("hello from c-general")),
+        "and the cursor is back on the message the thread hangs off. The pane is:\n{}",
+        messages_pane(&screen).join("\n")
+    );
     s.expect("the thread summary again", "2 replies");
 }
 
@@ -917,21 +931,36 @@ fn a_reacts_to_the_selected_message_from_the_keyboard() {
 }
 
 #[test]
-fn the_pane_flags_the_newest_message_only_while_it_is_off_screen() {
+fn the_pane_flags_the_newest_reply_only_while_it_is_off_screen() {
     let Some(relay) = relay_or_skip("the_pane_flags_the_newest_...") else { return };
-    // In a pane short enough to be taller than the thread, the marker follows what is on screen rather than
-    // where the cursor is. #general carries the relay's only multi-message list: a message and two replies.
+    // In a pane shorter than the thread, the marker follows what is on screen rather than where the cursor is, and
+    // the root stays pinned above it. #general carries the relay's only multi-message list: a message and two replies.
     let s = Session::start_short(&relay);
     s.press_all(&["down", "down", "enter"]);
     s.expect("the general channel", "hello from c-general");
     s.expect("its thread summary", "2 replies");
     s.press("enter"); // open the thread: it starts at the bottom, on the newest reply
     s.expect("the thread view", "› thread");
-    s.expect_gone("any marker: the newest reply is on screen", "more below");
-    s.press("up"); // the cursor moves up, but the newest reply is still on screen
-    s.expect_gone("no marker while the newest reply is visible", "more below");
-    s.press("home"); // the newest reply is now far below the view
+    s.expect_gone("no marker while the newest reply is on screen", "more below");
+    // At the bottom of the thread the newest reply is on screen and the root is still the pane's first row: it is
+    // pinned, not a row that scrolls away with the replies.
+    let bottom = messages_pane(&s.screen());
+    assert!(
+        bottom.iter().any(|l| l.contains("and Enter opens the thread")),
+        "the newest reply is on screen at the bottom. The pane is:\n{}",
+        bottom.join("\n")
+    );
+    assert!(
+        bottom.first().is_some_and(|l| l.contains("#1") && l.contains("hello from c-general")),
+        "the root stays pinned to the top even at the thread's bottom. The pane is:\n{}",
+        bottom.join("\n")
+    );
+    // Jump to the top of the thread: the newest reply is now below the view, so the pane says so.
+    s.press("home");
     s.expect("a marker once the newest reply is off screen", "more below");
+    // The pinned root header is the first row of the pane the whole time, even as the replies scroll under it.
+    let pinned = messages_pane(&s.screen()).first().cloned().unwrap_or_default();
+    assert!(pinned.contains("#1") && pinned.contains("hello from c-general"), "the root stays pinned at the top: {pinned:?}");
     s.press("end");
     s.expect_gone("the marker again once the newest reply is back on screen", "more below");
 }

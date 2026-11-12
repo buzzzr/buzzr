@@ -867,31 +867,20 @@ impl App {
         self.open_thread(root)
     }
 
-    /// Left arrow on the message the cursor is on: go up one level. A reply goes to its root — the thread view is flat, so
-    /// that is the message it answers — and the root itself leaves the thread for the channel it came from. The channel
+    /// Left arrow on a message: go up one level. Inside a thread that is the channel timeline it came from, and the
+    /// cursor lands back on the message the thread hangs off — the root is the pinned header at the top of the thread,
+    /// not a row to step onto, so Left leaves the thread in one go instead of first walking up to the root. The channel
     /// timeline is the top, so there the key does nothing.
-    fn leave_for_thread_root(&mut self) -> Vec<Cmd> {
+    fn leave_thread(&mut self) -> Vec<Cmd> {
         let View::Thread(root) = self.view.clone() else { return Vec::new() };
-        let view_h = self.view_h;
-        let Some(layout) = self.layout.take() else { return Vec::new() };
-        let (w, layout) = layout;
-        let selected = list::selected_index(&layout, &self.state).and_then(|i| layout.items.get(i)).map(|it| it.id.clone());
-        match (selected.as_deref(), layout.index_of(&root)) {
-            // on the root: out of the thread, the way Esc goes
-            (Some(id), _) if id == root => {
-                self.layout = Some((w, layout));
-                self.back_to_channel()
-            }
-            (_, Some(i)) => {
-                list::select(&layout, &mut self.state, view_h, i);
-                self.layout = Some((w, layout));
-                Vec::new()
-            }
-            _ => {
-                self.layout = Some((w, layout));
-                Vec::new()
-            }
+        let known = self.store().map(|s| s.msgs.contains_key(&root)).unwrap_or(false);
+        let cmds = self.back_to_channel();
+        // Keep the reader's place when the timeline knows the root: leaving the thread puts the cursor on what the thread
+        // was about, rather than wherever it happened to sit when the thread was opened.
+        if known {
+            self.pending_select = Some(root);
         }
+        cmds
     }
 
     // ---- layout ----------------------------------------------------------------------------------------------------------
@@ -1038,23 +1027,40 @@ impl App {
         Rendered { id: m.id.clone(), lines: vec![Line { spans: head, links: Vec::new() }] }
     }
 
+    /// The open thread's root, as the one-line header the pane pins to its top (`None` outside a thread, or for a thread
+    /// whose root was never loaded, when there is no header to hold). Drawing it above the scrolling list — rather than as
+    /// the list's first row — is what keeps it on screen while the replies move under it.
+    pub fn thread_header(&self, width: usize) -> Option<Rendered> {
+        let View::Thread(root) = &self.view else { return None };
+        let store = self.store()?;
+        let m = store.msgs.get(root)?;
+        Some(self.render_thread_root(store, m, 1, width))
+    }
+
     fn build_layout(&self, width: usize) -> Layout {
         let Some(store) = self.store() else { return Layout::default() };
         let first_unread = self.first_unread();
+        // In a thread the root is the pinned header (`thread_header`), not a row in the feed: leaving it out of the items
+        // is what lets the replies scroll under it. The number each row carries still comes from its place in `shown`, so a
+        // reply under a `#1` root is still `#2`, whether or not the root is drawn.
+        let root = match &self.view {
+            View::Thread(r) => Some(r.as_str()),
+            View::Channel => None,
+        };
         let items = self
             .shown()
             .iter()
             .enumerate()
+            .filter(|(_, m)| root != Some(m.id.as_str()))
             .map(|(i, m)| {
-                let mut rendered = match &self.view {
-                    // The thread's root is its header, and every reply is indented under it, so the list reads as a thread.
-                    View::Thread(root) if i == 0 && m.id == *root => self.render_thread_root(store, m, i + 1, width),
-                    View::Thread(_) => {
+                let mut rendered = match root {
+                    // every reply is indented two columns under the root, so the pane reads as a thread
+                    Some(_) => {
                         let mut r = self.render_message(store, m, i + 1, width.saturating_sub(THREAD_INDENT));
                         indent_lines(&mut r, THREAD_INDENT);
                         r
                     }
-                    _ => self.render_message(store, m, i + 1, width),
+                    None => self.render_message(store, m, i + 1, width),
                 };
                 if Some(i) == first_unread {
                     rendered.lines.insert(0, new_messages_divider(width));
@@ -1088,7 +1094,8 @@ impl App {
         match before {
             Some((anchor, was_empty)) if !fresh && !was_empty => list::restore(&new, &mut self.state, self.view_h, &anchor, true),
             _ => {
-                // first layout of a view: a saved position if there is one, else the bottom
+                // first layout of a view: a saved position if there is one, else the bottom — a thread too reads from its
+                // newest reply, with the pinned root header always above it (see `thread_header`).
                 if fresh && self.state.selected.is_some() && !new.items.is_empty() {
                     list::ensure_selected_visible(&new, &mut self.state, self.view_h);
                 } else {
@@ -1129,10 +1136,20 @@ impl App {
     }
 
     fn selected_msg(&self) -> Option<Ev> {
-        let (_, layout) = self.layout.as_ref()?;
-        let i = list::selected_index(layout, &self.state)?;
-        let id = &layout.items[i].id;
-        self.store()?.msgs.get(id).cloned()
+        if let Some((_, layout)) = self.layout.as_ref() {
+            if let Some(id) = list::selected_index(layout, &self.state).and_then(|i| layout.items.get(i)).map(|it| it.id.clone()) {
+                return self.store()?.msgs.get(&id).cloned();
+            }
+        }
+        // A thread with no replies on screen still has its root under the cursor: the pinned header is the one row a thread
+        // view always shows, so the keys that act on "the selected message" act on it.
+        self.thread_root_msg()
+    }
+
+    /// The message the open thread hangs off, if a thread is open: what the pinned header stands for.
+    fn thread_root_msg(&self) -> Option<Ev> {
+        let View::Thread(root) = &self.view else { return None };
+        self.store()?.msgs.get(root).cloned()
     }
 
     /// Whether the selected message is one the user may edit or delete.
@@ -1140,15 +1157,17 @@ impl App {
         self.selected_msg().map(|m| m.pubkey == self.me && m.kind == 9).unwrap_or(false)
     }
 
+    /// The number shown next to the selected message: its place in the list (`#N`), which in a thread counts the pinned
+    /// root as `#1` even though it is drawn apart from the rows.
     fn selected_number(&self) -> Option<usize> {
-        let (_, layout) = self.layout.as_ref()?;
-        list::selected_index(layout, &self.state).map(|i| i + 1)
+        let id = self.selected_msg()?.id;
+        self.shown().iter().position(|m| m.id == id).map(|p| p + 1)
     }
 
+    /// The message a `#N` number names, the way the numbers are drawn: a place in `shown` (the root of a thread is `#1`,
+    /// its replies `#2` on), so a thread's numbered rows match its pinned header even though the root is not a list row.
     fn message_number(&self, n: usize) -> Option<Ev> {
-        let (_, layout) = self.layout.as_ref()?;
-        let id = &layout.items.get(n.checked_sub(1)?)?.id;
-        self.store()?.msgs.get(id).cloned()
+        self.shown().into_iter().nth(n.checked_sub(1)?).cloned()
     }
 
     // ---- views -----------------------------------------------------------------------------------------------------------
@@ -2049,11 +2068,11 @@ impl App {
                 Vec::new()
             }
             KeyCode::Char('u') => self.mark_unread_from_selected(),
-            // Left and Right walk the thread: Right goes into the thread of the message under the cursor, Left goes up to
-            // its root and, from the root, out of the thread. Up and Down stay the cursor in the list (see `key_input` for
-            // the same keys in the composer).
+            // Left and Right walk the thread: Right goes into the thread of the message under the cursor, Left leaves a
+            // thread for the timeline it came from. Up and Down stay the cursor in the list (see `key_input` for the same
+            // keys in the composer).
             KeyCode::Right => self.enter_thread_of_selected(),
-            KeyCode::Left => self.leave_for_thread_root(),
+            KeyCode::Left => self.leave_thread(),
             KeyCode::Esc => {
                 // Escape backs out one level: leave a thread first, otherwise there is nothing left to close, so
                 // the keyboard goes back to the channel list.

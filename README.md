@@ -166,10 +166,12 @@ The full behaviour, for when the feature list above is not enough.
   Enter brings it back and opens it. The set lives in `~/.config/buzzr/archived.json` and survives a restart.
 - **A channel shows only its top-level messages**, as the Buzz app does, each with `💬 3 replies · last Thu 13:33` when it has a
   thread. The relay supplies the counts and says whether older messages exist.
-- **Threads:** Enter or a click opens one, Esc returns to the same place. The thread's root sits at the top as one header line —
-  its number, time and author, then the first line of what it says, cut with `…` when there is more — and the replies are indented
-  two columns under it, so the pane reads as a thread rather than a flat list. Opening a thread reads its replies, so a thread with
-  replies since you last looked at it shows `● 2 new` after its reply count. `r` replies in the thread of the selected message.
+- **Threads:** Enter or a click opens one, Esc returns to the same place. The thread's root is pinned to the top of the pane
+  as one header line — its number, time and author, then the first line of what it says, cut with `…` when there is more — so it
+  stays on screen while the replies scroll under it, indented two columns, and the pane reads as a thread rather than a flat
+  list. Opening a thread reads its replies, so a thread with replies since you last looked at it shows `● 2 new` after its reply
+  count. `r` replies in the thread of the selected message; `←` leaves the thread for the timeline it came from, putting the
+  cursor back on the message the thread hangs off.
 - **Live:** new messages, edits, deletions, reactions, reply counts and typing indicators arrive over a WebSocket as they happen
   (`Bob is typing…`), and the header shows the connection state. If the connection drops it reconnects and reloads.
 - **Reads like a chat:** Markdown (bold, italic, lists, code, quotes, headings), bare URLs become links, reactions are shown,
@@ -238,7 +240,7 @@ The full behaviour, for when the feature list above is not enough.
 | Up / Down | select a channel or message (Up at the top of a channel loads older messages) |
 | Up / Down, at the edges | nothing typed in the input, Up goes to the messages on the newest one; on the newest message, Down goes back to the input |
 | Enter | open the channel / open the thread (which reads it) / send |
-| ← / → | walk a thread: → opens the thread of the selected message, ← goes to the thread's root and then out of it (→ on a message with no replies does nothing) |
+| ← / → | walk a thread: → opens the thread of the selected message, ← leaves a thread for the timeline, on the message it hangs off (→ on a message with no replies does nothing) |
 | y, n, Esc (invite prompt) | invite the mentioned person and send, send without inviting them, keep the message in the input |
 | x | archive the channel under the bar (it leaves the list; Ctrl+F or `/search` finds it again) |
 | Enter, in a channel you are not in | join it (the composer is a `[ Join ]` button) |

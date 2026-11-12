@@ -66,16 +66,26 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let (msgs, typing, status, input) = (rr[0], rr[1], rr[2], rr[3]);
 
     app.areas.channels = chans;
-    app.areas.msgs = msgs;
     app.areas.input = input;
-    app.view_h = msgs.height as usize;
     let content_w = msgs.width.saturating_sub(2).max(10) as usize;
+    // In a thread the root is a one-line header pinned to the top of the pane: it holds its place while the replies scroll
+    // under it, so the scrolling list gets the pane minus that line. A click on the pinned line lands on nothing.
+    let thread_header = app.thread_header(content_w);
+    let list = match &thread_header {
+        Some(_) => Rect { y: msgs.y + 1, height: msgs.height.saturating_sub(1), ..msgs },
+        None => msgs,
+    };
+    app.areas.msgs = list;
+    app.view_h = list.height as usize;
     app.layout(content_w); // (re)build the layout for this width before reading it
 
     draw_header(f, app, header);
     draw_channels(f, app, chans);
     draw_plugin_panes(f, app, panes);
-    draw_messages(f, app, msgs);
+    if let Some(h) = &thread_header {
+        draw_thread_header(f, h, Rect { height: msgs.height.min(1), ..msgs });
+    }
+    draw_messages(f, app, list);
     draw_typing(f, app, typing);
     draw_status(f, app, status);
     draw_input(f, app, input, input_inner_w);
@@ -224,11 +234,28 @@ fn draw_plugin_panes(f: &mut Frame, app: &App, area: Rect) {
     }
 }
 
+/// The thread's root, pinned to the top line of the message pane: it stays put while the replies scroll under it, so the
+/// pane is never without the message the thread is about. It carries the same one-column gutter the message rows do.
+fn draw_thread_header(f: &mut Frame, header: &list::Rendered, area: Rect) {
+    let Some(line) = header.lines.first() else { return };
+    let mut spans = vec![Span::raw(" ")];
+    spans.extend(line.spans.iter().cloned());
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
 fn draw_messages(f: &mut Frame, app: &App, area: Rect) {
     let Some((_, layout)) = app.layout_ref() else { return };
     let view_h = area.height as usize;
     if layout.items.is_empty() {
-        let text = if app.channel().is_none() { "Pick a channel on the left." } else if app.store().map(|s| s.head_loaded).unwrap_or(false) { "No messages yet." } else { "Loading…" };
+        let text = if app.channel().is_none() {
+            "Pick a channel on the left."
+        } else if app.in_thread() {
+            "No replies yet."
+        } else if app.store().map(|s| s.head_loaded).unwrap_or(false) {
+            "No messages yet."
+        } else {
+            "Loading…"
+        };
         f.render_widget(Paragraph::new(Span::styled(text, dim())).alignment(Alignment::Center), Rect::new(area.x, area.y + area.height / 3, area.width, 1));
         return;
     }
@@ -552,7 +579,7 @@ pub const KEYS: &[(&str, &str)] = &[
     ("PgUp / PgDn, Home / End", "scroll, first, last"),
     ("Enter", "open the thread and read it (in a thread: reply)"),
     ("Right", "open the thread of the selected message (a message with no replies has none)"),
-    ("Left", "in a thread: to its root, and out of the thread from there"),
+    ("Left", "in a thread: out to the timeline, on the message the thread hangs off"),
     ("r", "reply in the thread of the selected message"),
     ("a", "react to the selected message: pick an emoji, or type to search one (Enter sends, Esc closes)"),
     ("c", "copy the selected message to the clipboard"),
@@ -621,10 +648,11 @@ pub const HELP: &[&str] = &[
     "Channels list the top-level messages only; replies live in their thread (Enter or a click opens it, and reads it).",
     "A message with replies shows how many, when the last one was, and `● N new` for replies since you last opened it.",
     "Esc returns you to the same place.",
-    "In a thread, its root is the one-line header at the top (number, time, author, then the first line of it, cut with `…` if there",
-    "is more) and every reply is indented two columns under it, so the pane reads as a thread.",
-    "With a message row selected, Right opens its thread (on a message with no replies there is nothing to open) and Left goes up to",
-    "that thread's root, then out of the thread; Esc does the same, wherever the cursor is.",
+    "In a thread, its root is a one-line header pinned to the top of the pane (the number, time and author, then the first",
+    "line of what it says, cut with `…` if there is more); it stays on screen while the replies scroll under it, indented two",
+    "columns, so the pane reads as a thread.",
+    "With a message row selected, Right opens its thread (on a message with no replies there is nothing to open) and Left leaves",
+    "the thread for the timeline it came from, landing the cursor on that message; Esc leaves the thread too, back where you were.",
     "",
     "Commands, typed in the input (N is the message number shown as #N):",
     "  /r N text   reply to message N        /t N   open the thread of message N",
@@ -1144,6 +1172,58 @@ mod tests {
         term.draw(|f| draw(f, &mut app)).unwrap();
         let s = screen(&term).join("\n");
         assert!(!s.contains("more below"), "back at the bottom the marker is gone\n{s}");
+    }
+
+    #[test]
+    fn a_thread_pins_its_root_header_while_the_replies_scroll_under_it() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        // A short terminal, so the thread's replies cannot all fit: the pinned header is what keeps the root on screen.
+        let mut term = Terminal::new(TestBackend::new(100, 12)).unwrap();
+        let mut app = App::new("me".into(), false, chrono_tz::UTC);
+        let chan = Channel { id: "c1".into(), name: "general".into(), about: String::new(), created_at: 1, section: crate::model::Section::Channels, label: "general".into(), is_private: false };
+        let _: Vec<Cmd> = app.handle(AppEvent::Channels(Ok(vec![chan])));
+        let mut root = ev("root", 1000, "the root message", &[]);
+        root.pubkey = "bob".into();
+        let replies: Vec<_> = (1..=9)
+            .map(|n| {
+                let mut r = ev(&format!("t{n}"), 1000 + n as u64, &format!("reply number {n}"), &[&["e", "root", "", "reply"]]);
+                r.pubkey = "bob".into();
+                r
+            })
+            .collect();
+        app.handle(AppEvent::Names(Ok([("bob".to_string(), "Bob".to_string())].into())));
+        app.handle(AppEvent::Window { channel: "c1".into(), cursor: None, result: Ok(Window { events: vec![root], has_more: false, next_cursor: None }) });
+        app.handle(AppEvent::Live(Live::Up));
+        app.handle(AppEvent::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))); // the channel list -> the messages
+        term.draw(|f| draw(f, &mut app)).unwrap(); // a first draw, so the app knows the pane it is drawing into
+        app.handle(AppEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))); // open the thread of the only row
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        app.handle(AppEvent::Thread { channel: "c1".into(), root: "root".into(), result: Ok(replies) });
+        term.draw(|f| draw(f, &mut app)).unwrap();
+
+        // What is drawn right of the sidebar divider, row by row; the screen's own header line has no divider, so it is blank.
+        let pane = |rows: &[String]| rows.iter().map(|l| l.split_once('│').map(|(_, r)| r.trim_end().to_string()).unwrap_or_default()).collect::<Vec<_>>();
+        let root_header = |rows: &[String]| rows[1].contains("#1") && rows[1].contains("the root message");
+
+        // A thread opens at its bottom, on the newest reply; the pinned root header stays above it.
+        let bottom = pane(&screen(&term));
+        assert!(root_header(&bottom), "the pinned root header is the first pane row: {:?}", bottom[1]);
+        assert!(bottom.iter().any(|l| l.contains("reply number 9")), "the newest reply is on screen at the bottom:\n{}", bottom.join("\n"));
+
+        // Jump to the top: the replies move, the pinned root header does not.
+        app.handle(AppEvent::Key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE)));
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let top = pane(&screen(&term));
+        assert!(root_header(&top), "the pinned header stays put while the replies scroll: {:?}", top[1]);
+        assert!(top.iter().any(|l| l.contains("reply number 1")), "the earliest reply is on screen at the top:\n{}", top.join("\n"));
+        assert!(!top.join("\n").contains("reply number 9"), "the newest reply has scrolled under the header:\n{}", top.join("\n"));
+
+        // Back to the bottom: the header is still the first pane row, and the newest reply is back on screen.
+        app.handle(AppEvent::Key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE)));
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let bottom = pane(&screen(&term));
+        assert!(root_header(&bottom), "the pinned header is still the first pane row: {:?}", bottom[1]);
+        assert!(bottom.iter().any(|l| l.contains("reply number 9")), "the newest reply is back on screen:\n{}", bottom.join("\n"));
     }
 
     #[test]
