@@ -21,6 +21,12 @@
 //! and the mention after it opens a fresh one. Opening a session and running a turn both block on the harness, so
 //! they run on the blocking pool, never on the event loop (principle 6 in `AGENTS.md`).
 //!
+//! **A thread mention comes with its thread.** A mention that is a reply is answered with the thread's earlier messages
+//! in the prompt — the root and the replies before it, oldest first, the newest twelve — so the agent reads the
+//! conversation it is joining instead of one message out of it. The Buzz app hands its agents the same window (its
+//! harness prompts keep the newest twelve context messages); a harness here speaks plain ACP with no tool to read the
+//! channel with, so the window travels as text in the prompt.
+//!
 //! **The answer is the harness's own text**, posted as the agent's message: a reply in the mention's thread when the
 //! mention was one, and a top-level message in the channel when it was not, naming the person who asked so they are
 //! told. The Buzz desktop hands its harness a tool to publish with; a harness here speaks plain ACP with no tool
@@ -50,6 +56,10 @@ const SCAN: Duration = Duration::from_secs(2);
 /// newest limit and the older mentions in it are left behind when the cursor moves past them: a mention is one person
 /// naming one agent, and a flood of them at one agent is bounded rather than worked through as a backlog.
 const LIMIT: u32 = 50;
+/// The most earlier messages of a thread shown with a mention, newest kept: the same window the Buzz app hands its agents.
+const THREAD_CONTEXT_LIMIT: usize = 12;
+/// The most characters of each earlier message shown.
+const CONTEXT_CONTENT_LIMIT: usize = 4000;
 
 /// Run the local agents: one task that watches `agents.json` and starts a watcher per agent, and one watcher per
 /// agent that answers its mentions. Every answer is signed with the agent's own key and goes to the relay the person
@@ -133,7 +143,7 @@ async fn answer(relay: &Relay, harness: &'static Harness, agent: &agents::Agent,
     let Some(channel) = mention.channel().map(str::to_owned) else {
         return Err("a mention that names no channel cannot be answered".to_owned());
     };
-    let prompt = mention_prompt(mention);
+    let prompt = mention_prompt(mention, &thread_context(relay, &channel, mention).await);
     // The harness is started and driven here, on the blocking pool: both block on the process, and the loop must not
     // (principle 6 in `AGENTS.md`). The session is moved across and comes back; a session that could not answer an
     // error is dropped rather than kept, so the next mention opens a fresh harness.
@@ -189,15 +199,65 @@ fn answerable(e: &Ev, pubkey: &str) -> bool {
         && e.tags.iter().any(|t| t.first().map(String::as_str) == Some("p") && t.get(1).map(String::as_str) == Some(pubkey))
 }
 
-/// The prompt one mention turns into: who is asking, and what they said. A turn here has no tool to publish with — a
-/// harness speaks plain ACP, with no tool server — so the harness is told that the text it streams back is what goes
-/// to the channel, which is the one thing it cannot read anywhere else.
-fn mention_prompt(e: &Ev) -> String {
+/// The earlier messages of a mention's thread, oldest first, as they go into the prompt: empty for a mention that is not
+/// a reply, and for a thread the relay will not answer (the mention is still answered, just without the context).
+async fn thread_context(relay: &Relay, channel: &str, mention: &Ev) -> Vec<Ev> {
+    let Some(root) = mention.root_hint() else {
+        return Vec::new();
+    };
+    match relay.thread(channel, root, relay::THREAD_LIMIT).await {
+        Ok(events) => earlier_in_thread(events, channel, mention),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// The thread's earlier messages from the events the relay answered: the root and the replies that came before the
+/// mention, in the channel, oldest first, the newest [`THREAD_CONTEXT_LIMIT`] kept. `relay::thread` also returns the
+/// reactions, edits and deletions of the thread; those are not messages and are left out.
+fn earlier_in_thread(events: Vec<Ev>, channel: &str, mention: &Ev) -> Vec<Ev> {
+    let mut earlier: Vec<Ev> = events
+        .into_iter()
+        .filter(|e| {
+            e.id != mention.id
+                && MESSAGE_KINDS.contains(&e.kind)
+                && e.channel() == Some(channel)
+                && e.created_at <= mention.created_at
+        })
+        .collect();
+    earlier.sort_by(|a, b| (a.created_at, &a.id).cmp(&(b.created_at, &b.id)));
+    let skip = earlier.len().saturating_sub(THREAD_CONTEXT_LIMIT);
+    earlier.split_off(skip)
+}
+
+/// The prompt one mention turns into: the earlier messages of its thread when it is a reply, then who is asking and what
+/// they said. A turn here has no tool to publish with — a harness speaks plain ACP, with no tool server — so the harness
+/// is told that the text it streams back is what goes to the channel, which is the one thing it cannot read anywhere
+/// else.
+fn mention_prompt(e: &Ev, earlier: &[Ev]) -> String {
     let who = relay::npub_of(&e.pubkey).unwrap_or_else(|| e.pubkey.clone());
-    format!(
-        "You were mentioned in a Buzz channel. Answer in your reply: the text you stream back is posted to the channel as your own message.\n\n{who} wrote:\n{}",
-        e.content.trim()
-    )
+    let scope = if e.root_hint().is_some() { "thread" } else { "channel" };
+    let mut prompt = format!(
+        "You were mentioned in a Buzz {scope}. Answer in your reply: the text you stream back is posted to the channel as your own message."
+    );
+    if !earlier.is_empty() {
+        prompt.push_str("\n\nEarlier messages in this thread, oldest first, so you can read the conversation you are joining:");
+        for message in earlier {
+            let author = relay::npub_of(&message.pubkey).unwrap_or_else(|| message.pubkey.clone());
+            prompt.push_str(&format!("\n\n{author} wrote:\n{}", clip(message.content.trim())));
+        }
+    }
+    prompt.push_str(&format!("\n\n{who} wrote:\n{}", e.content.trim()));
+    prompt
+}
+
+/// `text` cut to [`CONTEXT_CONTENT_LIMIT`] characters, at a character boundary: one long message in a thread must not
+/// crowd out the rest of the window.
+fn clip(text: &str) -> String {
+    if text.chars().count() <= CONTEXT_CONTENT_LIMIT {
+        return text.to_owned();
+    }
+    let cut: String = text.chars().take(CONTEXT_CONTENT_LIMIT).collect();
+    format!("{cut}…")
 }
 
 /// Tell the app what a turn came to: the status line says the agent answered, or why it could not.
@@ -252,10 +312,77 @@ mod tests {
         let who = Keys::generate();
         let pubkey = who.public_key().to_hex();
         let npub = relay::npub_of(&pubkey).unwrap();
-        let prompt = mention_prompt(&message("m1", 1000, &pubkey, "  @Scout what is new?  ", &[&["h", "c1"], &["p", &pubkey]]));
+        let prompt = mention_prompt(&message("m1", 1000, &pubkey, "  @Scout what is new?  ", &[&["h", "c1"], &["p", &pubkey]]), &[]);
         assert!(prompt.contains(&npub), "the person who asked is named: {prompt:?}");
         assert!(prompt.contains("@Scout what is new?"), "and so is what they said, trimmed: {prompt:?}");
         assert!(prompt.contains("posted to the channel as your own message"), "the turn says what happens to its answer: {prompt:?}");
         assert!(!prompt.contains("\"  @Scout"), "the message is trimmed: {prompt:?}");
+        assert!(prompt.contains("Buzz channel"), "a top-level mention is a channel mention: {prompt:?}");
+        assert!(!prompt.contains("Earlier messages in this thread"), "and has no thread to be shown: {prompt:?}");
+    }
+
+    #[test]
+    fn a_thread_mention_is_answered_with_the_threads_earlier_messages_oldest_first() {
+        let me = &"aa".repeat(32);
+        let other = &"bb".repeat(32);
+        let root = "cc".repeat(32);
+        let root_msg = message("r", 1000, other, "we are planning the release", &[&["h", "c1"]]);
+        let reply = message("p", 1500, other, "the date is settled", &[&["h", "c1"], &["e", &root, "", "reply"]]);
+        let mention = message("m", 2000, other, "@Scout what did we decide?", &[&["h", "c1"], &["e", &root, "", "reply"], &["p", me]]);
+        let earlier = earlier_in_thread(vec![root_msg, reply, mention.clone()], "c1", &mention);
+        let ids: Vec<&str> = earlier.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, ["r", "p"], "the thread's earlier messages, oldest first, the mention left out");
+        let prompt = mention_prompt(&mention, &earlier);
+        assert!(prompt.contains("Buzz thread"), "a reply is answered as a thread mention: {prompt:?}");
+        assert!(prompt.contains("Earlier messages in this thread"), "the context is framed: {prompt:?}");
+        let (first, second) = (prompt.find("we are planning the release"), prompt.find("the date is settled"));
+        assert!(first.is_some() && second.is_some(), "both earlier messages are shown: {prompt:?}");
+        assert!(first < second, "oldest first, the way the conversation happened: {prompt:?}");
+        assert!(prompt.contains("@Scout what did we decide?"), "the mention itself is still the ask: {prompt:?}");
+    }
+
+    #[test]
+    fn a_thread_context_is_only_the_messages_of_that_thread_before_the_mention() {
+        let me = &"aa".repeat(32);
+        let other = &"bb".repeat(32);
+        let root = "cc".repeat(32);
+        let mention = message("m", 2000, other, "@Scout?", &[&["h", "c1"], &["e", &root, "", "reply"], &["p", me]]);
+        let in_thread = message("a", 1000, other, "in the thread", &[&["h", "c1"], &["e", &root, "", "reply"]]);
+        let later = message("b", 3000, other, "after the mention", &[&["h", "c1"], &["e", &root, "", "reply"]]);
+        let elsewhere = message("c", 1100, other, "another channel", &[&["h", "c2"], &["e", &root, "", "reply"]]);
+        let mut reaction = message("d", 1200, other, "👍", &[&["h", "c1"], &["e", &root, "", "reply"]]);
+        reaction.kind = 7;
+        let mut edit = message("e", 1300, other, "fixed", &[&["h", "c1"], &["e", &root, "", "reply"]]);
+        edit.kind = 40003;
+        let mut deletion = message("f", 1400, other, "", &[&["h", "c1"], &["e", &root, "", "reply"]]);
+        deletion.kind = 5;
+        let earlier = earlier_in_thread(vec![in_thread, later, elsewhere, reaction, edit, deletion, mention.clone()], "c1", &mention);
+        let ids: Vec<&str> = earlier.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, ["a"], "only the messages of this thread that came before the mention: {ids:?}");
+    }
+
+    #[test]
+    fn only_the_newest_earlier_messages_are_kept() {
+        let other = &"bb".repeat(32);
+        let root = "cc".repeat(32);
+        let mut events: Vec<Ev> = (1..=15)
+            .map(|n| message(&format!("m{n}"), 1000 + n, other, "something", &[&["h", "c1"], &["e", &root, "", "reply"]]))
+            .collect();
+        let mention = message("ask", 9000, other, "@Scout?", &[&["h", "c1"], &["e", &root, "", "reply"]]);
+        events.push(mention.clone());
+        let earlier = earlier_in_thread(events, "c1", &mention);
+        let ids: Vec<&str> = earlier.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids.len(), THREAD_CONTEXT_LIMIT, "the window is bounded: {ids:?}");
+        assert_eq!(ids.first(), Some(&"m4"), "the oldest ones past the window are dropped: {ids:?}");
+        assert_eq!(ids.last(), Some(&"m15"), "the newest one is kept: {ids:?}");
+    }
+
+    #[test]
+    fn one_long_earlier_message_is_cut_to_the_context_limit() {
+        let long = "x".repeat(CONTEXT_CONTENT_LIMIT + 500);
+        let cut = clip(&long);
+        assert_eq!(cut.chars().count(), CONTEXT_CONTENT_LIMIT + 1, "the message is cut to the limit, with the marker");
+        assert!(cut.ends_with('…'), "and says it was cut: {cut:?}");
+        assert_eq!(clip("short"), "short", "a message under the limit is untouched");
     }
 }

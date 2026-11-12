@@ -71,7 +71,10 @@
   asked what it offers, and the relay asked to take the agent, before anything is written: a harness that will not answer, like an agent the
   relay will not take, stops the flow and makes nothing, and says why. The agent then **answers for itself**: buzzr runs its harness — a local
   Claude Code, driven over ACP, as the agent, with the agent's own key — for every message that names it, and posts what the harness answered
-  back into the channel it was mentioned in. A mention names an agent *in a channel*, so add the agent to the channel first (`invite <npub>`,
+  back into the channel it was mentioned in. A mention in a thread is answered with the thread in hand: the turn's prompt carries the
+  thread's earlier messages — the root and the replies before it, oldest first, the newest twelve — the same window the Buzz app gives
+  its agents, so the agent reads the conversation it is joining rather than one message out of it. A mention names an agent *in a
+  channel*, so add the agent to the channel first (`invite <npub>`,
   the npub the `agents` list shows) — then anything that mentions it, from any Buzz client, gets an answer. The list also offers to delete an
   agent: it takes the agent off the relay — its own profile and your listing of it — and then deletes its key and record, leaving the folder it
   worked in alone. The relay is asked first, so a relay that refuses it deletes nothing.

@@ -11,6 +11,9 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
   profile (signed with its own key) and your listing of it, both by NIP-09 — and deletes its key and record from `agents.json`, leaving the
   folder it worked in alone. The relay is asked first, so a relay that refuses it deletes nothing, and the agent stays listed and running.
   Plugins reach it through the new `delete_agent` binding (needs `agents:write`), answered with `deleted`.
+- A local agent mentioned in a **thread** is answered with the thread in hand: the turn's prompt carries the thread's earlier messages — the
+  root and the replies that came before the mention, oldest first, the newest twelve, each cut to 4000 characters — so the agent reads the
+  conversation it is joining instead of one message out of it, the same window the Buzz app gives its agents.
 
 ## [0.2.0-rc.3] - 2026-11-12
 
