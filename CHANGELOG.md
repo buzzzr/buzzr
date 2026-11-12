@@ -5,6 +5,13 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
 
 ## [Unreleased]
 
+### Added
+
+- An agent can be **deleted** from the `agents` list: a `delete <name>…` row asks to confirm, then takes the agent off the relay — its own
+  profile (signed with its own key) and your listing of it, both by NIP-09 — and deletes its key and record from `agents.json`, leaving the
+  folder it worked in alone. The relay is asked first, so a relay that refuses it deletes nothing, and the agent stays listed and running.
+  Plugins reach it through the new `delete_agent` binding (needs `agents:write`), answered with `deleted`.
+
 ## [0.2.0-rc.3] - 2026-11-12
 
 ### Added

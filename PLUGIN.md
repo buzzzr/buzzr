@@ -82,6 +82,8 @@ that cannot speak it should say why on the log and exit.
 {"type":"harness_offer","id":"offer","offer":{"models":[{"value":"sonnet","label":"Sonnet"}],"model":"sonnet","efforts":[{"value":"low","label":"low"}],"effort":"low"}}
 {"type":"harness_offer","id":"offer","error":"claude-agent-acp is not installed, or is not on PATH"}
 {"type":"created","id":"new","agent":{"name":"Scout","pubkey":"<hex>","npub":"npub1…"}}
+{"type":"deleted","id":"delete","name":"Scout"}
+{"type":"deleted","id":"delete","error":"the relay returned 500"}
 {"type":"bye"}
 ```
 
@@ -119,6 +121,7 @@ Only the rows on screen are included. The private key, the relay address, filter
 {"type":"probe_harness","id":"offer","harness":"claude-agent-acp"}
 {"type":"probe_harness","id":"levels","harness":"claude-agent-acp","model":"opus"}
 {"type":"create_agent","id":"new","name":"Scout","instructions":"watch the repo","harness":"claude-agent-acp","model":"opus","effort":"high"}
+{"type":"delete_agent","id":"delete","pubkey":"<hex>"}
 {"type":"log","level":"error","text":"something went wrong"}
 ```
 
@@ -224,6 +227,11 @@ keeps that copy byte-for-byte identical to `sdk/typescript/buzzr.ts`.
   refuses is not made at all, and the `error` says why. buzzr owns the key, the folder and the relay; the plugin never sees them. buzzr runs
   the agent it made, too: the **runner** answers the messages that mention it (see `ARCHITECTURE.md`), so a plugin that asks for an agent gets
   one that answers on its own, and never starts a process itself.
+- **`delete_agent`** (needs `agents:write`) asks buzzr to delete the local agent `pubkey` — take it off the relay (its own profile, signed with
+  its own key, and this identity's listing of it, both by NIP-09) and then delete its key and record here. It is refused under `--read-only`,
+  and the answer is a `deleted` message with the same `id`: the `name` of the agent that was deleted, or an `error`. The relay is asked
+  first, so a relay that refuses it deletes nothing — the agent stays listed and running. One deletion runs at a time, and the folder the
+  agent worked in is left alone. buzzr owns the key, the record file and the relay; the plugin never sees them.
 - The process runs with a **clean environment** (only `PATH`, `HOME`, `LANG`, `LC_ALL`, `TZ`, `TMPDIR` and the `BUZZR_PLUGIN_*`
   variables are passed on), so no key or relay credential in buzzr's environment can leak into a plugin. Its stderr is captured to
   `<config dir>/plugin-logs/<id>.log`; `log` with `level:"error"` also flashes.

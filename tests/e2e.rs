@@ -1085,6 +1085,52 @@ fn agents_are_listed_and_a_new_one_is_created_through_the_composer() {
     again.expect("its harness still named", "claude-agent-acp");
 }
 
+/// Deleting a local agent, through the real UI: the list offers a row that deletes each agent, which asks to confirm
+/// before anything happens; confirming takes the agent off the relay (its own profile and the owner's listing of it,
+/// both by NIP-09) and then deletes its record here. The flow reads and writes only the config directory and needs no
+/// harness, so this case runs on the fake on `PATH` only to make the agent in the first place.
+#[test]
+fn an_agent_is_deleted_from_the_panel_after_a_confirmation() {
+    let Some(relay) = relay_or_skip("an_agent_is_deleted_from_the_panel_...") else { return };
+    let mut s = session_with_plugins(&relay);
+    let config = s.config.clone();
+    s.press_all(&["tab", "tab"]);
+    // make one through the flow, the same steps the create case takes
+    run_in_palette(&s, "agents", "");
+    s.expect("the empty list", "No agents yet.");
+    s.press("end");
+    s.press("enter");
+    s.type_text("Scout");
+    s.press("enter");
+    s.type_text("watch the repo");
+    s.press("enter");
+    s.expect("the models panel", "new agent · model");
+    s.press("enter"); // take the model in force
+    s.press("enter"); // take the level in force, which makes it
+    s.expect("the confirmation", "Scout created");
+    s.expect("the list to come back", "new agent…");
+    // the list offers to delete it; Enter on that row asks to confirm first, and only a second Enter deletes
+    s.press_all(&["down", "down"]);
+    s.press("enter");
+    s.expect("the confirmation panel", "delete Scout");
+    s.expect("what the confirmation does", "take it off the relay and delete its key here");
+    s.press("enter");
+    s.expect("the deletion reported", "Scout deleted");
+    s.expect("the list without it", "No agents yet.");
+    s.press("esc");
+    // it is gone from disk: nothing lists it, and its key went with it
+    s.press("ctrl+q");
+    s.wait_exit(Duration::from_secs(10)).expect("buzzr should exit on Ctrl+Q");
+    let written = std::fs::read_to_string(config.join("agents.json")).unwrap_or_default();
+    assert!(!written.contains("Scout"), "the deleted agent is out of the record: {written}");
+    assert!(!written.contains("nsec1"), "and its key is gone with it: {written}");
+    // the relay took both NIP-09 deletions: the agent's own profile, and the owner's listing of it
+    let deletions = relay_query(&relay, r#"[{"kinds":[5]}]"#);
+    assert!(deletions.contains("\"kind\":5"), "a deletion reached the relay: {deletions}");
+    assert!(deletions.contains("30177:"), "the owner's listing was deleted by coordinate: {deletions}");
+    assert!(deletions.contains("0:"), "and so was the agent's own profile: {deletions}");
+}
+
 /// A message that names a local agent is answered by it. The agent an `agents create` makes is only an identity and a
 /// folder until something runs it: the **runner** (`src/runner.rs`, started with the app) watches `agents.json` and, for
 /// every message that carries the agent in a `p` tag, runs its harness over ACP and publishes what the harness answered
