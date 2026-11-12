@@ -111,6 +111,12 @@ fn at_mention(text_lower: &str, needle: &str) -> bool {
     false
 }
 
+/// A person named the way the UI writes one: a leading `@` (as in `@Alice`) is how somebody is addressed, not part of the
+/// name, so `dm @Alice` and `dm Alice` name the same person.
+fn person_name(who: &str) -> &str {
+    who.trim().trim_start_matches('@')
+}
+
 /// An open panel: rows and a cursor owned by the host, `Enter` sends the row's action to its plugin.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PanelState {
@@ -145,7 +151,9 @@ pub enum Row {
 /// that takes none) and the one line shown beside it. `command` is the source of truth for what a command does; this table
 /// only names them, and `every_command_the_palette_names_is_handled` keeps the two from drifting apart. A command whose
 /// argument is empty runs as soon as it is picked; otherwise the palette asks for the argument first, showing this text as
-/// the hint (`[all]` and `[private] …` mean the argument is optional — Enter with nothing typed runs it as it is).
+/// the hint (`[all]` and `[private] …` mean the argument is optional — Enter with nothing typed runs it as it is). The
+/// whole line can be typed at once instead (`dm @Alice`): the command at its head runs with the rest of the line as its
+/// argument, in one step.
 pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("archive", "", "archive this channel (search finds it again)"),
     ("c", "", "back to the channel"),
@@ -182,7 +190,8 @@ pub struct CommandRow {
 /// The `Ctrl+K` command palette. It is a modal with a query of its own, so it never touches the composer or its draft.
 #[derive(Debug, Default)]
 pub struct Palette {
-    /// What has been typed: the filter while the list is up, the argument while one is being given to a command.
+    /// What has been typed: the filter while the list is up, the argument while one is being given to a command, or a
+    /// whole line — a command and its argument (`dm @Alice`) — which runs in one step.
     pub query: Editor,
     /// The row under the cursor, an index into `command_rows`.
     pub cursor: usize,
@@ -2541,10 +2550,21 @@ impl App {
         }
     }
 
-    /// The rows the palette shows: the built-ins whose name starts with what has been typed, then the commands loaded
-    /// plugins added. A plugin names its own command and the argument hint it shows, the same way the built-in table does.
+    /// The head of the palette's query: the command word, up to the first space. Everything after that space is the
+    /// command's argument (`dm @Alice`), so the list is filtered on the word alone.
+    fn palette_word(&self) -> String {
+        let q = self.palette.query.text();
+        if let Some((word, _)) = q.split_once(char::is_whitespace) {
+            return word.to_owned();
+        }
+        q
+    }
+
+    /// The rows the palette shows: the built-ins whose name starts with the command word at the head of the query, then
+    /// the commands loaded plugins added. A plugin names its own command and the argument hint it shows, the same way the
+    /// built-in table does.
     pub fn command_rows(&self) -> Vec<CommandRow> {
-        let q = self.palette.query.text().to_lowercase();
+        let q = self.palette_word().to_lowercase();
         let mut rows: Vec<CommandRow> = COMMANDS
             .iter()
             .filter(|(name, _, _)| name.starts_with(&q))
@@ -2567,8 +2587,9 @@ impl App {
     }
 
     /// The keys the palette takes while it is up. Its query is a one-line editor: typing filters the list, or — in the
-    /// argument step — is the argument itself. Enter picks or runs, Esc steps back out of the argument step and then
-    /// closes the palette, and the arrows move the highlight rather than the query cursor.
+    /// argument step — is the argument itself, and a whole line typed at once (`dm @Alice`) runs on Enter as it stands.
+    /// Enter picks or runs, Esc steps back out of the argument step and then closes the palette, and the arrows move the
+    /// highlight rather than the query cursor.
     fn key_palette(&mut self, k: KeyEvent) -> Vec<Cmd> {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let alt = k.modifiers.contains(KeyModifiers::ALT);
@@ -2667,14 +2688,26 @@ impl App {
         self.palette.cursor = (self.palette.cursor as isize + delta).clamp(0, n as isize - 1) as usize;
     }
 
-    /// Enter in the palette. On the list it runs the command on the cursor row — or, when that command takes an argument,
-    /// asks for it first and clears the query for it. In the argument step it runs the command with what was typed, which
-    /// may be nothing for a command whose argument is optional. Nothing picked and nothing matching does nothing.
+    /// Enter in the palette. A query that already holds a whole command line — a command and its argument, `dm @Alice` —
+    /// runs as it stands, with no argument step. Otherwise it runs the command on the cursor row — or, when that command
+    /// takes an argument, asks for it first and clears the query for it. In the argument step it runs the command with
+    /// what was typed, which may be nothing for a command whose argument is optional. Nothing picked and nothing matching
+    /// does nothing.
     fn palette_run(&mut self) -> Vec<Cmd> {
         if let Some(arg) = self.palette.arg.clone() {
             let text = self.palette.query.text().trim().to_owned();
             self.close_palette();
             return self.command(&arg.command, &text);
+        }
+        // A space makes the query a whole line: the word before it has to name a command, and what follows is that
+        // command's argument. A bare word is still just a filter, and the row under the cursor is the one that runs.
+        if let Some((word, rest)) = self.palette.query.text().split_once(char::is_whitespace) {
+            let name = self.command_rows().into_iter().find(|r| r.name.to_lowercase() == word.to_lowercase()).map(|r| r.name);
+            if let Some(name) = name {
+                let arg = rest.trim().to_owned();
+                self.close_palette();
+                return self.command(&name, &arg);
+            }
         }
         let rows = self.command_rows();
         let Some(row) = rows.get(self.palette.cursor).cloned() else { return Vec::new() };
@@ -3274,6 +3307,7 @@ impl App {
     /// A name, or an npub/hex key, to the person it names: `Several` carries the question to ask back, and `Unknown` means
     /// nobody we have met has the name — the relay's directory is the next place to look (`ask_directory`).
     fn who_is(&self, who: &str) -> Who {
+        let who = person_name(who);
         if let Some(pk) = relay::as_pubkey(who) {
             return Who::One(pk);
         }
@@ -3291,7 +3325,7 @@ impl App {
     /// A name nothing local matches: ask the relay's directory who it is, and continue `then` with the answer
     /// (`Cmd::FindPeople`). The question replaces any earlier one — only the newest name is waited on.
     fn ask_directory(&mut self, who: &str, then: Then) -> Vec<Cmd> {
-        let who = who.trim().to_owned();
+        let who = person_name(who).to_owned();
         self.flash(format!("looking for {who}…"));
         self.lookup = Some(Lookup { who: who.clone(), then });
         vec![Cmd::FindPeople { query: who }]

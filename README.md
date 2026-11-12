@@ -50,7 +50,7 @@
 - **Write, edit, delete.** A multi-line input with bracketed paste and `@name` mentions. Edit or delete your own messages with `e` and `d`.
 - **Commands from the keyboard.** Ctrl+K opens a command palette over everything: type to narrow the commands to the ones whose
   name starts with what you typed, and Enter runs the one on the cursor. A command that takes an argument asks for it in a step of
-  its own. `/` is an ordinary character in the message box.
+  its own — or type the whole line at once (`dm @Alice`) and it runs as it stands. `/` is an ordinary character in the message box.
 - **Search everything.** Ctrl+F searches channel names, people and every message you can read, with full text from the relay. Enter on a
   person opens the DM you already have with them, or starts a new one.
 - **Create channels** with the `new` command.
@@ -268,14 +268,14 @@ The full behaviour, for when the feature list above is not enough.
 | r, c, u, e, d | reply in the thread, copy, mark unread, edit, delete the selected message (e and d: yours only) |
 | a | react to the selected message: pick an emoji, or type to search one (Enter sends, Esc closes) |
 | Enter, on the “new agent…” row of the `agents` list | make a new agent: a name, what it should do, and its model and thinking level (Esc cancels, Enter makes it) |
-| Ctrl+K | open the command palette: type to narrow the commands to the ones whose name starts with what you typed, Enter runs the one on the cursor (a command that takes an argument asks for it in a step of its own, Esc goes back out), Esc closes |
+| Ctrl+K | open the command palette: type to narrow the commands to the ones whose name starts with what you typed, Enter runs the one on the cursor (a command that takes an argument asks for it in a step of its own, Esc goes back out), or type the whole line at once (`dm @Alice`) and Enter runs it as it stands, Esc closes |
 | Ctrl+F | search channels, people and messages |
 | Esc | close the palette or a panel, cancel a reply, leave a thread, then step back to the channel list |
 | F1, F2 | keys, help |
 | Ctrl+R, Ctrl+O | reload, load older |
 | Ctrl+Q, Ctrl+C | quit |
 
-Commands run from the Ctrl+K command palette (N is the number shown as `#N`): `agents [create]`, `archive`, `c`, `copy N`, `delete N`, `dm NAME`, `edit N`, `help`, `invite NAME`, `join NAME`, `leave`, `more`, `new [private] name [about]`, `plugins`, `q`, `r N text`, `read [all]`, `refresh`, `search text`, `t N`, `update`, `whois NAME`. Type to narrow the list to the commands whose name starts with what you typed, the arrows move the cursor, and Enter runs the one on the cursor line; a command that takes an argument asks for it first (Enter with nothing typed runs the ones whose argument is optional). Plugin commands appear in the list too.
+Commands run from the Ctrl+K command palette (N is the number shown as `#N`): `agents [create]`, `archive`, `c`, `copy N`, `delete N`, `dm NAME`, `edit N`, `help`, `invite NAME`, `join NAME`, `leave`, `more`, `new [private] name [about]`, `plugins`, `q`, `r N text`, `read [all]`, `refresh`, `search text`, `t N`, `update`, `whois NAME`. Type to narrow the list to the commands whose name starts with what you typed, the arrows move the cursor, and Enter runs the one on the cursor line; a command that takes an argument asks for it first (Enter with nothing typed runs the ones whose argument is optional). The whole line can be typed at once instead — `dm @Alice` runs in a single step, and a leading `@` on a name is not part of it. Plugin commands appear in the list too.
 
 ## Clipboard
 
