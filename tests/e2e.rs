@@ -81,6 +81,29 @@ impl Drop for Relay {
     }
 }
 
+/// `POST /query` to the relay, returning the raw JSON body — a plain HTTP request, so the test reads what the relay
+/// actually holds rather than what buzzr's own client thinks it holds.
+fn relay_query(relay: &Relay, filters: &str) -> String {
+    let addr = relay.url.trim_start_matches("http://");
+    let mut stream = std::net::TcpStream::connect(addr).expect("could not reach the relay");
+    stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    let request = format!(
+        "POST /query HTTP/1.1\r\nhost: {addr}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{filters}",
+        filters.len()
+    );
+    stream.write_all(request.as_bytes()).expect("could not write to the relay");
+    let mut response = String::new();
+    stream.read_to_string(&mut response).expect("could not read the relay's answer");
+    response.split_once("\r\n\r\n").map(|(_, body)| body.to_owned()).unwrap_or(response)
+}
+
+/// The agent's pubkey out of its record file, as a `kind:0` filter needs it.
+fn agent_pubkey(record: &str) -> String {
+    const KEY: &str = "\"pubkey\": \"";
+    let start = record.find(KEY).expect("the record names the agent's key") + KEY.len();
+    record[start..start + 64].to_owned()
+}
+
 fn free_port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0").expect("no free port").local_addr().unwrap().port()
 }
@@ -973,6 +996,15 @@ fn agents_are_listed_and_a_new_one_is_created_through_the_composer() {
     assert!(written.contains("\"model\": \"opus\""), "the record keeps the model the flow picked: {written}");
     assert!(written.contains("\"effort\": \"low\""), "and the thinking level it picked: {written}");
     assert!(written.contains("nsec1"), "the agent keeps its own key in the file: {written}");
+    // The relay kept what buzzr published: the agent's own kind-0 profile (carrying the owner's attestation) and the
+    // owner's kind:30177 listing of it both come back out of a query. This needs a relay that keeps writes.
+    let agent = agent_pubkey(&written);
+    let profile = relay_query(&relay, &format!(r##"[{{"kinds":[0],"authors":["{agent}"]}}]"##));
+    assert!(profile.contains("Scout"), "the agent's own profile came back out of the relay: {profile}");
+    assert!(profile.contains("\"auth\""), "and it carries the owner's attestation tag: {profile}");
+    let listing = relay_query(&relay, &format!(r##"[{{"kinds":[30177],"#d":["{agent}"]}}]"##));
+    assert!(listing.contains("Scout"), "the owner's listing came back out of the relay: {listing}");
+    assert!(listing.contains("buzz.claude-code/claude-code"), "naming the agent type it runs: {listing}");
     drop(s); // the session takes its config directory with it
     std::fs::create_dir_all(&config).unwrap();
     std::fs::write(config.join("agents.json"), &written).unwrap();

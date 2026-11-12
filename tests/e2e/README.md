@@ -19,8 +19,10 @@ BUZZ_FAKE_RELAY_BIN=/path/to/buzz-fake-relay tests/e2e/run.sh   # reuse a relay 
 otherwise. That keeps `cargo test` fast and offline, and the suite opt-in.
 
 The relay must answer `GET /` (NIP-11), `POST /query` and `POST /events` — the plain-HTTP surface
-buzzr reads history and sends on. `run.sh` checks out the relay's `main`; set `BUZZ_FAKE_RELAY_REF`
-to try another branch, or `BUZZ_FAKE_RELAY_REPO` for a fork.
+buzzr reads history and sends on. A case that checks what buzzr *published* (the agents flow) also
+needs the relay to keep the events it is sent and serve them back from `POST /query`. `run.sh` checks
+out the relay's `main`; set `BUZZ_FAKE_RELAY_REF` to try another branch, or `BUZZ_FAKE_RELAY_REPO` for
+a fork.
 
 ## Every new feature adds a case
 
