@@ -2066,16 +2066,57 @@ fn a_changed_command_word_drops_the_highlight_back_to_the_first_row() {
 }
 
 #[test]
+fn esc_closes_the_palette_and_keeps_the_command_in_the_input() {
+    let mut app = at_input(3);
+    type_text(&mut app, "/inv");
+    assert!(app.palette_up(), "the palette is up over a command word");
+
+    assert!(press(&mut app, KeyCode::Esc).is_empty(), "Esc closes the list; nothing is sent or opened");
+    assert!(!app.palette_up(), "the palette is closed");
+    assert_eq!(app.focus, Focus::Input, "the keyboard stays in the composer");
+    assert_eq!(app.editor.text(), "/inv", "the half-written command stays in the input");
+
+    type_text(&mut app, "ite");
+    assert_eq!(app.editor.text(), "/invite");
+    assert!(app.palette_up(), "typing on makes it a new command word, so the list comes back");
+
+    press(&mut app, KeyCode::Esc);
+    assert_eq!(app.focus, Focus::Input, "the list closed again; the composer still has the keyboard");
+    press(&mut app, KeyCode::Esc);
+    assert_eq!(app.focus, Focus::Messages, "with the list already closed, Esc steps back to the messages");
+    assert_eq!(app.editor.text(), "/invite", "and the command is still in the input");
+}
+
+#[test]
+fn a_lone_slash_closed_with_esc_lists_again_after_the_next_one() {
+    let mut app = at_input(3);
+    type_text(&mut app, "/");
+    assert!(app.palette_up());
+    press(&mut app, KeyCode::Esc);
+    assert!(!app.palette_up(), "Esc closes the palette on a lone slash too");
+    // Enter settles what is typed (the empty command is reported as unknown) and clears the input, so the next `/`
+    // is a new command word rather than the one the palette was closed on.
+    press(&mut app, KeyCode::Enter);
+    assert!(app.editor.is_empty(), "the input is cleared, as a submitted command is");
+    type_text(&mut app, "/");
+    assert!(app.palette_up(), "a fresh slash lists the commands again");
+}
+
+#[test]
 fn the_palette_belongs_to_the_input_and_not_to_an_edit() {
     let mut app = at_input(3);
     type_text(&mut app, "/he");
     assert!(app.palette_up());
-    press(&mut app, KeyCode::Esc); // nothing to cancel: back to the messages
-    assert_eq!(app.focus, Focus::Messages);
-    assert!(!app.palette_up(), "the palette is shown only while the input has the keyboard");
-    press(&mut app, KeyCode::Tab);
+    press(&mut app, KeyCode::Esc); // the list closes, but the composer keeps the keyboard (see the Esc case above)
     assert_eq!(app.focus, Focus::Input);
-    assert!(app.palette_up(), "the draft is still a command word");
+    assert!(!app.palette_up());
+    press(&mut app, KeyCode::Tab); // with the palette down, Tab switches panes again
+    assert_eq!(app.focus, Focus::Channels);
+    assert!(!app.palette_up(), "the palette is shown only while the input has the keyboard");
+    press(&mut app, KeyCode::Tab); // channels -> messages
+    press(&mut app, KeyCode::Tab); // messages -> input
+    assert_eq!(app.focus, Focus::Input);
+    assert!(app.palette_up(), "the draft is still a command word, and the list is back with the keyboard");
 
     // while editing a message a leading slash is message text, not a command
     let mut app = at_input(3);

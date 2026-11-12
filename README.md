@@ -200,8 +200,9 @@ The full behaviour, for when the feature list above is not enough.
   loaded. Only names the profiles have given us can be recognised this way.
 - **Your typing shows:** others see `<your name> is typing…` while you write (once every three seconds; not for `/commands` or
   edits). `--no-typing` turns it off.
-- **Help on screen:** F1 lists the keys, F2 the commands. Esc closes a panel first, then cancels a reply, then leaves a thread;
-  after that it steps back a pane at a time — from the input to the message list, and from the message list to the channel list.
+- **Help on screen:** F1 lists the keys, F2 the commands. Esc closes the command palette first, then a panel, then cancels a reply,
+  then leaves a thread; after that it steps back a pane at a time — from the input to the message list, and from the message list
+  to the channel list.
 - **Plugins:** a plugin is a separate process (in any language) that adds `/commands`, a status item, header badges, per-channel and
   per-message marks, a pane under the channel list, and panels; buzzr hot-reloads it when its files change. A plugin is one folder
   with an executable entry file and **no manifest**: the folder name is its id, and it declares its own name, permissions and
@@ -230,9 +231,9 @@ The full behaviour, for when the feature list above is not enough.
 | Enter, in a channel you are not in | join it (the composer is a `[ Join ]` button) |
 | r, c, u, e, d | reply in the thread, copy, mark unread, edit, delete the selected message (e and d: yours only) |
 | a | react to the selected message: pick an emoji, or type to search one (Enter sends, Esc closes) |
-| / | start a `/command`: a palette lists the commands above the input and narrows as you type (Enter runs the one on the cursor, Tab completes it) |
+| / | start a `/command`: a palette lists the commands above the input and narrows as you type (Enter runs the one on the cursor, Tab completes it, Esc closes the list and keeps what was typed) |
 | Ctrl+F | search channels, people and messages |
-| Esc | close a panel, cancel a reply, leave a thread, then step back to the channel list |
+| Esc | close the palette or a panel, cancel a reply, leave a thread, then step back to the channel list |
 | F1, F2 | keys, help |
 | Ctrl+R, Ctrl+O | reload, load older |
 | Ctrl+Q, Ctrl+C | quit |

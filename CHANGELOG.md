@@ -25,6 +25,12 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
   `definePlugin({ name, permissions, tickMs, ready, onTick, onCommand, … })` call, with `status`, `pane`, `panel`, `flash`, `draft`,
   `send` and `log` on the handle it gives back. `examples/plugins/clock` is written with it.
 
+### Fixed
+
+- Esc while the slash-command palette was up moved the keyboard out of the composer and left the `/command` behind in the input.
+  It now closes just the palette and keeps the keyboard — and the half-written command — where they are, so typing can go on; the
+  list comes back with the next edit.
+
 ## [0.2.0-rc.2] - 2026-11-11
 
 ### Added

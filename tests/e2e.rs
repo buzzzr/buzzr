@@ -657,6 +657,27 @@ fn a_slash_opens_the_command_palette_and_enter_runs_the_command() {
     s.expect("the completed command to run", "Search · Enter opens");
 }
 
+/// Esc closes the palette but keeps the composer and the `/command` in it, so a half-written command can be finished or
+/// corrected; the text is still a command, so Enter runs it.
+#[test]
+fn esc_closes_the_command_palette_and_keeps_what_was_typed() {
+    let Some(relay) = relay_or_skip("esc_closes_the_command_palette_...") else { return };
+    let s = session(&relay);
+    s.press_all(&["tab", "tab"]); // channels -> messages -> input
+    s.expect("the input box to take focus", "Send");
+    s.type_text("/help");
+    s.expect("the command palette", "Commands · Enter runs · Tab completes");
+    s.expect("the footer to follow the palette", "Close");
+    s.press("esc");
+    s.expect_gone("the palette to close", "Commands · Enter runs · Tab completes");
+    s.expect("the composer to keep the keyboard", "Send");
+    s.expect("the command to stay in the input", "/help");
+    // The palette went away with the list, not with the text, so Enter still runs the command.
+    s.press("enter");
+    s.expect("the command left in the input to run", "/r N text");
+    s.press("esc");
+}
+
 #[test]
 fn u_marks_the_selected_message_unread_and_the_sidebar_counts_it() {
     let Some(relay) = relay_or_skip("u_marks_the_selected_message_...") else { return };
