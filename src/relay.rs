@@ -12,7 +12,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use nostr::nips::nip19::ToBech32;
-use nostr::{EventBuilder, JsonUtil, Keys, Kind, Tag};
+use nostr::{Event, EventBuilder, JsonUtil, Keys, Kind, Tag};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -132,7 +132,9 @@ impl Relay {
     }
 
     /// `Authorization` header value: a NIP-98 event for this request (fresh nonce every time, so a retry is not a replay).
-    fn nip98(&self, method: &str, url: &str, body: Option<&[u8]>) -> Result<String> {
+    /// Signed by `keys`, which is the identity the relay should see making the request — the person's own key for their
+    /// requests, an agent's key for the agent's own events.
+    fn nip98(keys: &Keys, method: &str, url: &str, body: Option<&[u8]>) -> Result<String> {
         let mut tags = vec![
             Tag::parse(["u", url]).map_err(|e| anyhow!("{e}"))?,
             Tag::parse(["method", method]).map_err(|e| anyhow!("{e}"))?,
@@ -141,12 +143,14 @@ impl Relay {
         if let Some(b) = body {
             tags.push(Tag::parse(["payload", &hex::encode(Sha256::digest(b))]).map_err(|e| anyhow!("{e}"))?);
         }
-        let event = EventBuilder::new(Kind::Custom(27235), "").tags(tags).sign_with_keys(&self.keys).map_err(|e| anyhow!("NIP-98 signing failed: {e}"))?;
+        let event = EventBuilder::new(Kind::Custom(27235), "").tags(tags).sign_with_keys(keys).map_err(|e| anyhow!("NIP-98 signing failed: {e}"))?;
         Ok(format!("Nostr {}", B64.encode(event.as_json().as_bytes())))
     }
 
-    /// POST JSON to the relay with up to three attempts for transient failures.
-    async fn post(&self, path: &str, body: Vec<u8>) -> Result<String> {
+    /// POST JSON to the relay with up to three attempts for transient failures, authenticated as `keys`. `auth_tag_json`
+    /// is the NIP-OA tag sent in `x-auth-tag` when the caller is an agent acting for an owner (an agent publishing its
+    /// own events sends its own attestation there).
+    async fn post_as(&self, keys: &Keys, path: &str, body: Vec<u8>, auth_tag_json: Option<&str>) -> Result<String> {
         let url = format!("{}{}", self.base, path);
         let mut last = anyhow!("no attempt made");
         for attempt in 0..3u64 {
@@ -156,10 +160,10 @@ impl Relay {
             let mut req = self
                 .http
                 .post(&url)
-                .header("Authorization", self.nip98("POST", &url, Some(&body))?)
+                .header("Authorization", Self::nip98(keys, "POST", &url, Some(&body))?)
                 .header("Content-Type", "application/json")
                 .body(body.clone());
-            if let Some(j) = &self.auth_tag_json {
+            if let Some(j) = auth_tag_json {
                 req = req.header("x-auth-tag", j);
             }
             match req.send().await {
@@ -180,6 +184,11 @@ impl Relay {
         Err(last)
     }
 
+    /// POST JSON to the relay as this identity.
+    async fn post(&self, path: &str, body: Vec<u8>) -> Result<String> {
+        self.post_as(&self.keys, path, body, self.auth_tag_json.as_deref()).await
+    }
+
     /// One-shot Nostr query (the relay ORs the filters).
     pub async fn query(&self, filters: &[Value]) -> Result<Vec<Ev>> {
         let text = self.post("/query", serde_json::to_vec(filters)?).await?;
@@ -195,12 +204,24 @@ impl Relay {
         };
         let event = builder.sign_with_keys(&self.keys).map_err(|e| anyhow!("signing failed: {e}"))?;
         let text = self.post("/events", serde_json::to_vec(&event)?).await?;
-        if let Ok(v) = serde_json::from_str::<Value>(&text) {
-            if v.get("accepted") == Some(&Value::Bool(false)) {
-                bail!("the relay refused it: {}", v.get("message").and_then(Value::as_str).unwrap_or("no reason given"));
-            }
-        }
-        Ok(event.id.to_hex())
+        accepted(&text, &event.id.to_hex())
+    }
+
+    /// Publish an agent's own kind-0 profile: signed by the agent's key and sent as the agent (its own NIP-98 request
+    /// and `x-auth-tag`), carrying the owner's NIP-OA `attestation`. This is the event that makes the agent an identity
+    /// on the relay whose owner can be proven, which is what makes it show up in Buzz clients.
+    pub async fn publish_agent_profile(&self, agent: &Keys, name: &str, attestation: &str) -> Result<String> {
+        let event = agent_profile_event(agent, name, attestation)?;
+        let text = self.post_as(agent, "/events", serde_json::to_vec(&event)?, Some(attestation)).await?;
+        accepted(&text, &event.id.to_hex())
+    }
+
+    /// Publish the owner's kind-30177 listing of one agent, signed by this identity, so the owner's other Buzz clients
+    /// know the agent exists.
+    pub async fn publish_agent_listing(&self, agent_pubkey: &str, name: &str, runtime: &str) -> Result<String> {
+        let event = agent_listing_event(&self.keys, agent_pubkey, name, runtime)?;
+        let text = self.post("/events", serde_json::to_vec(&event)?).await?;
+        accepted(&text, &event.id.to_hex())
     }
 
     /// NIP-11 information document (name, software, version), without authentication.
@@ -462,6 +483,39 @@ fn relay_message(body: &str) -> String {
         .unwrap_or_else(|| body.chars().take(200).collect())
 }
 
+/// What the relay's answer to a posted event means: the event's id, or why it was refused. A relay that says nothing
+/// useful (`accepted` absent, or a body that is not JSON) is taken as accepted, as the WebSocket `OK` is.
+fn accepted(text: &str, id: &str) -> Result<String> {
+    if let Ok(v) = serde_json::from_str::<Value>(text) {
+        if v.get("accepted") == Some(&Value::Bool(false)) {
+            bail!("the relay refused it: {}", v.get("message").and_then(Value::as_str).unwrap_or("no reason given"));
+        }
+    }
+    Ok(id.to_owned())
+}
+
+/// An agent's own kind-0 profile: `{"name","display_name","bot":true}` with the owner's attestation as its `auth` tag.
+/// Signed by the agent's key — the profile is the agent's, not the person's — which is what makes a Buzz client read it
+/// as an agent and the `auth` tag as its owner.
+fn agent_profile_event(agent: &Keys, name: &str, attestation: &str) -> Result<Event> {
+    let parts: Vec<String> = serde_json::from_str(attestation).context("the owner attestation is not a JSON array of strings")?;
+    let tag = Tag::parse(parts).map_err(|e| anyhow!("the owner attestation is not a tag: {e}"))?;
+    let content = json!({ "name": name, "display_name": name, "bot": true }).to_string();
+    EventBuilder::new(Kind::Metadata, content).tags([tag]).sign_with_keys(agent).map_err(|e| anyhow!("signing the agent's profile failed: {e}"))
+}
+
+/// The owner's kind-30177 listing of one agent: the `d` tag is the agent's key and `runtime` names the type it runs (a
+/// client that cannot resolve the runtime does not show the listing, so it is the harness's real type). `parallelism`
+/// and `respond_to` are what a Buzz client's parser requires of the content. Signed by the owner.
+fn agent_listing_event(owner: &Keys, agent_pubkey: &str, name: &str, runtime: &str) -> Result<Event> {
+    let content = json!({ "name": name, "parallelism": 1, "respond_to": "owner-only" }).to_string();
+    let tags = vec![
+        Tag::parse(["d", agent_pubkey]).map_err(|e| anyhow!("{e}"))?,
+        Tag::parse(["runtime", runtime]).map_err(|e| anyhow!("{e}"))?,
+    ];
+    EventBuilder::new(Kind::Custom(30177), content).tags(tags).sign_with_keys(owner).map_err(|e| anyhow!("signing the agent listing failed: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -515,14 +569,15 @@ mod tests {
 
     #[test]
     fn nip98_header_is_a_signed_event_for_this_request() {
-        let relay = Relay::new("https://r.example", Keys::generate(), None).unwrap();
-        let header = relay.nip98("POST", "https://r.example/query", Some(b"[]")).unwrap();
+        let keys = Keys::generate();
+        let header = Relay::nip98(&keys, "POST", "https://r.example/query", Some(b"[]")).unwrap();
         let json = String::from_utf8(B64.decode(header.strip_prefix("Nostr ").unwrap()).unwrap()).unwrap();
         let v: Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["kind"], 27235);
+        assert_eq!(v["pubkey"], keys.public_key().to_hex(), "the identity it was given signs it");
         let tags = v["tags"].to_string();
         assert!(tags.contains("https://r.example/query") && tags.contains("POST") && tags.contains(&hex::encode(Sha256::digest(b"[]"))));
-        assert_ne!(header, relay.nip98("POST", "https://r.example/query", Some(b"[]")).unwrap(), "each request gets a fresh nonce");
+        assert_ne!(header, Relay::nip98(&keys, "POST", "https://r.example/query", Some(b"[]")).unwrap(), "each request gets a fresh nonce");
     }
 
     #[test]
@@ -663,5 +718,145 @@ mod tests {
         assert_eq!(map.get("empty"), Some(&vec![]), "an event with no members is an empty channel, not an unknown one");
         assert_eq!(map.get("chan3"), None, "a channel the relay said nothing about is left out, so no count is shown for it");
         assert!(roster_from(&[]).is_empty());
+    }
+
+    /// The tag named `name` on `event`, as a `Vec<String>`.
+    fn tag_of(event: &Event, name: &str) -> Vec<String> {
+        event.tags.iter().find(|t| t.as_slice().first().map(String::as_str) == Some(name)).map(|t| t.as_slice().to_vec()).unwrap_or_default()
+    }
+
+    #[test]
+    fn an_agents_profile_is_signed_by_the_agent_and_carries_its_owners_attestation() {
+        let owner = Keys::generate();
+        let agent = Keys::generate();
+        let attestation = crate::agents::attestation(&owner, &agent.public_key().to_hex()).unwrap();
+        let event = agent_profile_event(&agent, "clara", &attestation).unwrap();
+        assert_eq!(event.kind, Kind::Metadata, "a kind-0 profile");
+        assert_eq!(event.pubkey, agent.public_key(), "the agent's own key signs it, not the person's");
+        let body: Value = serde_json::from_str(&event.content).unwrap();
+        assert_eq!(body["name"], "clara");
+        assert_eq!(body["display_name"], "clara");
+        assert_eq!(body["bot"], true, "`bot` and the auth tag are what a Buzz client reads as an agent");
+        let auth = tag_of(&event, "auth");
+        assert_eq!(auth.len(), 4, "the owner's attestation is on it: {auth:?}");
+        assert_eq!(auth[0], "auth");
+        assert_eq!(auth[1], owner.public_key().to_hex());
+    }
+
+    #[test]
+    fn the_owners_listing_names_the_agent_and_the_runtime_it_runs() {
+        let owner = Keys::generate();
+        let agent = Keys::generate();
+        let event = agent_listing_event(&owner, &agent.public_key().to_hex(), "clara", crate::agents::HARNESS_RUNTIME).unwrap();
+        assert_eq!(event.kind, Kind::Custom(30177), "the owner's agent listing");
+        assert_eq!(event.pubkey, owner.public_key(), "the owner signs their own listing");
+        assert_eq!(tag_of(&event, "d")[1], agent.public_key().to_hex(), "the agent's key addresses the record");
+        let runtime = tag_of(&event, "runtime");
+        assert_eq!(runtime[1], crate::agents::HARNESS_RUNTIME);
+        assert!(runtime[1].contains('/'), "a runtime is `pluginId/typeId`, which is what a Buzz client resolves: {runtime:?}");
+        let body: Value = serde_json::from_str(&event.content).unwrap();
+        assert_eq!(body["name"], "clara");
+        assert_eq!(body["parallelism"], 1, "a Buzz client's parser requires it");
+        assert_eq!(body["respond_to"], "owner-only", "and this");
+    }
+
+    #[test]
+    fn a_nip98_header_is_signed_by_the_identity_it_is_given() {
+        let agent = Keys::generate();
+        let header = Relay::nip98(&agent, "POST", "https://relay.example/events", Some(b"{}")).unwrap();
+        let json = String::from_utf8(B64.decode(header.strip_prefix("Nostr ").expect("a Nostr header")).unwrap()).unwrap();
+        let event = Event::from_json(json).unwrap();
+        assert_eq!(event.kind, Kind::Custom(27235), "a NIP-98 event");
+        assert_eq!(event.pubkey, agent.public_key(), "the agent authenticates as itself, not as the person");
+        assert_eq!(tag_of(&event, "method")[1], "POST");
+        assert_eq!(tag_of(&event, "u")[1], "https://relay.example/events");
+        assert!(event.tags.iter().any(|t| t.as_slice().first().map(String::as_str) == Some("payload")), "the body is bound to the header");
+    }
+
+    /// The `Nostr …` header's event, decoded.
+    fn header_event(header: &str) -> Event {
+        Event::from_json(String::from_utf8(B64.decode(header.strip_prefix("Nostr ").expect("a Nostr header")).unwrap()).unwrap()).unwrap()
+    }
+
+    /// What a capturing relay saw: the raw request head, the body, and the NIP-98 header.
+    type Post = (String, String, String);
+
+    /// A minimal HTTP relay that records the next `count` POSTed events, for the publish path.
+    async fn capturing_relay(count: usize) -> (String, std::sync::Arc<std::sync::Mutex<Vec<Post>>>, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let seen: std::sync::Arc<std::sync::Mutex<Vec<Post>>> = Default::default();
+        let recorder = seen.clone();
+        let handle = tokio::spawn(async move {
+            for _ in 0..count {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 4096];
+                let head_end = loop {
+                    let n = stream.read(&mut chunk).await.unwrap();
+                    if n == 0 {
+                        break buf.len();
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                    if let Some(p) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break p + 4;
+                    }
+                };
+                let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+                let (mut want, mut auth) = (0usize, String::new());
+                for line in head.split("\r\n") {
+                    if let Some((k, v)) = line.split_once(':') {
+                        match k.trim().to_ascii_lowercase().as_str() {
+                            "content-length" => want = v.trim().parse().unwrap_or(0),
+                            "authorization" => auth = v.trim().to_owned(),
+                            _ => {}
+                        }
+                    }
+                }
+                let mut body = buf[head_end..].to_vec();
+                while body.len() < want {
+                    let n = stream.read(&mut chunk).await.unwrap();
+                    if n == 0 {
+                        break;
+                    }
+                    body.extend_from_slice(&chunk[..n]);
+                }
+                recorder.lock().unwrap().push((head, String::from_utf8_lossy(&body).to_string(), auth));
+                let payload = r#"{"accepted":true}"#;
+                let resp = format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{payload}", payload.len());
+                stream.write_all(resp.as_bytes()).await.unwrap();
+                stream.flush().await.unwrap();
+            }
+        });
+        (url, seen, handle)
+    }
+
+    #[tokio::test]
+    async fn an_agent_is_published_as_itself_and_listed_by_its_owner() {
+        let (url, seen, server) = capturing_relay(2).await;
+        let owner = Keys::generate();
+        let agent = Keys::generate();
+        let relay = Relay::new(&url, owner.clone(), None).unwrap();
+        let attestation = crate::agents::attestation(&owner, &agent.public_key().to_hex()).unwrap();
+        relay.publish_agent_profile(&agent, "clara", &attestation).await.unwrap();
+        relay.publish_agent_listing(&agent.public_key().to_hex(), "clara", crate::agents::HARNESS_RUNTIME).await.unwrap();
+        server.await.unwrap();
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2, "both events were posted");
+        // the profile: the agent's own kind 0, authenticated as the agent (not the person), carrying the attestation
+        let profile: Value = serde_json::from_str(&seen[0].1).unwrap();
+        assert_eq!(profile["kind"], 0);
+        assert_eq!(profile["pubkey"], agent.public_key().to_hex());
+        assert_eq!(header_event(&seen[0].2).pubkey, agent.public_key(), "the agent authenticates as itself");
+        assert!(seen[0].0.contains("x-auth-tag"), "and offers its attestation to the relay: {}", seen[0].0);
+        assert!(seen[0].0.contains("x-auth-tag: [\"auth\""), "the attestation is the header's value");
+        // the listing: the owner's own kind 30177, authenticated as the owner
+        let listing: Value = serde_json::from_str(&seen[1].1).unwrap();
+        assert_eq!(listing["kind"], 30177);
+        assert_eq!(listing["pubkey"], owner.public_key().to_hex());
+        assert_eq!(header_event(&seen[1].2).pubkey, owner.public_key(), "the owner authenticates as themselves");
     }
 }

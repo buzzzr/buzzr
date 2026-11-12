@@ -251,7 +251,8 @@ pub enum Cmd {
     SaveArchived(HashSet<String>),
     /// Write the messages typed but not sent, per channel and thread, to disk (the loop owns the file).
     SaveDrafts(HashMap<(String, Option<String>), String>),
-    /// Make a local agent: a fresh key, a folder of its own, and a record in `agents.json` (the loop owns the file).
+    /// Make an agent: a fresh key, a folder of its own and a record in `agents.json` (the loop owns the file), then
+    /// publish it to the relay (the agent's own profile and this identity's listing of it).
     CreateAgent { name: String, instructions: String },
     /// Work for the plugin runtime (start, reload, or send a command to a plugin process).
     Plugin(PluginCmd),
@@ -286,8 +287,8 @@ pub enum AppEvent {
     Search { seq: u64, result: Result<Vec<Ev>, String> },
     /// How many unread messages a channel had when we started (see `Cmd::LoadUnread`).
     Unread { channel: String, count: u32 },
-    /// The answer to `Cmd::CreateAgent`: the agent that was made, or why it was not.
-    AgentCreated(Result<crate::agents::Agent, String>),
+    /// The answer to `Cmd::CreateAgent`: the agent that was made and whether it reached the relay, or why it was not made.
+    AgentCreated(Result<(crate::agents::Agent, Result<(), String>), String>),
     /// From the plugin runtime: ready/status/panel/flash/draft/send/gone, and the plugin list.
     Plugin(PluginEvent),
     /// The release feed found a later version than the one running.
@@ -1561,13 +1562,19 @@ impl App {
             AppEvent::Search { seq, result } => self.search_results(seq, result),
             AppEvent::Unread { channel, count } => self.unread_loaded(channel, count),
             AppEvent::AgentCreated(result) => match result {
-                Ok(agent) => {
+                Ok((agent, published)) => {
                     let (name, key) = (agent.name.clone(), short_key(&agent.pubkey));
                     self.agents.push(agent);
                     self.agent_cursor = self.agents.len() - 1;
                     // The list it lands in is the point of the flow, so it comes up on the new agent.
                     self.overlay = Overlay::Agents;
-                    self.flash(format!("{name} created ({key}) · /agents lists it, `n` makes another"));
+                    // The agent exists locally either way; say plainly whether the relay took it, since that is what
+                    // makes it show up in other Buzz clients.
+                    let where_it_is = match published {
+                        Ok(()) => "published to the relay".to_owned(),
+                        Err(e) => format!("local only — the relay did not take it: {e}"),
+                    };
+                    self.flash(format!("{name} created ({key}) · {where_it_is} · /agents lists it, `n` makes another"));
                     Vec::new()
                 }
                 Err(e) => {
@@ -3219,8 +3226,9 @@ impl App {
     // ---- local agents
 
     /// `/agents`: the local agents buzzr made (`/agents` alone), or the start of the two-step flow that makes another
-    /// (`/agents create`). Creating is local only — a key of the agent's own, a folder for it and a record in
-    /// `agents.json` — so there is nothing to send and no relay to wait for.
+    /// (`/agents create`). Creating makes the agent here (a key of the agent's own, a folder for it and a record in
+    /// `agents.json`) and then publishes it to the relay — the agent's own profile, and this identity's listing of it —
+    /// so it is the relay's answer, not just the file, that the flow reports.
     fn show_agents(&mut self, arg: &str) -> Vec<Cmd> {
         match arg.trim() {
             "" => {

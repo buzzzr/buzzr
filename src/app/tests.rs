@@ -2538,14 +2538,22 @@ fn esc_cancels_the_agent_flow_and_puts_the_draft_back_in_the_box() {
 fn the_answer_to_a_creation_lands_in_the_list_and_is_reported() {
     let mut app = at_input(3);
     let scout = agent("Scout");
-    app.handle(AppEvent::AgentCreated(Ok(scout.clone())));
+    app.handle(AppEvent::AgentCreated(Ok((scout.clone(), Ok(())))));
     assert_eq!(app.agents, vec![scout], "the made agent is in the list");
     assert_eq!(app.agent_cursor, 0);
     assert_eq!(app.overlay, Overlay::Agents, "the list it lands in comes up");
-    assert!(app.flash_text().unwrap().contains("Scout"), "and the flash names it: {:?}", app.flash_text());
+    let flash = app.flash_text().unwrap();
+    assert!(flash.contains("Scout"), "and the flash names it: {flash:?}");
+    assert!(flash.contains("published to the relay"), "and says the relay took it: {flash:?}");
+    // a relay that would not take it still leaves the agent, and the flash says where it is
+    let other = agent("Pilot");
+    app.handle(AppEvent::AgentCreated(Ok((other.clone(), Err("relay returned 500".into())))));
+    assert_eq!(app.agents.last(), Some(&other), "the agent is kept");
+    let flash = app.flash_text().unwrap();
+    assert!(flash.contains("local only") && flash.contains("relay returned 500"), "the refusal is named: {flash:?}");
     // a refusal adds nothing, and is only said
     app.handle(AppEvent::AgentCreated(Err("an agent called Scout already exists".into())));
-    assert_eq!(app.agents.len(), 1, "nothing was added");
+    assert_eq!(app.agents.len(), 2, "nothing was added");
     assert!(app.flash_text().unwrap().contains("already exists"));
 }
 

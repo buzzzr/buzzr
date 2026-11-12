@@ -12,11 +12,17 @@
 use crate::config::{self, Paths};
 use nostr::nips::nip19::ToBech32;
 use nostr::Keys;
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
 /// The harness a new agent is created with: a local Claude Code that speaks ACP on stdio.
 pub const HARNESS: &str = "claude-code-acp";
+
+/// The agent type this harness runs, as the owner's listing names it (`pluginId/typeId`): the Buzz app's own Claude
+/// Code type, `buzz.claude-code/claude-code`. Buzz clients read a listing's `runtime` tag to resolve the type, and one
+/// they cannot resolve is not shown, so a buzzr agent names the type it actually runs.
+pub const HARNESS_RUNTIME: &str = "buzz.claude-code/claude-code";
 
 /// The longest name accepted, so a name always fits on one line.
 const NAME_MAX: usize = 64;
@@ -114,6 +120,26 @@ pub fn create(paths: &Paths, name: &str, instructions: &str) -> Result<Agent, St
     let doc = Zeroizing::new(serde_json::to_string_pretty(&file).expect("a json value serialises") + "\n");
     config::write_private(&paths.agents(), &doc).map_err(|e| format!("could not write {}: {e}", paths.agents().display()))?;
     Ok(agent)
+}
+
+/// The agent's own key, read back from the record file — the only place it is kept. Used to sign the agent's own
+/// events (its kind-0 profile), which are the agent's, not the person's.
+pub fn keys_of(path: &Path, pubkey: &str) -> Result<Keys, String> {
+    let file = read(path)?;
+    let record = file.agents.iter().find(|r| r.pubkey == pubkey).ok_or_else(|| format!("{pubkey} is not in {}", path.display()))?;
+    Keys::parse(&record.nsec).map_err(|e| format!("the saved key for {} is not usable: {e}", record.name))
+}
+
+/// The owner's attestation for one agent, as the JSON an `auth` tag holds: `["auth", <owner>, <conditions>, <sig>]`.
+///
+/// The owner signs the SHA-256 of `nostr:agent-auth:<agent>:<conditions>`; empty conditions (the only kind made here)
+/// mean no limit. A Buzz client reads this tag from the agent's own newest kind-0 profile to tell whose agent it is, so
+/// it is what makes the agent's identity provably the owner's rather than a bare local record.
+pub fn attestation(owner: &Keys, agent_pubkey: &str) -> Result<String, String> {
+    let digest: [u8; 32] = Sha256::digest(format!("nostr:agent-auth:{agent_pubkey}:").as_bytes()).into();
+    let message = nostr::secp256k1::Message::from_digest(digest);
+    let signature = owner.sign_schnorr(&message);
+    Ok(serde_json::to_string(&["auth", &owner.public_key().to_hex(), "", &signature.to_string()]).expect("a JSON array serialises"))
 }
 
 /// A name with its whitespace tidied: what is shown and what the agent is called. Public so the two-step flow can
@@ -250,6 +276,35 @@ mod tests {
         let err = create(&paths, "Scout", "").unwrap_err();
         assert!(err.contains("not readable JSON"), "{err}");
         assert_eq!(std::fs::read_to_string(paths.agents()).unwrap(), "not json", "the file is left alone");
+        std::fs::remove_dir_all(paths.dir()).unwrap();
+    }
+
+    #[test]
+    fn the_attestation_is_the_owners_signature_over_this_agent_only() {
+        use nostr::secp256k1::{schnorr::Signature, Message, Secp256k1, XOnlyPublicKey};
+        use std::str::FromStr;
+        let owner = Keys::parse(&"11".repeat(32)).unwrap();
+        let agent = Keys::generate();
+        let tag: Vec<String> = serde_json::from_str(&attestation(&owner, &agent.public_key().to_hex()).unwrap()).unwrap();
+        assert_eq!(tag.len(), 4, "an auth tag is exactly [auth, owner, conditions, sig]");
+        assert_eq!(tag[0], "auth");
+        assert_eq!(tag[1], owner.public_key().to_hex());
+        assert_eq!(tag[2], "", "no conditions: the grant has no limits");
+        let verify = |agent: &Keys| {
+            let digest: [u8; 32] = Sha256::digest(format!("nostr:agent-auth:{}:", agent.public_key().to_hex()).as_bytes()).into();
+            Secp256k1::verification_only()
+                .verify_schnorr(&Signature::from_str(&tag[3]).unwrap(), &Message::from_digest(digest), &XOnlyPublicKey::from_str(&tag[1]).unwrap())
+        };
+        assert!(verify(&agent).is_ok(), "the owner signed this agent");
+        assert!(verify(&Keys::generate()).is_err(), "and only this agent");
+    }
+
+    #[test]
+    fn an_agents_key_is_read_back_so_it_can_sign_its_own_events() {
+        let paths = temp_paths();
+        let a = create(&paths, "Scout", "").unwrap();
+        assert_eq!(keys_of(&paths.agents(), &a.pubkey).unwrap().public_key().to_hex(), a.pubkey, "the saved key is the agent's");
+        assert!(keys_of(&paths.agents(), &"00".repeat(32)).is_err(), "an agent that is not in the file has no key");
         std::fs::remove_dir_all(paths.dir()).unwrap();
     }
 }
