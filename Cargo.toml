@@ -13,7 +13,7 @@ repository = "https://github.com/buzzzr/buzzr"
 buzz-core = { git = "https://github.com/block/buzz", rev = "24a370606044c0c7be787cc2fd98ec0bfe1d606b" }
 buzz-sdk = { git = "https://github.com/block/buzz", rev = "24a370606044c0c7be787cc2fd98ec0bfe1d606b" }
 buzz-ws-client = { git = "https://github.com/block/buzz", rev = "24a370606044c0c7be787cc2fd98ec0bfe1d606b" }
-nostr = { version = "0.44", features = ["nip44", "nip98"] }
+nostr = { version = "0.45", features = ["nip44", "nip98"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util", "signal"] }
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"
