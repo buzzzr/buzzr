@@ -59,10 +59,12 @@
 - **Invite people into a channel.** `/invite name` adds someone to the channel on screen (or the group DM you are in). A message
   that `@mentions` someone who is not in the channel asks first: `y` invites them and sends, `n` sends without inviting, Esc
   keeps the message in the input.
-- **Local agents.** `/agents` lists the agents this copy made; `/agents create` (or `n` in that list) asks for a name and then for
-  what the agent should do, and makes it — a key of its own, a folder of its own, and a record in `agents.json` (mode 600, beside
-  the read positions). The harness it is made for is a local Claude Code driven over ACP (`claude-code-acp`, as the Buzz app does).
-  Nothing is sent to the relay: the agent is local to this machine.
+- **Agents.** `/agents` lists the agents this copy made; `/agents create` (or `n` in that list) asks for a name and then for what
+  the agent should do, and makes it — a key of its own, a folder of its own, and a record in `agents.json` (mode 600, beside the
+  read positions) — and then publishes it to the relay: the agent's own profile, signed with its own key and carrying your
+  attestation of it, and your listing of it, so other Buzz clients show it as yours. The harness it is made for is a local Claude
+  Code driven over ACP (`claude-code-acp`, as the Buzz app does). A relay that will not take it leaves the agent local, and the
+  flow says so.
 - **Plugins.** Add your own `/commands`, status items, badges, a pane under the channel list and panels from any language. See [PLUGIN.md](PLUGIN.md).
 - **Themes.** The default `buzz-dark` uses the dark palette of the Buzz desktop app. `BUZZR_THEME=dark` keeps your terminal's own background, `BUZZR_THEME=buzz-light` is the desktop app's light palette, and `BUZZR_THEME=light` is for a light terminal. `BUZZR_THEME=high-contrast` is black-on-white at WCAG AAA (7:1), and `NO_COLOR` or `TERM=dumb` turns colour off entirely.
 - **Read-only mode** (`--read-only`) for identities you should not speak for.

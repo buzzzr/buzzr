@@ -30,11 +30,13 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
 - **A draft belongs to the place it was typed**: switching channel, or going into or out of a thread, empties the box instead of
   carrying a half-written message along, and the text is back when you return to that channel or thread. Sending clears that
   place's draft. They are kept in `drafts.json` next to the read positions, so they survive a restart.
-- **Local agents.** `/agents` lists the agents this copy made; `/agents create` — or `n` in that list — turns the composer into a
-  two-step flow that asks for a name and then for what the agent should do, and makes it a local agent: a fresh key of its own, a
+- **Agents.** `/agents` lists the agents this copy made; `/agents create` — or `n` in that list — turns the composer into a
+  two-step flow that asks for a name and then for what the agent should do, and makes it an agent: a fresh key of its own, a
   folder of its own to work in, and a record in `agents.json` (mode 600, next to the read positions, since it holds the agent's
-  key). The harness it is made for is a local Claude Code driven over ACP (`claude-code-acp`), the way the Buzz app runs one.
-  Nothing is sent to the relay: the agent is local to this machine. Read-only mode refuses to make one.
+  key). It is then published to the relay, the way the Buzz app does it: the agent's own kind-0 profile, signed with its own key
+  and carrying this identity's NIP-OA attestation of it, and this identity's `kind:30177` listing of it, so the owner's other Buzz
+  clients show it. The harness it is made for is a local Claude Code driven over ACP (`claude-code-acp`). A relay that refuses
+  either leaves the agent local, and the flow says so. Read-only mode refuses to make one.
 
 ### Changed
 
