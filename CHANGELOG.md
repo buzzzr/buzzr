@@ -60,6 +60,13 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
   names an agent **in a channel**, so the agent has to be in that channel to be mentioned at all — `/invite <npub>`, the npub `/agents` shows,
   puts it there — and only mentions that arrive while the runner is watching are answered: an older backlog is not. A harness starting a turn
   is buzzr's job, never a plugin's, and a run that may not send (`--read-only`, `BUZZR_SAFE_MODE=1`) starts no runner.
+- **A name is looked up in the relay's directory when no loaded channel has shown it.** `/invite`, `/dm` and `/whois` still take a
+  name they have already met, and an npub, but a name the local table does not hold is no longer answered with “nobody here is
+  called …”: it is asked of the relay (a NIP-50 `search` over `kind:0` profiles) and the command goes on with the one person that
+  fits. When several profiles fit, they are listed by name and short key instead of one being guessed. The matches are checked here
+  as well as asked for at the relay, so a directory that ignores `search` and answers everyone cannot make the command act on the
+  wrong key. The name that answers is remembered, so the next command resolves it without a round-trip; a directory that cannot be
+  reached, or that knows nobody by that name, still says so.
 
 ### Changed
 
