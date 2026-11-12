@@ -15,7 +15,7 @@ buzz-sdk = { git = "https://github.com/block/buzz", rev = "24a370606044c0c7be787
 buzz-ws-client = { git = "https://github.com/block/buzz", rev = "24a370606044c0c7be787cc2fd98ec0bfe1d606b" }
 nostr = { version = "0.44", features = ["nip44", "nip98"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util", "signal"] }
-tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"
 reqwest = { version = "0.13", features = ["json", "rustls"], default-features = false }
 serde = { version = "1", features = ["derive"] }
@@ -23,7 +23,7 @@ serde_json = "1"
 uuid = { version = "1", features = ["v4"] }
 base64 = "0.22"
 hex = "0.4"
-sha2 = "0.10"
+sha2 = "0.11"
 rand = "0.8"
 ratatui = "0.30.2"
 pulldown-cmark = "0.13.6"
