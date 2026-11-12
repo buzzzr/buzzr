@@ -338,6 +338,122 @@ fn in_a_thread_plain_messages_are_replies() {
 }
 
 #[test]
+fn a_draft_stays_in_the_channel_it_was_typed_in() {
+    let mut app = app_with(3);
+    press(&mut app, KeyCode::Tab); // messages -> input
+    type_text(&mut app, "half a thought");
+    // leave for the next channel without sending: the box clears, and the draft stays behind in c1
+    press(&mut app, KeyCode::Esc); // input -> messages
+    press(&mut app, KeyCode::Esc); // messages -> the channel list
+    assert_eq!(app.focus, Focus::Channels);
+    press(&mut app, KeyCode::Down);
+    let cmds = press(&mut app, KeyCode::Enter);
+    assert!(app.editor.is_empty(), "the next channel's box is its own, not the last one's");
+    assert_eq!(app.drafts.get(&("c1".to_owned(), None)).map(String::as_str), Some("half a thought"));
+    assert!(
+        cmds.iter().any(|c| matches!(c, Cmd::SaveDrafts(d) if d.contains_key(&("c1".to_owned(), None)))),
+        "the draft goes to disk with the switch: {cmds:?}"
+    );
+    // and it is back in the box when the channel is
+    press(&mut app, KeyCode::Esc); // messages -> the channel list
+    press(&mut app, KeyCode::Up);
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(app.editor.text(), "half a thought");
+}
+
+#[test]
+fn a_draft_is_kept_per_thread_and_reply_target() {
+    let mut app = app_with(5);
+    app.handle(AppEvent::Live(Live::Event(reply("r1", 2000, "alice", "m004"))));
+    app.layout(78);
+    // into the thread of m004 and write there
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Tab);
+    type_text(&mut app, "a reply half written");
+    // leave the thread: the channel's own box is empty, and the text is stored under the thread it answers
+    press(&mut app, KeyCode::Esc); // input -> messages
+    press(&mut app, KeyCode::Esc); // the thread -> the channel
+    assert!(app.editor.is_empty(), "the channel timeline has its own box");
+    assert_eq!(app.drafts.get(&("c1".to_owned(), Some("m004".to_owned()))).map(String::as_str), Some("a reply half written"));
+    // opening the thread again brings it back
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(app.editor.text(), "a reply half written");
+    // and so does aiming a reply at it from the timeline: a reply is written into the thread it answers
+    press(&mut app, KeyCode::Esc); // out of the thread
+    press(&mut app, KeyCode::Char('r'));
+    assert_eq!(app.reply_target.as_deref(), Some("m004"));
+    assert_eq!(app.editor.text(), "a reply half written", "the thread's draft comes back with the aim");
+}
+
+#[test]
+fn cancelling_a_reply_puts_the_threads_draft_back_in_the_thread() {
+    let mut app = app_with(5);
+    app.handle(AppEvent::Live(Live::Event(reply("r1", 2000, "alice", "m004"))));
+    app.layout(78);
+    press(&mut app, KeyCode::Char('r')); // aim at m004's thread, from the timeline
+    type_text(&mut app, "reply draft");
+    press(&mut app, KeyCode::Esc); // cancel the reply
+    assert_eq!(app.reply_target, None);
+    assert!(app.editor.is_empty(), "the timeline's box is empty again");
+    assert_eq!(app.drafts.get(&("c1".to_owned(), Some("m004".to_owned()))).map(String::as_str), Some("reply draft"));
+    press(&mut app, KeyCode::Esc); // input -> messages
+    press(&mut app, KeyCode::Char('r')); // aim at the thread again
+    assert_eq!(app.editor.text(), "reply draft", "the draft belongs to the thread, not to the aim");
+}
+
+#[test]
+fn sending_a_message_leaves_no_draft_behind() {
+    let mut app = app_with(3);
+    press(&mut app, KeyCode::Tab);
+    type_text(&mut app, "sent, not kept");
+    let cmds = press(&mut app, KeyCode::Enter);
+    assert!(matches!(&cmds[0], Cmd::Send { .. }));
+    // leaving and coming back finds an empty box: what went out is not a draft
+    press(&mut app, KeyCode::Esc);
+    press(&mut app, KeyCode::Esc);
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Esc);
+    press(&mut app, KeyCode::Up);
+    press(&mut app, KeyCode::Enter);
+    assert!(app.editor.is_empty());
+    assert!(app.drafts.is_empty(), "nothing was left to write: {:?}", app.drafts);
+}
+
+#[test]
+fn an_edit_puts_the_draft_that_was_in_the_box_back_afterwards() {
+    let mut app = App::new(ME.into(), false, chrono_tz::UTC);
+    app.view_h = 10;
+    app.areas = Areas { channels: Rect::new(0, 1, 20, 20), msgs: Rect::new(20, 1, 80, 10), input: Rect::new(20, 12, 80, 3) };
+    app.handle(AppEvent::Channels(Ok(vec![chan("c1", "general")])));
+    app.handle(AppEvent::Window { channel: "c1".into(), cursor: None, result: Ok(Window { events: vec![msg("m000", 1000, ME, "mine to edit", &[])], has_more: false, next_cursor: None }) });
+    app.handle(key(KeyCode::Tab)); // channels -> messages
+    press(&mut app, KeyCode::Tab); // messages -> input
+    type_text(&mut app, "half written");
+    press(&mut app, KeyCode::Esc); // input -> messages
+    press(&mut app, KeyCode::End); // the message to edit
+    press(&mut app, KeyCode::Char('e'));
+    assert_eq!(app.editor.text(), "mine to edit", "the box holds the message being edited");
+    assert_eq!(app.drafts.get(&("c1".to_owned(), None)).map(String::as_str), Some("half written"), "the draft went back to the place it was typed");
+    press(&mut app, KeyCode::Esc); // cancel the edit
+    assert_eq!(app.editor.text(), "half written", "the draft is back in the box");
+}
+
+#[test]
+fn the_draft_written_to_disk_is_in_the_box_when_its_channel_opens_again() {
+    let mut app = App::new(ME.into(), false, chrono_tz::UTC);
+    app.view_h = 10;
+    app.areas = Areas { channels: Rect::new(0, 1, 20, 20), msgs: Rect::new(20, 1, 80, 10), input: Rect::new(20, 12, 80, 3) };
+    app.seed_drafts([(("c1".to_owned(), None), "written before the restart".to_owned())].into_iter().collect());
+    app.handle(AppEvent::Channels(Ok(vec![chan("dm1", "DM"), chan("c1", "general"), chan("c2", "random")])));
+    assert_eq!(app.editor.text(), "written before the restart", "the box comes back holding what it was left with");
+    // the other channel's box is still its own
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Enter);
+    assert!(app.editor.is_empty(), "a draft belongs to one place, not to every place");
+}
+
+#[test]
 fn a_thread_shows_its_root_as_one_header_line_and_indents_the_replies() {
     let mut app = App::new(ME.into(), false, chrono_tz::UTC);
     app.view_h = 10;

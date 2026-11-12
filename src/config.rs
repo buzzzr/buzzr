@@ -4,6 +4,7 @@
 //! - `config.json`: `{"relay": "wss://..."}`, written by the first-run setup
 //! - `read-state.json`: the last-read positions per channel and per thread, plus the local unread marks (see `load_read_state`)
 //! - `archived.json`: the channel ids the user archived, kept out of the channel list (see `load_archived`)
+//! - `drafts.json`: the messages typed but not sent, per channel and per thread (see `load_drafts`)
 //! - `key.enc`: the private key sealed with a password (see `keyfile.rs`)
 //! - `key`: the private key in plain text, for people who chose that (mode 600)
 
@@ -68,6 +69,10 @@ impl Paths {
     /// The channel ids the user archived: out of the channel list, found again by search (`archived.json`).
     pub fn archived(&self) -> PathBuf {
         self.dir.join("archived.json")
+    }
+    /// The messages typed but not sent, per channel and thread (`drafts.json`).
+    pub fn drafts(&self) -> PathBuf {
+        self.dir.join("drafts.json")
     }
 }
 
@@ -141,6 +146,46 @@ pub fn save_archived(path: &Path, ids: &HashSet<String>) -> std::io::Result<()> 
     let mut channels: Vec<&str> = ids.iter().map(String::as_str).collect();
     channels.sort_unstable();
     let doc = serde_json::json!({ "channels": channels });
+    write_private(path, &(serde_json::to_string_pretty(&doc).expect("a json value serialises") + "\n"))
+}
+
+/// The messages typed but not sent, from `drafts.json`: keyed by channel id, and inside a channel by the thread the text
+/// is a reply into — the empty key is the channel's own timeline, which no message id can be. A missing or unreadable file
+/// is simply no drafts, never an error. What is in the box is not a relay event until it is sent, so it is kept here, on
+/// this device, like the read positions.
+pub fn load_drafts(path: &Path) -> HashMap<(String, Option<String>), String> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return HashMap::new();
+    };
+    let Ok(doc) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return HashMap::new();
+    };
+    let mut drafts = HashMap::new();
+    let Some(channels) = doc.get("drafts").and_then(|d| d.as_object()) else {
+        return drafts;
+    };
+    for (channel, threads) in channels {
+        let Some(threads) = threads.as_object() else { continue };
+        for (thread, text) in threads {
+            let Some(text) = text.as_str().filter(|t| !t.is_empty()) else { continue };
+            let root = (!thread.is_empty()).then(|| thread.clone());
+            drafts.insert((channel.clone(), root), text.to_owned());
+        }
+    }
+    drafts
+}
+
+/// Write the drafts (mode 600, atomically). Sorted by channel and thread, so an unchanged set is an unchanged file, and an
+/// empty draft leaves no trace of the place it was typed in.
+pub fn save_drafts(path: &Path, drafts: &HashMap<(String, Option<String>), String>) -> std::io::Result<()> {
+    let mut channels: BTreeMap<&str, BTreeMap<&str, &str>> = BTreeMap::new();
+    for ((channel, root), text) in drafts {
+        if text.is_empty() {
+            continue;
+        }
+        channels.entry(channel.as_str()).or_default().insert(root.as_deref().unwrap_or(""), text.as_str());
+    }
+    let doc = serde_json::json!({ "drafts": channels });
     write_private(path, &(serde_json::to_string_pretty(&doc).expect("a json value serialises") + "\n"))
 }
 
@@ -270,6 +315,30 @@ mod tests {
         // a damaged file is nothing archived either, rather than a panic on the next start
         std::fs::write(paths.archived(), "not json").unwrap();
         assert!(load_archived(&paths.archived()).is_empty());
+        std::fs::remove_dir_all(paths.dir()).unwrap();
+    }
+
+    #[test]
+    fn the_drafts_are_read_back_per_channel_and_thread_and_the_file_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let paths = Paths::new(std::env::temp_dir().join(format!("buzzr-test-{}", uuid::Uuid::new_v4())));
+        assert!(load_drafts(&paths.drafts()).is_empty(), "no file yet: no drafts, not an error");
+        let mut drafts: HashMap<(String, Option<String>), String> = HashMap::new();
+        drafts.insert(("c1".to_owned(), None), "a half-written message".to_owned());
+        drafts.insert(("c1".to_owned(), Some("root1".to_owned())), "a half-written reply".to_owned());
+        drafts.insert(("c2".to_owned(), Some("root2".to_owned())), "another one".to_owned());
+        drafts.insert(("c3".to_owned(), None), String::new());
+        save_drafts(&paths.drafts(), &drafts).unwrap();
+        drafts.remove(&("c3".to_owned(), None));
+        assert_eq!(load_drafts(&paths.drafts()), drafts, "each draft comes back where it was typed, and an empty one is dropped");
+        assert_eq!(std::fs::metadata(paths.drafts()).unwrap().permissions().mode() & 0o777, 0o600);
+        // sorted, so an unchanged set is an unchanged file
+        let text = std::fs::read_to_string(paths.drafts()).unwrap();
+        assert!(text.find("c1").unwrap() < text.find("c2").unwrap(), "the channels are written sorted: {text}");
+        assert!(!text.contains("c3"), "a channel whose draft was sent leaves no trace: {text}");
+        // a damaged file is no drafts either, rather than a panic on the next start
+        std::fs::write(paths.drafts(), "not json").unwrap();
+        assert!(load_drafts(&paths.drafts()).is_empty());
         std::fs::remove_dir_all(paths.dir()).unwrap();
     }
 }

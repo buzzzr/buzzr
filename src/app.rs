@@ -238,6 +238,8 @@ pub enum Cmd {
     SaveRead(ReadState),
     /// Write the archived channel ids to disk (the loop owns the file).
     SaveArchived(HashSet<String>),
+    /// Write the messages typed but not sent, per channel and thread, to disk (the loop owns the file).
+    SaveDrafts(HashMap<(String, Option<String>), String>),
     /// Work for the plugin runtime (start, reload, or send a command to a plugin process).
     Plugin(PluginCmd),
 }
@@ -316,6 +318,13 @@ pub struct App {
     /// The channel ids the reader archived: kept out of the channel list, and brought back only from a search result. Like the
     /// read positions this is per-user view state, not a relay concept, so it lives on this device (`archived.json`).
     pub archived: HashSet<String>,
+    /// Messages typed but not sent, keyed by the channel and the thread they are a reply into (`None` is the channel's own
+    /// timeline). The input is a single box, but a draft belongs to the place it was typed: leaving that place stores it and
+    /// coming back restores it, so a half-written reply is never carried into another channel — or sent there by mistake.
+    pub drafts: HashMap<(String, Option<String>), String>,
+    /// The place the text now in the box was typed in, so it can be stored there when the box moves on (see `switch_draft`).
+    /// `None` while something else owns the box (an edit) or before the first channel opens.
+    draft_at: Option<(String, Option<String>)>,
     /// Where each channel's last visit stopped, for the "new messages" line: taken from `read` as a channel is opened and kept
     /// while we stay in it, so reading on does not move the line under the reader.
     new_since: HashMap<String, u64>,
@@ -440,6 +449,8 @@ impl App {
             thread_read: HashMap::new(),
             marks: HashMap::new(),
             archived: HashSet::new(),
+            drafts: HashMap::new(),
+            draft_at: None,
             new_since: HashMap::new(),
             typing: HashMap::new(),
             flash: None,
@@ -859,23 +870,27 @@ impl App {
     /// Left arrow on the message the cursor is on: go up one level. A reply goes to its root — the thread view is flat, so
     /// that is the message it answers — and the root itself leaves the thread for the channel it came from. The channel
     /// timeline is the top, so there the key does nothing.
-    fn leave_for_thread_root(&mut self) {
-        let View::Thread(root) = self.view.clone() else { return };
+    fn leave_for_thread_root(&mut self) -> Vec<Cmd> {
+        let View::Thread(root) = self.view.clone() else { return Vec::new() };
         let view_h = self.view_h;
-        let Some(layout) = self.layout.take() else { return };
+        let Some(layout) = self.layout.take() else { return Vec::new() };
         let (w, layout) = layout;
         let selected = list::selected_index(&layout, &self.state).and_then(|i| layout.items.get(i)).map(|it| it.id.clone());
         match (selected.as_deref(), layout.index_of(&root)) {
             // on the root: out of the thread, the way Esc goes
             (Some(id), _) if id == root => {
                 self.layout = Some((w, layout));
-                self.back_to_channel();
+                self.back_to_channel()
             }
             (_, Some(i)) => {
                 list::select(&layout, &mut self.state, view_h, i);
                 self.layout = Some((w, layout));
+                Vec::new()
             }
-            _ => self.layout = Some((w, layout)),
+            _ => {
+                self.layout = Some((w, layout));
+                Vec::new()
+            }
         }
     }
 
@@ -1152,13 +1167,75 @@ impl App {
         }
     }
 
-    fn enter_view(&mut self, view: View) {
+    /// Where the composer is writing: the channel on screen, and the thread the text would be a reply into (`None` for the
+    /// channel's own timeline). This is the key a draft is stored under, so what is typed follows the place it belongs to.
+    /// `None` when no channel is open: there is nowhere to write, so there is nothing to keep.
+    fn draft_key(&self) -> Option<(String, Option<String>)> {
+        let c = self.channel()?;
+        let root = self.reply_target.clone().or_else(|| match &self.view {
+            View::Thread(r) => Some(r.clone()),
+            View::Channel => None,
+        });
+        Some((c.id.clone(), root))
+    }
+
+    /// Take the drafts read from disk; the loop fills this in before the first event, tests set it directly.
+    pub fn seed_drafts(&mut self, drafts: HashMap<(String, Option<String>), String>) {
+        self.drafts = drafts;
+    }
+
+    /// Move the text in the box into the draft store under the place it was typed, and forget which place the box belongs to.
+    /// Used when the box changes hands — the place a message would go moves, or an edit takes it over — and by the loop on
+    /// the way out, so the last thing typed is not lost. The write goes back to the caller when the stored drafts changed.
+    pub fn stash_draft(&mut self) -> Vec<Cmd> {
+        let Some(at) = self.draft_at.take() else { return Vec::new() };
+        let text = self.editor.text();
+        if text == self.drafts.get(&at).cloned().unwrap_or_default() {
+            return Vec::new();
+        }
+        if text.is_empty() {
+            self.drafts.remove(&at);
+        } else {
+            self.drafts.insert(at, text);
+        }
+        vec![Cmd::SaveDrafts(self.drafts.clone())]
+    }
+
+    /// Put what is in the box back where it was typed, and bring the new place's draft into the box: called wherever the
+    /// place a message would go changes — another channel, into or out of a thread, starting or cancelling a reply — so a
+    /// half-written message is never carried into another channel, nor left behind in the one it was written for.
+    fn switch_draft(&mut self) -> Vec<Cmd> {
+        let now = self.draft_key();
+        if now == self.draft_at {
+            return Vec::new();
+        }
+        let cmds = self.stash_draft();
+        self.draft_at = now;
+        self.editor.clear();
+        if let Some(text) = self.draft_at.as_ref().and_then(|k| self.drafts.get(k)).cloned() {
+            self.editor.insert_str(&text);
+        }
+        cmds
+    }
+
+    /// Forget the draft of the place the box is in: what was in it has just gone out. The place is taken before the reply
+    /// target is dropped, so the text is cleared from where it was written rather than from wherever the send leaves us.
+    fn clear_draft(&mut self, at: Option<(String, Option<String>)>) -> Vec<Cmd> {
+        let Some(at) = at else { return Vec::new() };
+        if self.drafts.remove(&at).is_none() {
+            return Vec::new();
+        }
+        vec![Cmd::SaveDrafts(self.drafts.clone())]
+    }
+
+    fn enter_view(&mut self, view: View) -> Vec<Cmd> {
         self.save_position();
         self.view = view;
         self.reply_target = None;
         self.layout = None;
         self.fresh_view = true;
         self.state = self.view_key().and_then(|k| self.saved.get(&k).cloned()).unwrap_or_default();
+        self.switch_draft()
     }
 
     fn open_channel(&mut self, index: usize) -> Vec<Cmd> {
@@ -1184,7 +1261,7 @@ impl App {
                 self.new_since.remove(&id);
             }
         }
-        let mut cmds = Vec::new();
+        let mut cmds = self.switch_draft();
         // opening a channel reads it: whatever we counted is now on screen
         if let Some(cmd) = self.read_through(&id) {
             cmds.push(cmd);
@@ -1290,9 +1367,8 @@ impl App {
     fn open_thread(&mut self, root: String) -> Vec<Cmd> {
         let Some(c) = self.channel() else { return Vec::new() };
         let channel = c.id.clone();
-        self.enter_view(View::Thread(root.clone()));
+        let mut cmds = self.enter_view(View::Thread(root.clone()));
         self.set_focus(Focus::Messages);
-        let mut cmds = Vec::new();
         // opening a thread reads it: the replies are on screen, so its row in the channel stops being marked unread
         if let Some(cmd) = self.read_through_thread(&channel, &root) {
             cmds.push(cmd);
@@ -1301,9 +1377,11 @@ impl App {
         cmds
     }
 
-    fn back_to_channel(&mut self) {
+    fn back_to_channel(&mut self) -> Vec<Cmd> {
         if self.in_thread() {
-            self.enter_view(View::Channel);
+            self.enter_view(View::Channel)
+        } else {
+            Vec::new()
         }
     }
 
@@ -1937,10 +2015,7 @@ impl App {
                 }
                 None => Vec::new(),
             },
-            KeyCode::Char('r') => {
-                self.start_reply();
-                Vec::new()
-            }
+            KeyCode::Char('r') => self.start_reply(),
             KeyCode::Char('a') => {
                 if let Some(m) = self.selected_msg() {
                     self.open_react(&m);
@@ -1951,11 +2026,11 @@ impl App {
             }
             KeyCode::Char('e') => {
                 if let Some(m) = self.selected_msg() {
-                    self.start_edit(&m);
+                    self.start_edit(&m)
                 } else {
                     self.flash("select a message first (Up/Down)");
+                    Vec::new()
                 }
-                Vec::new()
             }
             KeyCode::Char('d') => {
                 if let Some(m) = self.selected_msg() {
@@ -1978,34 +2053,33 @@ impl App {
             // its root and, from the root, out of the thread. Up and Down stay the cursor in the list (see `key_input` for
             // the same keys in the composer).
             KeyCode::Right => self.enter_thread_of_selected(),
-            KeyCode::Left => {
-                self.leave_for_thread_root();
-                Vec::new()
-            }
+            KeyCode::Left => self.leave_for_thread_root(),
             KeyCode::Esc => {
                 // Escape backs out one level: leave a thread first, otherwise there is nothing left to close, so
                 // the keyboard goes back to the channel list.
                 if self.in_thread() {
-                    self.back_to_channel();
+                    self.back_to_channel()
                 } else {
                     self.set_focus(Focus::Channels);
+                    Vec::new()
                 }
-                Vec::new()
             }
             _ => Vec::new(),
         }
     }
 
-    fn start_reply(&mut self) {
+    fn start_reply(&mut self) -> Vec<Cmd> {
         let Some(m) = self.selected_msg() else {
             self.flash("select a message first (Up/Down)");
-            return;
+            return Vec::new();
         };
         let root = self.store().map(|s| s.thread_root(&m).to_owned()).unwrap_or(m.id.clone());
         self.reply_target = Some(root);
         self.set_focus(Focus::Input);
         let n = self.selected_number().unwrap_or(0);
         self.flash(format!("replying to #{n}: type your reply and press Enter; Esc cancels"));
+        // A reply is written into the thread it answers, so the box holds that thread's draft while it is aimed there.
+        self.switch_draft()
     }
 
     fn copy_message(&mut self, m: &Ev) {
@@ -2070,8 +2144,12 @@ impl App {
                     self.editor.clear();
                     self.cmd_cursor = 0;
                     self.flash("edit cancelled");
+                    // the edit is over: the box goes back to the draft of the place we are in
+                    return self.switch_draft();
                 } else if self.reply_target.take().is_some() {
                     self.flash("reply cancelled");
+                    // the box is no longer aimed at that thread, so its draft goes back to the thread
+                    return self.switch_draft();
                 } else {
                     self.set_focus(Focus::Messages);
                 }
@@ -2158,6 +2236,8 @@ impl App {
             self.cmd_cursor = 0;
             return self.command(cmd, arg);
         }
+        // Where this text was written, taken before the reply target is dropped: that is part of the place it belongs to.
+        let at = self.draft_key();
         let root = self.reply_target.take().or_else(|| match &self.view {
             View::Thread(r) => Some(r.clone()),
             View::Channel => None,
@@ -2165,7 +2245,11 @@ impl App {
         self.editor.clear();
         self.cmd_cursor = 0;
         self.typing_sent = None;
-        self.send(text, root)
+        let mut cmds = self.clear_draft(at);
+        // the box is empty and belongs to wherever sending leaves us: a reply drops back to the channel's timeline
+        self.draft_at = self.draft_key();
+        cmds.extend(self.send(text, root));
+        cmds
     }
 
     fn command(&mut self, cmd: &str, arg: &str) -> Vec<Cmd> {
@@ -2222,10 +2306,7 @@ impl App {
             "whois" => self.show_whois(arg),
             "invite" => self.invite(arg),
             "edit" | "delete" => match arg.parse::<usize>().ok().and_then(|n| self.message_number(n)) {
-                Some(m) if cmd == "edit" => {
-                    self.start_edit(&m);
-                    Vec::new()
-                }
+                Some(m) if cmd == "edit" => self.start_edit(&m),
                 Some(m) => {
                     self.ask_delete(&m);
                     Vec::new()
@@ -2235,10 +2316,7 @@ impl App {
                     Vec::new()
                 }
             },
-            "c" => {
-                self.back_to_channel();
-                Vec::new()
-            }
+            "c" => self.back_to_channel(),
             "t" | "copy" => match arg.parse::<usize>().ok().and_then(|n| self.message_number(n)) {
                 Some(m) if cmd == "t" => {
                     let root = self.store().map(|s| s.thread_root(&m).to_owned()).unwrap_or(m.id.clone());
@@ -2544,21 +2622,25 @@ impl App {
         true
     }
 
-    fn start_edit(&mut self, m: &Ev) {
+    fn start_edit(&mut self, m: &Ev) -> Vec<Cmd> {
         if self.read_only {
             self.flash("read-only mode: nothing is sent");
-            return;
+            return Vec::new();
         }
         if !self.own(m, "edit") {
-            return;
+            return Vec::new();
         }
         let text = self.store().map(|s| s.content_of(m).0.to_owned()).unwrap_or_else(|| m.content.clone());
+        // The edit takes the box over, so the draft that was in it goes back to the place it was typed and comes back
+        // when the edit is over (see `finish_edit` and the Esc arm in `key_input`).
+        let cmds = self.stash_draft();
         self.editor.clear();
         self.editor.insert_str(&text);
         self.editing = Some(m.id.clone());
         self.reply_target = None;
         self.set_focus(Focus::Input);
         self.flash("editing your message: Enter saves it, Esc cancels");
+        cmds
     }
 
     fn finish_edit(&mut self, id: String, text: String) -> Vec<Cmd> {
@@ -2569,12 +2651,15 @@ impl App {
         }
         self.editing = None;
         self.editor.clear();
+        // the edit is over: the box goes back to the draft of the place we are in
+        let mut cmds = self.switch_draft();
         if original.as_deref() == Some(text.as_str()) {
             self.flash("nothing changed");
-            return Vec::new();
+            return cmds;
         }
-        let Some(c) = self.channel() else { return Vec::new() };
-        vec![Cmd::Edit { channel: c.id.clone(), id, text }]
+        let Some(c) = self.channel() else { return cmds };
+        cmds.push(Cmd::Edit { channel: c.id.clone(), id, text });
+        cmds
     }
 
     /// `a`: open the reaction picker on the selected message. It starts on the reaction you already have there, when it is in the

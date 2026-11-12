@@ -249,6 +249,8 @@ async fn run_tui(relay: Arc<Relay>, read_only: bool, send_typing: bool, mouse: b
     app.seed_read(config::load_read_state(&paths.read_state()));
     // The channels archived on this device: they have no row in the channel list until a search brings one back.
     app.seed_archived(config::load_archived(&paths.archived()));
+    // What was typed but not sent, per channel and thread: it comes back into the box where it was written.
+    app.seed_drafts(config::load_drafts(&paths.drafts()));
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
     // The release feed: seed the notice from what the last check learned, and ask GitHub again only when that is stale. A failure
     // (offline, no release yet) is silent — see `release.rs`.
@@ -284,6 +286,10 @@ async fn run_tui(relay: Arc<Relay>, read_only: bool, send_typing: bool, mouse: b
             out.flush()?;
         }
         if app.quit {
+            // What is still in the box goes to disk before we go: quitting is not a reason to lose a half-written message.
+            for cmd in app.stash_draft() {
+                run(cmd, &relay, &tx, &live.channels, &host, paths);
+            }
             host.shutdown();
             return Ok(exit_notice(&app));
         }
@@ -298,6 +304,9 @@ async fn run_tui(relay: Arc<Relay>, read_only: bool, send_typing: bool, mouse: b
                     return Err(e.into());
                 }
                 None => {
+                    for cmd in app.stash_draft() {
+                        run(cmd, &relay, &tx, &live.channels, &host, paths);
+                    }
                     host.shutdown();
                     return Ok(exit_notice(&app));
                 }
@@ -351,6 +360,10 @@ fn run(cmd: Cmd, relay: &Arc<Relay>, tx: &UnboundedSender<AppEvent>, subscriptio
             // Written here for the same reason as the read positions: the whole set goes out each time, and a spawned write
             // could race an older one.
             let _ = config::save_archived(&paths.archived(), &ids);
+        }
+        Cmd::SaveDrafts(drafts) => {
+            // Written here too: each save is the whole map, so an older one must not land after a newer one.
+            let _ = config::save_drafts(&paths.drafts(), &drafts);
         }
         Cmd::LoadWindow { channel, cursor } => {
             tokio::spawn(async move {
