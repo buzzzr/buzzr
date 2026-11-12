@@ -43,3 +43,7 @@ inventory = "0.3.25"
 [dev-dependencies]
 nix = { version = "0.31.3", features = ["term"] }
 vt100 = "0.18.1"
+# Nothing new is compiled for these two: the end-to-end suite drives the same versions the client uses, to publish
+# the relay traffic a test needs but the UI cannot send (see `tests/e2e.rs`, the agent case).
+nostr = { version = "0.44", features = ["nip44", "nip98"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util", "signal"] }

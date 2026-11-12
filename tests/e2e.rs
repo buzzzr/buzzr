@@ -104,6 +104,21 @@ fn agent_pubkey(record: &str) -> String {
     record[start..start + 64].to_owned()
 }
 
+/// A channel id for the traffic a test has to publish itself: buzzr builds a message from a channel **uuid**, and the
+/// fake relay's ids (`c-design`) are not uuids — the wall the invite and join cases meet — so a channel of the test's
+/// own is the only channel a message can be built for here.
+const TEST_CHANNEL: &str = "0b6c4b1e-7a0a-4f4f-9d4f-2a6f0f1c5a11";
+
+/// Publish one message to the relay as the person, through buzzr's own client: a real signed event over `POST /events`,
+/// with the mentions as `p` tags — exactly what a composer sends. For a test that needs relay traffic the UI cannot
+/// send (see the agent case).
+fn publish_message(relay: &Relay, channel: &str, text: &str, mentions: &[String]) {
+    let keys = nostr::Keys::parse(KEY).expect("the test key");
+    let client = buzzr::relay::Relay::new(&relay.url, keys, None).expect("a client for the relay");
+    let message = buzzr::relay::message_builder(channel, text, None, mentions).expect("a message for that channel");
+    tokio::runtime::Runtime::new().expect("a runtime").block_on(client.submit(message)).expect("the relay took the message");
+}
+
 fn free_port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0").expect("no free port").local_addr().unwrap().port()
 }
@@ -1014,6 +1029,60 @@ fn agents_are_listed_and_a_new_one_is_created_through_the_composer() {
     again.press("enter");
     again.expect("the agent made before the restart", "Scout");
     again.expect("its harness still named", "claude-agent-acp");
+}
+
+/// A message that names a local agent is answered by it. The agent an `/agents create` makes is only an identity and a
+/// folder until something runs it: the **runner** (`src/runner.rs`, started with the app) watches `agents.json` and, for
+/// every message that carries the agent in a `p` tag, runs its harness over ACP and publishes what the harness answered
+/// back to the channel the mention named, as the agent's own message. This case drives that whole loop on the real
+/// binary: the agent is made through the composer, the mention reaches the relay, the answer comes back on it, and the
+/// status line says the agent replied.
+///
+/// The mention is published by the test rather than typed into the composer, for the reason the invite case gives: a
+/// message is built from a channel *uuid* and the relay's ids are not uuids, so a message for a channel of the relay
+/// cannot be built at all here (and a composer cannot mention someone who is not in the channel anyway). From the relay
+/// in, every step is the real one — the runner reads the mention over HTTP with the agent's own key, starts the harness
+/// in the agent's folder, and publishes the answer signed as the agent.
+#[test]
+fn a_message_that_names_a_local_agent_is_answered_by_it() {
+    let Some(relay) = relay_or_skip("a_message_that_names_a_local_agent_...") else { return };
+    // The runner is part of the app and `/agents` is a compiled-in plugin, so this session starts with plugins on.
+    let s = session_with_plugins(&relay);
+    let config = s.config.clone();
+    s.press_all(&["tab", "tab"]); // channels -> messages -> input
+    s.expect("the input box to take focus", "Send");
+    // make an agent, the way the case above does: a name, then what it should do, then a model and a level
+    s.type_text("/agents create");
+    s.press("enter");
+    s.expect("the composer to ask for a name", "new agent · name");
+    s.type_text("Scout");
+    s.press("enter");
+    s.expect("the composer to ask what it should do", "new agent · instructions");
+    s.type_text("watch the repo");
+    s.press("enter");
+    s.expect("the models panel", "new agent · model");
+    s.press("enter");
+    s.expect("the levels panel", "new agent · level");
+    s.press("enter");
+    s.expect("the agent to be made", "Scout created");
+    s.press("esc");
+    let written = std::fs::read_to_string(config.join("agents.json")).expect("the agent is on disk");
+    let agent = agent_pubkey(&written);
+    // The runner re-reads agents.json every couple of seconds and a watch answers only what arrives after it starts, so
+    // give it the beat it needs before anything is sent: the mention below must land after the watch began.
+    std::thread::sleep(Duration::from_secs(3));
+    let asker = nostr::Keys::parse(KEY).expect("the test key").public_key().to_hex();
+    publish_message(&relay, TEST_CHANNEL, "@Scout what is new?", std::slice::from_ref(&agent));
+    // The turn blocks on the harness off the event loop, so the status line is what says it happened.
+    s.until("the agent to have replied", |sc| sc.contains("Scout replied"));
+    // And the answer is on the relay: it is the harness's own text, signed as the agent, in the channel the mention
+    // named, naming the person who asked so they are told about it. A relay that keeps what it is sent is needed here.
+    let replies = relay_query(&relay, &format!(r#"[{{"kinds":[9],"authors":["{agent}"]}}]"#));
+    assert!(replies.contains("heard:"), "the answer is what the harness streamed back: {replies}");
+    assert!(replies.contains("@Scout what is new?"), "and it is the answer to that mention: {replies}");
+    assert!(replies.contains("(permission: yes)"), "the turn ran to its end — the fake asks permission and the client allows it: {replies}");
+    assert!(replies.contains(TEST_CHANNEL), "the answer is in the channel the mention came from: {replies}");
+    assert!(replies.contains(&asker), "and it names the person who asked: {replies}");
 }
 
 #[test]
