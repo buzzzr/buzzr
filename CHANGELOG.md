@@ -51,6 +51,15 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
   flow and makes nothing — no key, no folder, no record — and the flow says why. The harness it is made for is a local Claude Code driven over
   ACP (`claude-agent-acp`); a second one (codex, say) is a new entry in the harness table (`src/harness/mod.rs`) and nothing else. Read-only
   mode refuses to make one.
+- **A local agent now answers the mentions that name it.** An agent was an identity and a folder with nothing running it; a **runner**
+  (`src/runner.rs`, started with the app) gives every agent in `agents.json` a watch of its own and answers its mentions: each message that
+  carries the agent in a `p` tag is one turn of its harness, started in the agent's own folder, with what the harness streams back published to
+  the channel the mention came from — as the agent's own message, signed with the agent's own key and carrying its owner's attestation, the way
+  its profile is. One session is kept between mentions, so the agent stays in the conversation it is in, and the status line says that it
+  replied, or why it could not (a harness that is not installed, a relay that refuses the answer, a turn that streams back nothing). A mention
+  names an agent **in a channel**, so the agent has to be in that channel to be mentioned at all — `/invite <npub>`, the npub `/agents` shows,
+  puts it there — and only mentions that arrive while the runner is watching are answered: an older backlog is not. A harness starting a turn
+  is buzzr's job, never a plugin's, and a run that may not send (`--read-only`, `BUZZR_SAFE_MODE=1`) starts no runner.
 
 ### Changed
 

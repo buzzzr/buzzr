@@ -65,7 +65,10 @@
   relay: the agent's own profile, signed with its own key and carrying your attestation of it, and your listing of it, so other Buzz clients
   show it as yours. The harness it is made for is a local Claude Code driven over ACP (`claude-agent-acp`, as the Buzz app does). The harness is
   asked what it offers, and the relay asked to take the agent, before anything is written: a harness that will not answer, like an agent the
-  relay will not take, stops the flow and makes nothing, and says why.
+  relay will not take, stops the flow and makes nothing, and says why. The agent then **answers for itself**: buzzr runs its harness — a local
+  Claude Code, driven over ACP, as the agent, with the agent's own key — for every message that names it, and posts what the harness answered
+  back into the channel it was mentioned in. A mention names an agent *in a channel*, so add the agent to the channel first (`/invite <npub>`,
+  the npub the `/agents` list shows) — then anything that mentions it, from any Buzz client, gets an answer.
 - **Plugins.** Add your own `/commands`, status items, badges, a pane under the channel list and panels — from any language, as a runtime-loaded plugin, or as a compiled-in Rust plugin in buzzr's own tree. See [PLUGIN.md](PLUGIN.md).
 - **Themes.** The default `buzz-dark` uses the dark palette of the Buzz desktop app. `BUZZR_THEME=dark` keeps your terminal's own background, `BUZZR_THEME=buzz-light` is the desktop app's light palette, and `BUZZR_THEME=light` is for a light terminal. `BUZZR_THEME=high-contrast` is black-on-white at WCAG AAA (7:1), and `NO_COLOR` or `TERM=dumb` turns colour off entirely.
 - **Read-only mode** (`--read-only`) for identities you should not speak for.

@@ -216,7 +216,9 @@ keeps that copy byte-for-byte identical to `sdk/typescript/buzzr.ts`.
 - **`create_agent`** (needs `agents:write`) asks buzzr to make a local agent — a key, a folder and a record of its own — on `harness` and
   its `model`/`effort` (either may be empty, for the harness's own choice), and publish it. It is refused under `--read-only`, and the
   answer is a `created` message with the same `id`: the `agent` it made, or an `error`. The relay is asked first, so an agent the relay
-  refuses is not made at all, and the `error` says why. buzzr owns the key, the folder and the relay; the plugin never sees them.
+  refuses is not made at all, and the `error` says why. buzzr owns the key, the folder and the relay; the plugin never sees them. buzzr runs
+  the agent it made, too: the **runner** answers the messages that mention it (see `ARCHITECTURE.md`), so a plugin that asks for an agent gets
+  one that answers on its own, and never starts a process itself.
 - The process runs with a **clean environment** (only `PATH`, `HOME`, `LANG`, `LC_ALL`, `TZ`, `TMPDIR` and the `BUZZR_PLUGIN_*`
   variables are passed on), so no key or relay credential in buzzr's environment can leak into a plugin. Its stderr is captured to
   `<config dir>/plugin-logs/<id>.log`; `log` with `level:"error"` also flashes.
