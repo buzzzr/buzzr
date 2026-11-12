@@ -408,7 +408,7 @@ impl Runtime {
                     info.state = PluginState::Running;
                     info.detail.clear();
                     info.commands = contributions.commands.len();
-                    // What the plugin declared about itself in its own code, kept for `/plugins` and the permission checks.
+                    // What the plugin declared about itself in its own code, kept for the `plugins` command and the permission checks.
                     info.name = name.clone();
                     info.permissions = declaration.permissions.clone();
                     info.tick_ms = declaration.tick_ms;

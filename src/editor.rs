@@ -121,16 +121,6 @@ impl Editor {
         self.cur = start;
     }
 
-    /// Ctrl+K: delete from the cursor to the end of the line (or the newline itself when the line is already at its end).
-    pub fn kill_to_end(&mut self) {
-        let end = self.line_end();
-        if end == self.cur {
-            self.delete();
-        } else {
-            self.chars.drain(self.cur..end);
-        }
-    }
-
     /// Break the text into display rows for a box `width` cells wide (characters are wrapped, not words: this is an editor).
     pub fn rows(&self, width: usize) -> Vec<Row> {
         let width = width.max(2);
@@ -249,14 +239,6 @@ mod tests {
         e.end();
         e.kill_to_start();
         assert_eq!(e.text(), "");
-        let mut e = ed("abc\ndef");
-        e.up(80);
-        e.home();
-        e.right();
-        e.kill_to_end();
-        assert_eq!(e.text(), "a\ndef");
-        e.kill_to_end(); // at the end of the line: removes the newline
-        assert_eq!(e.text(), "adef");
     }
 
     #[test]

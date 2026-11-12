@@ -3,7 +3,7 @@
 //! There is no manifest. The folder name is the plugin's id, the entry file's shebang picks the interpreter, and
 //! everything else the plugin declares — its display name, what it is allowed to do, and whether it wants a heartbeat —
 //! is declared in its own code and sent over the protocol when the process says it is `ready`. A folder whose entry is
-//! missing or not executable is reported by `/plugins` and by `buzzr plugins list` instead of being loaded.
+//! missing or not executable is reported by the `plugins` command and by `buzzr plugins list` instead of being loaded.
 
 use crate::contrib::valid_id;
 use std::collections::BTreeMap;

@@ -119,7 +119,7 @@ pub fn line_width(segments: &[Segment]) -> usize {
     segments.iter().map(Segment::width).sum()
 }
 
-/// One command a plugin adds to the input box: `/todo`, `/prs`, ...
+/// One command a plugin adds to the Ctrl+K palette: `todo`, `prs`, ...
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub struct PluginCommand {
     pub id: String,
@@ -251,7 +251,7 @@ fn clean_segments(segments: Vec<Segment>) -> Vec<Segment> {
     out
 }
 
-/// Ids end up in JSON and in `/commands`, never in a path: keep them to a boring alphabet.
+/// Ids end up in JSON and in the palette, never in a path: keep them to a boring alphabet.
 pub fn valid_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 64
@@ -308,7 +308,7 @@ impl Registry {
         self.plugins.get(id).map(|e| e.name.as_str())
     }
 
-    /// The plugin that owns a `/command`. Built-in buzzr commands are checked first by `App::command`.
+    /// The plugin that owns a command. Built-in buzzr commands are checked first by `App::command`.
     pub fn command(&self, id: &str) -> Option<(&str, &PluginCommand)> {
         self.plugins
             .iter()
@@ -367,7 +367,7 @@ impl Registry {
     }
 }
 
-/// Where a discovered plugin is in its life. Shown by `/plugins`.
+/// Where a discovered plugin is in its life. Shown by the `plugins` command.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PluginState {
     #[default]
@@ -390,7 +390,7 @@ impl PluginState {
     }
 }
 
-/// What `/plugins` shows about one plugin on disk.
+/// What the `plugins` command shows about one plugin on disk.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PluginMeta {
     pub id: String,
@@ -598,7 +598,7 @@ pub struct MessageView {
 /// Work for the plugin runtime, like `Cmd` is work for the relay.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PluginCmd {
-    /// `/command args` from the input box.
+    /// A command run from the palette, with its argument.
     Invoke { plugin: String, command: String, args: String },
     /// Enter on a panel row that has an action.
     PanelAction { plugin: String, id: String, row: usize, value: Option<String> },

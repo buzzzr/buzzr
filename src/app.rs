@@ -57,7 +57,9 @@ pub enum Overlay {
     Keys,
     Help,
     Search,
-    /// Somebody's profile card (`/whois`).
+    /// The `Ctrl+K` command palette (`App::palette`).
+    Palette,
+    /// Somebody's profile card (the `whois` command).
     Whois,
     /// A plugin panel (or the built-in plugin list), drawn from `App::panel`.
     Panel,
@@ -75,7 +77,7 @@ pub struct PromptState {
     pub multiline: bool,
 }
 
-/// Somebody's profile card: what `/whois NAME` shows. The name and the about line come back from the relay a moment later, so
+/// Somebody's profile card: what the `whois` command shows. The name and the about line come back from the relay a moment later, so
 /// the card opens at once with what is already known and fills in.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Whois {
@@ -112,7 +114,7 @@ fn at_mention(text_lower: &str, needle: &str) -> bool {
 /// An open panel: rows and a cursor owned by the host, `Enter` sends the row's action to its plugin.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PanelState {
-    /// Empty for the built-in `/plugins` list, which has no plugin behind it.
+    /// Empty for the built-in `plugins` list, which has no plugin behind it.
     pub plugin: String,
     pub id: String,
     pub title: String,
@@ -139,38 +141,60 @@ pub enum Row {
     Message(Ev),
 }
 
-/// The built-in commands, in the order the palette lists them, with the one line it shows beside each name. `command` is the
-/// source of truth for what a `/command` does; this table only names them, and `the_palette_names_every_command_that_is_handled`
-/// keeps the two from drifting apart.
-pub const COMMANDS: &[(&str, &str)] = &[
-    ("archive", "archive this channel (search finds it again)"),
-    ("c", "back to the channel"),
-    ("copy", "copy message N to the clipboard"),
-    ("delete", "delete your own message N (asks first)"),
-    ("dm", "open your DM with NAME, or start one"),
-    ("edit", "edit your own message N"),
-    ("help", "the commands and how things work"),
-    ("invite", "add someone to this channel: /invite NAME"),
-    ("join", "join a channel: /join NAME"),
-    ("leave", "leave this channel (asks first)"),
-    ("more", "load older messages"),
-    ("new", "create a channel: /new [private] name [about]"),
-    ("plugins", "what is loaded, and the commands plugins added"),
-    ("q", "quit buzzr"),
-    ("r", "reply to message N: /r N text"),
-    ("read", "mark this channel read (/read all for every channel)"),
-    ("refresh", "reload the open channel or thread now"),
-    ("search", "search channels, people and messages: /search text"),
-    ("t", "open the thread of message N"),
-    ("update", "how to upgrade this copy"),
-    ("whois", "somebody's profile: /whois NAME"),
+/// The built-in commands, in the order the palette lists them: the name, the argument it takes (an empty string for one
+/// that takes none) and the one line shown beside it. `command` is the source of truth for what a command does; this table
+/// only names them, and `every_command_the_palette_names_is_handled` keeps the two from drifting apart. A command whose
+/// argument is empty runs as soon as it is picked; otherwise the palette asks for the argument first, showing this text as
+/// the hint (`[all]` and `[private] …` mean the argument is optional — Enter with nothing typed runs it as it is).
+pub const COMMANDS: &[(&str, &str, &str)] = &[
+    ("archive", "", "archive this channel (search finds it again)"),
+    ("c", "", "back to the channel"),
+    ("copy", "N", "copy message N to the clipboard"),
+    ("delete", "N", "delete your own message N (asks first)"),
+    ("dm", "NAME", "open your DM with NAME, or start one"),
+    ("edit", "N", "edit your own message N"),
+    ("help", "", "the commands and how things work"),
+    ("invite", "NAME", "add someone to this channel"),
+    ("join", "NAME", "join (or open) a channel"),
+    ("leave", "", "leave this channel (asks first)"),
+    ("more", "", "load older messages"),
+    ("new", "[private] name [about]", "create a channel"),
+    ("plugins", "", "what is loaded, and the commands plugins added"),
+    ("q", "", "quit buzzr"),
+    ("r", "N text", "reply to message N"),
+    ("read", "[all]", "mark this channel read (`all`: every channel)"),
+    ("refresh", "", "reload the open channel or thread now"),
+    ("search", "text", "search channels, people and messages"),
+    ("t", "N", "open the thread of message N"),
+    ("update", "", "how to upgrade this copy"),
+    ("whois", "NAME", "somebody's profile"),
 ];
 
-/// One row of the slash-command palette: a command name and the one line under it.
+/// One row of the command palette: a command name, the argument it takes (empty for one that takes none) and the one line
+/// under it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommandRow {
     pub name: String,
+    pub usage: String,
     pub desc: String,
+}
+
+/// The `Ctrl+K` command palette. It is a modal with a query of its own, so it never touches the composer or its draft.
+#[derive(Debug, Default)]
+pub struct Palette {
+    /// What has been typed: the filter while the list is up, the argument while one is being given to a command.
+    pub query: Editor,
+    /// The row under the cursor, an index into `command_rows`.
+    pub cursor: usize,
+    /// `Some` while the palette is asking for the picked command's argument.
+    pub arg: Option<PaletteArg>,
+}
+
+/// The command the palette is asking an argument for, and the usage line it shows while it does.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PaletteArg {
+    pub command: String,
+    pub usage: String,
 }
 
 /// The reaction picker (`a` on a selected message): the message it reacts to, what has been typed to search the emoji table, and
@@ -373,7 +397,7 @@ pub struct App {
     /// opened has no entry, and is not marked (unread starts at zero, as it does for a channel).
     pub thread_read: HashMap<String, u64>,
     /// Messages the reader forced unread with `u`, per channel: the message ids, kept apart from the frontiers because a mark is
-    /// intent rather than a position — it survives the frontier moving past it and only `/read` clears it. Device-local.
+    /// intent rather than a position — it survives the frontier moving past it and only `read` clears it. Device-local.
     pub marks: HashMap<String, BTreeSet<String>>,
     /// The channel ids the reader archived: kept out of the channel list, and brought back only from a search result. Like the
     /// read positions this is per-user view state, not a relay concept, so it lives on this device (`archived.json`).
@@ -422,20 +446,15 @@ pub struct App {
     pub confirm_invite: Option<PendingInvite>,
     /// The reaction picker, while it is up: the message it reacts to, what has been typed to search, and the row under the cursor.
     pub react: Option<ReactPicker>,
-    /// The slash-command palette's row under the cursor. The palette itself is derived from the editor text (`command_rows`);
-    /// this is only where the highlight sits, reset to the first row every time the command word changes.
-    pub cmd_cursor: usize,
-    /// The input text the palette was closed on with Esc: while the editor still holds exactly that, `palette_up` stays false,
-    /// so Esc hides the pane without losing the command word that was typed. Any edit changes the text and the palette comes
-    /// back; submitting clears it (see `key_input` and `submit`).
-    cmd_hidden: Option<String>,
+    /// The `Ctrl+K` command palette: its query, the row under the cursor, and the argument step while one is up.
+    pub palette: Palette,
     /// The channels we are a member of, from the relay's `kind:39002` (`Cmd::LoadRoster`): a channel we are not in offers to
     /// join it instead of the composer, and Enter opens one we are in.
     pub joined: HashSet<String>,
     /// How many people are in each channel, from the same answer. A channel with no entry is one the relay told us nothing
     /// about: it keeps no count, and it is not read as a channel we are not in (see `not_joined`).
     pub member_counts: HashMap<String, usize>,
-    /// The channel a `/leave` is waiting on a yes/no for.
+    /// The channel a `leave` is waiting on a yes/no for.
     pub confirm_leave: Option<String>,
     pub search: Search,
     /// Somebody's profile card, while `Overlay::Whois` is up.
@@ -444,13 +463,13 @@ pub struct App {
     pending_dm: Option<String>,
     /// A name the local table did not have, while the relay's directory is asked who it is (`Cmd::FindPeople`).
     lookup: Option<Lookup>,
-    /// What loaded plugins put on the screen: status items, badges, marks, a pane and `/commands`.
+    /// What loaded plugins put on the screen: status items, badges, marks, a pane and commands.
     pub plugins: Registry,
-    /// How this copy of buzzr was installed, for `/update`; the loop fills it in, tests set it directly.
+    /// How this copy of buzzr was installed, for the `update` command; the loop fills it in, tests set it directly.
     pub update_source: InstallSource,
     /// A newer release the feed named, if any; the loop fills it in, tests set it directly.
     pub latest: Option<String>,
-    /// Every plugin found on disk and where it is in its life; shown by `/plugins`.
+    /// Every plugin found on disk and where it is in its life; shown by the `plugins` overlay.
     pub plugin_meta: Vec<PluginMeta>,
     /// The open panel, if any; `Overlay::Panel` is set while it is up.
     pub panel: Option<PanelState>,
@@ -557,8 +576,7 @@ impl App {
             confirm_delete: None,
             confirm_invite: None,
             react: None,
-            cmd_cursor: 0,
-            cmd_hidden: None,
+            palette: Palette::default(),
             joined: HashSet::new(),
             member_counts: HashMap::new(),
             confirm_leave: None,
@@ -697,11 +715,6 @@ impl App {
             self.chan_cursor = self.cur.unwrap_or(0);
             self.clamp_cursor();
         }
-        if f != self.focus {
-            // The palette is a function of the input having the keyboard, so leaving the composer and coming back shows it
-            // again, whatever Esc last closed on (see `palette_up`).
-            self.cmd_hidden = None;
-        }
         self.focus = f;
     }
 
@@ -724,9 +737,10 @@ impl App {
         self.flash = Some((text.into(), Instant::now()));
     }
 
-    /// The one line the status bar keeps up while a newer release is known, or nothing. `/update` then says how to get it.
+    /// The one line the status bar keeps up while a newer release is known, or nothing. The `update` command then says how to
+    /// get it. The app name is left off so the hint still fits beside the "N messages loaded" text on a narrow status line.
     pub fn update_hint(&self) -> Option<String> {
-        self.latest.as_ref().map(|v| format!("{} {v} available · /update", env!("CARGO_PKG_NAME")))
+        self.latest.as_ref().map(|v| format!("{v} available · Ctrl+K → update"))
     }
 
     /// Names of people typing in the open view right now: those in the channel, or those in the one thread on screen.
@@ -793,7 +807,7 @@ impl App {
 
     /// Record that a channel has been read through its newest loaded message, and return the command that writes the new
     /// position to disk when it moved. The unread badge clears either way: whatever we counted, we are looking at the channel.
-    /// A message forced unread with `u` is not what we counted, though: it stays unread until `/read`, so its badge comes back.
+    /// A message forced unread with `u` is not what we counted, though: it stays unread until `read`, so its badge comes back.
     fn read_through(&mut self, channel: &str) -> Option<Cmd> {
         self.unread.remove(channel);
         self.sync_mark_badge(channel);
@@ -850,7 +864,7 @@ impl App {
         roots
     }
 
-    /// Mark every thread in a channel (or in every channel, when `channel` is `None`) read as of `at`: `/read` clears the thread
+    /// Mark every thread in a channel (or in every channel, when `channel` is `None`) read as of `at`: `read` clears the thread
     /// marks too, so the message list and the channel badge agree. Returns whether anything moved.
     fn mark_threads_read(&mut self, channel: Option<&str>, at: u64) -> bool {
         let ids: Vec<String> = match channel {
@@ -871,7 +885,7 @@ impl App {
         changed
     }
 
-    /// `/read` marks the channel on screen read; `/read all` marks every channel read as of now.
+    /// `read` marks the channel on screen read; `read all` marks every channel read as of now.
     fn mark_read_command(&mut self, arg: &str) -> Vec<Cmd> {
         let mut cmds = Vec::new();
         if arg.eq_ignore_ascii_case("all") {
@@ -923,7 +937,7 @@ impl App {
     /// `u` on the message list forces the selected message unread on this device: the badge comes back and the `new messages`
     /// line is drawn above it, and it survives a restart. It is a mark on that message, not a move of the read frontier, so it
     /// works on a message of the reader's own and on the newest one in the channel — the two cases a frontier cannot express.
-    /// `/read` clears it; reading on does not.
+    /// `read` clears it; reading on does not.
     fn mark_unread_from_selected(&mut self) -> Vec<Cmd> {
         let Some(m) = self.selected_msg() else {
             self.flash("select a message first (Up/Down)");
@@ -1396,7 +1410,7 @@ impl App {
         }
         let label = self.channels[index].label.clone();
         let mut cmds = vec![Cmd::SaveArchived(self.archived.clone())];
-        self.flash(format!("archived {label} — Ctrl+F or /search finds it again"));
+        self.flash(format!("archived {label} — Ctrl+F finds it again"));
         if self.cur == Some(index) {
             let next = self.next_visible(index);
             let target = if next != index { Some(next) } else { let prev = self.prev_visible(index); (prev != index).then_some(prev) };
@@ -2046,6 +2060,9 @@ impl App {
         if self.overlay == Overlay::Panel {
             return self.key_panel(k);
         }
+        if self.overlay == Overlay::Palette {
+            return self.key_palette(k);
+        }
         if self.overlay != Overlay::None {
             // a panel is open: Esc (or Enter) closes it and nothing else happens
             if matches!(k.code, KeyCode::Esc | KeyCode::Enter) {
@@ -2054,11 +2071,6 @@ impl App {
             return Vec::new();
         }
         match k.code {
-            // Tab completes the highlighted command while the palette is up, rather than switching panes.
-            KeyCode::Tab if self.palette_up() => {
-                self.palette_complete();
-                return Vec::new();
-            }
             KeyCode::Tab => {
                 let next = match self.focus {
                     Focus::Channels => Focus::Messages,
@@ -2077,6 +2089,7 @@ impl App {
                 self.set_focus(next);
                 return Vec::new();
             }
+            KeyCode::Char('k') if ctrl => return self.open_palette(),
             KeyCode::Char('f') if ctrl => {
                 return self.open_search(String::new());
             }
@@ -2287,18 +2300,10 @@ impl App {
         match k.code {
             KeyCode::Enter if shift || alt => self.editor.insert_char('\n'),
             KeyCode::Char('j') if ctrl => self.editor.insert_char('\n'),
-            // With the palette up, Enter runs the command on the cursor line rather than submitting the half-typed word.
-            KeyCode::Enter if self.palette_up() => return self.palette_run(),
             KeyCode::Enter => return self.submit(),
             KeyCode::Esc => {
-                if self.palette_up() {
-                    // Esc closes the palette and keeps the command word in the input, so it can be finished or corrected:
-                    // the text is what holds the pane up, so remembering it is the whole state (`palette_up`). Esc again
-                    // then goes on to the next thing, and any edit brings the palette back.
-                    self.cmd_hidden = Some(self.editor.text());
-                } else if self.editing.take().is_some() {
+                if self.editing.take().is_some() {
                     self.editor.clear();
-                    self.cmd_cursor = 0;
                     self.flash("edit cancelled");
                     // the edit is over: the box goes back to the draft of the place we are in
                     return self.switch_draft();
@@ -2312,17 +2317,14 @@ impl App {
             }
             KeyCode::Backspace if alt => {
                 self.editor.kill_word_back();
-                self.cmd_cursor = 0;
                 return self.maybe_typing();
             }
             KeyCode::Backspace => {
                 self.editor.backspace();
-                self.cmd_cursor = 0;
                 return self.maybe_typing();
             }
             KeyCode::Delete => {
                 self.editor.delete();
-                self.cmd_cursor = 0;
                 return self.maybe_typing();
             }
             KeyCode::Left if ctrl || alt => self.editor.word_left(),
@@ -2331,9 +2333,6 @@ impl App {
             KeyCode::Right => self.editor.right(),
             KeyCode::Home => self.editor.home(),
             KeyCode::End => self.editor.end(),
-            // While the palette is up the arrows move its highlight, not the editor cursor: the command word is one line.
-            KeyCode::Up if self.palette_up() => self.palette_move(-1),
-            KeyCode::Down if self.palette_up() => self.palette_move(1),
             KeyCode::Up if self.editor.is_empty() => {
                 // Nothing typed: Up leaves the input for the message list, on the newest message, so the arrow keys
                 // get from the composer to the messages without a Tab cycle (see the Down arm in `key_messages`).
@@ -2348,26 +2347,14 @@ impl App {
             }
             KeyCode::Char('a') if ctrl => self.editor.home(),
             KeyCode::Char('e') if ctrl => self.editor.end(),
-            KeyCode::Char('w') if ctrl => {
-                self.editor.kill_word_back();
-                self.cmd_cursor = 0;
-            }
-            KeyCode::Char('u') if ctrl => {
-                self.editor.kill_to_start();
-                self.cmd_cursor = 0;
-            }
-            KeyCode::Char('k') if ctrl => {
-                self.editor.kill_to_end();
-                self.cmd_cursor = 0;
-            }
+            KeyCode::Char('w') if ctrl => self.editor.kill_word_back(),
+            KeyCode::Char('u') if ctrl => self.editor.kill_to_start(),
             KeyCode::Char('b') if alt => self.editor.word_left(),
             KeyCode::Char('f') if alt => self.editor.word_right(),
             KeyCode::Char(c) if !ctrl && !alt => {
                 self.editor.insert_char(c);
-                self.cmd_cursor = 0;
                 return self.maybe_typing();
             }
-            // Tab never reaches here while the palette is up: `handle` completes the command first.
             KeyCode::Tab => self.editor.insert_str("    "),
             _ => {}
         }
@@ -2377,20 +2364,12 @@ impl App {
     // ---- sending and commands --------------------------------------------------------------------------------------------
 
     fn submit(&mut self) -> Vec<Cmd> {
-        // Anything typed is settled here, so an Esc-closed palette starts fresh next time a `/` is typed.
-        self.cmd_hidden = None;
         let text = self.editor.text().trim().to_owned();
         if let Some(id) = self.editing.clone() {
             return self.finish_edit(id, text);
         }
         if text.is_empty() {
             return Vec::new();
-        }
-        if let Some(rest) = text.strip_prefix('/') {
-            let (cmd, arg) = rest.split_once(char::is_whitespace).map(|(c, a)| (c, a.trim())).unwrap_or((rest, ""));
-            self.editor.clear();
-            self.cmd_cursor = 0;
-            return self.command(cmd, arg);
         }
         // Where this text was written, taken before the reply target is dropped: that is part of the place it belongs to.
         let at = self.draft_key();
@@ -2399,7 +2378,6 @@ impl App {
             View::Channel => None,
         });
         self.editor.clear();
-        self.cmd_cursor = 0;
         self.typing_sent = None;
         let mut cmds = self.clear_draft(at);
         // the box is empty and belongs to wherever sending leaves us: a reply drops back to the channel's timeline
@@ -2432,7 +2410,7 @@ impl App {
             "archive" => match self.cur {
                 Some(i) => self.archive(i),
                 None => {
-                    self.flash("usage: /archive (open the channel you want to archive first)");
+                    self.flash("archive takes the channel you are in (open it first)");
                     Vec::new()
                 }
             },
@@ -2448,7 +2426,7 @@ impl App {
             "new" => self.create_channel(arg),
             "dm" => {
                 if arg.trim().is_empty() {
-                    self.flash("usage: /dm NAME (a name, or an npub)");
+                    self.flash("dm needs a name (a name, or an npub)");
                     return Vec::new();
                 }
                 match self.who_is(arg) {
@@ -2469,7 +2447,7 @@ impl App {
                     Vec::new()
                 }
                 None => {
-                    self.flash(format!("usage: /{cmd} N (a message number shown as #N)"));
+                    self.flash(format!("{cmd} needs N (the message number shown as #N)"));
                     Vec::new()
                 }
             },
@@ -2484,7 +2462,7 @@ impl App {
                     Vec::new()
                 }
                 None => {
-                    self.flash(format!("usage: /{cmd} N (a message number shown as #N)"));
+                    self.flash(format!("{cmd} needs N (the message number shown as #N)"));
                     Vec::new()
                 }
             },
@@ -2496,7 +2474,7 @@ impl App {
                         self.send(text.to_owned(), Some(root))
                     }
                     _ => {
-                        self.flash("usage: /r N text");
+                        self.flash("r needs N and the text");
                         Vec::new()
                     }
                 }
@@ -2508,99 +2486,175 @@ impl App {
                     // `plugin_input` door both kinds share.
                     return self.plugin_input(&plugin, PluginInput::Command { command, args: arg.to_owned() });
                 }
-                self.flash(format!("unknown command /{other} (try /help)"));
+                self.flash(format!("unknown command {other}"));
                 Vec::new()
             }
         }
     }
 
-    // ---- slash-command palette -------------------------------------------------------------------------------------------
+    // ---- command palette (Ctrl+K) ----------------------------------------------------------------------------------------
 
-    /// What has been typed of a `/command`, while it is still one unbroken word: `Some("he")` for `/he`, `Some("")` for a
-    /// lone `/`. `None` once an argument begins (a space or a newline) or when the input is not a command at all — including
-    /// while a message is being edited, where a leading `/` is message text rather than a command.
-    pub fn command_query(&self) -> Option<String> {
-        if self.editing.is_some() || self.prompt.is_some() {
-            return None;
-        }
-        let text = self.editor.text();
-        let rest = text.strip_prefix('/')?;
-        if rest.chars().any(char::is_whitespace) {
-            return None;
-        }
-        Some(rest.to_owned())
+    /// Open the palette on an empty query, with the first row under the cursor. It is a modal: it owns the keyboard until
+    /// a command runs or Esc closes it, so the composer, its draft and the focus are left exactly as they were.
+    pub fn open_palette(&mut self) -> Vec<Cmd> {
+        self.palette = Palette::default();
+        self.overlay = Overlay::Palette;
+        Vec::new()
     }
 
-    /// The palette is up while the input holds `/command` (see `command_query`), nothing is covering the screen, the keyboard
-    /// is in the input, and Esc has not closed it on exactly this text. It is derived from that state: it needs no open/close
-    /// of its own, and closing it leaves the command word in the input where it can be finished or corrected.
-    pub fn palette_up(&self) -> bool {
-        self.focus == Focus::Input
-            && self.overlay == Overlay::None
-            && self.command_query().is_some()
-            && self.cmd_hidden.as_deref() != Some(self.editor.text().as_str())
+    /// Close the palette and forget its query and its argument step.
+    fn close_palette(&mut self) {
+        self.palette = Palette::default();
+        if self.overlay == Overlay::Palette {
+            self.overlay = Overlay::None;
+        }
     }
 
     /// The rows the palette shows: the built-ins whose name starts with what has been typed, then the commands loaded
-    /// plugins added. Empty when the input is not a command word (see `command_query`).
+    /// plugins added. A plugin names its own command and the argument hint it shows, the same way the built-in table does.
     pub fn command_rows(&self) -> Vec<CommandRow> {
-        let Some(q) = self.command_query() else { return Vec::new() };
-        let q = q.to_lowercase();
+        let q = self.palette.query.text().to_lowercase();
         let mut rows: Vec<CommandRow> = COMMANDS
             .iter()
-            .filter(|(name, _)| name.starts_with(&q))
-            .map(|(name, desc)| CommandRow { name: (*name).to_owned(), desc: (*desc).to_owned() })
+            .filter(|(name, _, _)| name.starts_with(&q))
+            .map(|(name, usage, desc)| CommandRow { name: (*name).to_owned(), usage: (*usage).to_owned(), desc: (*desc).to_owned() })
             .collect();
-        // A plugin may register anything; sort its commands by name so the list does not depend on the registry's order.
         let mut plugin_rows: Vec<CommandRow> = self
             .plugins
             .commands()
             .into_iter()
             .filter(|(_, c)| c.id.to_lowercase().starts_with(&q))
             .map(|(plugin, c)| {
-                let desc = if !c.title.is_empty() {
-                    c.title.clone()
-                } else if !c.usage.is_empty() {
-                    c.usage.clone()
-                } else {
-                    format!("a command from {plugin}")
-                };
-                CommandRow { name: c.id.clone(), desc }
+                let desc = if !c.title.is_empty() { c.title.clone() } else { format!("a command from {plugin}") };
+                CommandRow { name: c.id.clone(), usage: c.usage.clone(), desc }
             })
             .collect();
+        // A plugin may register anything; sort its commands by name so the list does not depend on the registry's order.
         plugin_rows.sort_by(|a, b| a.name.cmp(&b.name));
         rows.extend(plugin_rows);
         rows
+    }
+
+    /// The keys the palette takes while it is up. Its query is a one-line editor: typing filters the list, or — in the
+    /// argument step — is the argument itself. Enter picks or runs, Esc steps back out of the argument step and then
+    /// closes the palette, and the arrows move the highlight rather than the query cursor.
+    fn key_palette(&mut self, k: KeyEvent) -> Vec<Cmd> {
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = k.modifiers.contains(KeyModifiers::ALT);
+        match k.code {
+            // Ctrl+K again closes it, the way it opened it.
+            KeyCode::Char('k') if ctrl => {
+                self.close_palette();
+                Vec::new()
+            }
+            KeyCode::Esc => {
+                // One Esc out of the argument step, a second out of the palette.
+                if self.palette.arg.take().is_none() {
+                    self.close_palette();
+                }
+                Vec::new()
+            }
+            KeyCode::Enter => self.palette_run(),
+            KeyCode::Up => {
+                self.palette_move(-1);
+                Vec::new()
+            }
+            KeyCode::Down => {
+                self.palette_move(1);
+                Vec::new()
+            }
+            // Backspace on an empty argument step goes back to the list, so a wrong pick is one key from the right one.
+            KeyCode::Backspace if self.palette.arg.is_some() && self.palette.query.is_empty() => {
+                self.palette.arg = None;
+                Vec::new()
+            }
+            KeyCode::Backspace if alt => {
+                self.palette.query.kill_word_back();
+                self.palette.cursor = 0;
+                Vec::new()
+            }
+            KeyCode::Backspace => {
+                self.palette.query.backspace();
+                self.palette.cursor = 0;
+                Vec::new()
+            }
+            KeyCode::Delete => {
+                self.palette.query.delete();
+                self.palette.cursor = 0;
+                Vec::new()
+            }
+            KeyCode::Left => {
+                self.palette.query.left();
+                Vec::new()
+            }
+            KeyCode::Right => {
+                self.palette.query.right();
+                Vec::new()
+            }
+            KeyCode::Home => {
+                self.palette.query.home();
+                Vec::new()
+            }
+            KeyCode::End => {
+                self.palette.query.end();
+                Vec::new()
+            }
+            KeyCode::Char('a') if ctrl => {
+                self.palette.query.home();
+                Vec::new()
+            }
+            KeyCode::Char('e') if ctrl => {
+                self.palette.query.end();
+                Vec::new()
+            }
+            KeyCode::Char('w') if ctrl => {
+                self.palette.query.kill_word_back();
+                self.palette.cursor = 0;
+                Vec::new()
+            }
+            KeyCode::Char('u') if ctrl => {
+                self.palette.query.kill_to_start();
+                self.palette.cursor = 0;
+                Vec::new()
+            }
+            KeyCode::Char(c) if !ctrl && !alt => {
+                self.palette.query.insert_char(c);
+                self.palette.cursor = 0;
+                Vec::new()
+            }
+            _ => Vec::new(),
+        }
     }
 
     /// Move the palette cursor by `delta` rows, staying in range.
     fn palette_move(&mut self, delta: isize) {
         let n = self.command_rows().len();
         if n == 0 {
-            self.cmd_cursor = 0;
+            self.palette.cursor = 0;
             return;
         }
-        self.cmd_cursor = (self.cmd_cursor as isize + delta).clamp(0, n as isize - 1) as usize;
+        self.palette.cursor = (self.palette.cursor as isize + delta).clamp(0, n as isize - 1) as usize;
     }
 
-    /// Enter in the palette: run the command on the cursor line. With no match, submit as typed, so the usual
-    /// `unknown command` line still answers a typo.
+    /// Enter in the palette. On the list it runs the command on the cursor row — or, when that command takes an argument,
+    /// asks for it first and clears the query for it. In the argument step it runs the command with what was typed, which
+    /// may be nothing for a command whose argument is optional. Nothing picked and nothing matching does nothing.
     fn palette_run(&mut self) -> Vec<Cmd> {
+        if let Some(arg) = self.palette.arg.clone() {
+            let text = self.palette.query.text().trim().to_owned();
+            self.close_palette();
+            return self.command(&arg.command, &text);
+        }
         let rows = self.command_rows();
-        let Some(row) = rows.get(self.cmd_cursor).cloned() else { return self.submit() };
-        self.editor.clear();
-        self.cmd_cursor = 0;
-        self.command(&row.name, "")
-    }
-
-    /// Tab in the palette: put the command on the cursor line into the input, with a space, so an argument can follow.
-    /// The trailing space ends the command word, which closes the palette (see `command_query`).
-    fn palette_complete(&mut self) {
-        let rows = self.command_rows();
-        let Some(row) = rows.get(self.cmd_cursor).cloned() else { return };
-        self.editor.clear();
-        self.editor.insert_str(&format!("/{} ", row.name));
-        self.cmd_cursor = 0;
+        let Some(row) = rows.get(self.palette.cursor).cloned() else { return Vec::new() };
+        if row.usage.is_empty() {
+            self.close_palette();
+            return self.command(&row.name, "");
+        }
+        self.palette.arg = Some(PaletteArg { command: row.name, usage: row.usage });
+        self.palette.query.clear();
+        self.palette.cursor = 0;
+        Vec::new()
     }
 
     fn send(&mut self, text: String, root: Option<String>) -> Vec<Cmd> {
@@ -2750,10 +2804,9 @@ impl App {
 // ---- typing, editing, deleting, creating channels, search ------------------------------------------------------------------------
 
 impl App {
-    /// Tell the others we are typing: at most once every three seconds per channel/thread, never for commands, edits or in
-    /// read-only mode.
+    /// Tell the others we are typing: at most once every three seconds per channel/thread, never for edits or in read-only mode.
     fn maybe_typing(&mut self) -> Vec<Cmd> {
-        if !self.send_typing || self.read_only || self.editing.is_some() || self.prompt.is_some() || self.editor.is_empty() || self.editor.text().starts_with('/') {
+        if !self.send_typing || self.read_only || self.editing.is_some() || self.prompt.is_some() || self.editor.is_empty() {
             return Vec::new();
         }
         let Some(c) = self.channel() else { return Vec::new() };
@@ -2974,7 +3027,6 @@ impl App {
         match k.code {
             KeyCode::Esc => {
                 self.editor.insert_str(&p.text);
-                self.cmd_cursor = 0;
                 self.set_focus(Focus::Input);
                 self.flash("not sent");
                 Vec::new()
@@ -3001,7 +3053,7 @@ impl App {
         }
     }
 
-    /// `/new [private] name [description]`
+    /// `new [private] name [description]`
     fn create_channel(&mut self, arg: &str) -> Vec<Cmd> {
         if self.read_only {
             self.flash("read-only mode: nothing is sent");
@@ -3017,7 +3069,7 @@ impl App {
         }
         let (name, about) = rest.split_once(char::is_whitespace).map(|(n, a)| (n.trim(), a.trim())).unwrap_or((rest, ""));
         if name.is_empty() {
-            self.flash("usage: /new [private] name [description]");
+            self.flash("new takes [private] name [description]");
             return Vec::new();
         }
         self.flash(format!("creating #{name}…"));
@@ -3052,13 +3104,13 @@ impl App {
         vec![Cmd::JoinChannel { channel: id }]
     }
 
-    /// `/join NAME`: the channel `NAME` names. One we are already in is simply opened; an open one we are not in is joined.
+    /// `join NAME`: the channel `NAME` names. One we are already in is simply opened; an open one we are not in is joined.
     /// A leading `#` and the case are ignored, and a channel id works too.
     fn join_command(&mut self, arg: &str) -> Vec<Cmd> {
         let who = arg.trim();
         let q = who.trim_start_matches('#').trim().to_lowercase();
         if q.is_empty() {
-            self.flash("usage: /join NAME (a channel name, or its id) — Ctrl+F finds them");
+            self.flash("join needs NAME (a channel name, or its id) — Ctrl+F finds them");
             return Vec::new();
         }
         let found = self.channel_matching(who, &q);
@@ -3084,7 +3136,7 @@ impl App {
     }
 
     /// The channels `who` names: its id, else an exact name, else the names it is part of. DMs are left out: they are opened
-    /// with `/dm`, not joined.
+    /// with `dm`, not joined.
     fn channel_matching(&self, who: &str, q: &str) -> Vec<usize> {
         if let Some(i) = self.channels.iter().position(|c| c.id == who) {
             return vec![i];
@@ -3108,14 +3160,14 @@ impl App {
         }
     }
 
-    /// `/leave`: leaving changes membership on the relay and takes the channel out of the list, so it asks first (`y`).
+    /// `leave`: leaving changes membership on the relay and takes the channel out of the list, so it asks first (`y`).
     fn ask_leave(&mut self) -> Vec<Cmd> {
         if self.read_only {
             self.flash("read-only mode: nothing is sent");
             return Vec::new();
         }
         let Some(c) = self.channel() else {
-            self.flash("usage: /leave (open the channel you want to leave first)");
+            self.flash("leave takes the channel you are in (open it first)");
             return Vec::new();
         };
         let (id, label) = (c.id.clone(), c.label.clone());
@@ -3128,7 +3180,7 @@ impl App {
         Vec::new()
     }
 
-    /// The yes/no after `/leave`: `y` leaves, anything else cancels.
+    /// The yes/no after `leave`: `y` leaves, anything else cancels.
     fn answer_leave(&mut self, k: KeyEvent) -> Vec<Cmd> {
         let Some(id) = self.confirm_leave.take() else { return Vec::new() };
         if !matches!(k.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
@@ -3270,7 +3322,7 @@ impl App {
         })
     }
 
-    /// `/dm NAME`, and Enter on a person in the search: open the DM that is already there, else ask the relay for one.
+    /// `dm NAME`, and Enter on a person in the search: open the DM that is already there, else ask the relay for one.
     fn open_dm(&mut self, peer: &str) -> Vec<Cmd> {
         if let Some(i) = self.dm_with(peer) {
             let cmds = self.open_channel(i);
@@ -3299,11 +3351,11 @@ impl App {
         cmds
     }
 
-    /// `/invite NAME`: add someone to the channel on screen (or to the group DM), by name or npub. The relay takes a
+    /// `invite NAME`: add someone to the channel on screen (or to the group DM), by name or npub. The relay takes a
     /// NIP-29 add-member for a channel and a different event for a DM (see `relay::invite_builder`).
     fn invite(&mut self, who: &str) -> Vec<Cmd> {
         if who.trim().is_empty() {
-            self.flash("usage: /invite NAME (a name, or an npub)");
+            self.flash("invite needs NAME (a name, or an npub)");
             return Vec::new();
         }
         if self.read_only {
@@ -3363,10 +3415,10 @@ impl App {
         }
     }
 
-    /// `/whois NAME`: the profile card, filled with the name we already have and the about line from the relay.
+    /// `whois NAME`: the profile card, filled with the name we already have and the about line from the relay.
     fn show_whois(&mut self, who: &str) -> Vec<Cmd> {
         if who.trim().is_empty() {
-            self.flash("usage: /whois NAME (a name, or an npub)");
+            self.flash("whois needs NAME (a name, or an npub)");
             return Vec::new();
         }
         match self.who_is(who) {
@@ -3524,7 +3576,6 @@ impl App {
     fn begin_prompt(&mut self, plugin: String, id: String, title: String, hint: String, multiline: bool) -> Vec<Cmd> {
         let cmds = self.stash_draft();
         self.editor.clear();
-        self.cmd_cursor = 0;
         // The prompt lives in the composer, so whatever was covering it gets out of the way — the same way starting a
         // flow from a panel row closes the panel. Without this a prompt a plugin asked for from a panel would be drawn
         // under the panel, and the user could not see what they are answering.
@@ -3564,7 +3615,6 @@ impl App {
     fn finish_prompt(&mut self, text: Option<String>) -> Vec<Cmd> {
         let Some(prompt) = self.prompt.take() else { return Vec::new() };
         self.editor.clear();
-        self.cmd_cursor = 0;
         let mut cmds = self.plugin_input(&prompt.plugin, PluginInput::Prompt { id: prompt.id, text });
         cmds.extend(self.switch_draft()); // the box belonged to the prompt; it goes back to its draft
         cmds
@@ -3891,7 +3941,7 @@ impl App {
         }
     }
 
-    /// The `/plugins` overlay: what is on disk, what is running, what it may do, and the commands it added.
+    /// The `plugins` overlay: what is on disk, what is running, what it may do, and the commands it added.
     fn show_plugins(&mut self) {
         let mut rows = Vec::new();
         let builtin: Vec<String> = self.internal.ids().iter().map(|s| (*s).to_owned()).collect();
@@ -3941,7 +3991,7 @@ impl App {
             for (plugin, c) in commands {
                 let usage = if c.usage.is_empty() { String::new() } else { format!("   {}", c.usage) };
                 rows.push(PanelRow {
-                    text: format!("/{:<14} {}{usage}   ({plugin})", c.id, if c.title == c.id { "" } else { &c.title }),
+                    text: format!("{:<14} {}{usage}   ({plugin})", c.id, if c.title == c.id { "" } else { &c.title }),
                     tone: contrib::Tone::Default,
                     action: None,
                 });
@@ -3949,7 +3999,7 @@ impl App {
         }
         rows.push(PanelRow { text: String::new(), tone: contrib::Tone::Default, action: None });
         rows.push(PanelRow {
-            text: "Put a folder with an executable entry file (its shebang picks the language) in the plugins directory; /plugins shows what loaded.".into(),
+            text: "Put a folder with an executable entry file (its shebang picks the language) in the plugins directory; the `plugins` command shows what loaded.".into(),
             tone: contrib::Tone::Dim,
             action: None,
         });
@@ -3957,7 +4007,7 @@ impl App {
         self.overlay = Overlay::Panel;
     }
 
-    /// Keep `/plugins` current while it is open.
+    /// Keep the `plugins` overlay current while it is open.
     fn refresh_plugin_panel(&mut self) {
         let managed = self.panel.as_ref().map(|p| p.plugin.is_empty()).unwrap_or(false);
         if self.overlay != Overlay::Panel || !managed {

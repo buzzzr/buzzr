@@ -22,7 +22,7 @@ export interface Segment {
   tone?: Tone;
 }
 
-/** One command a plugin adds to the input box, run as `/id`. */
+/** One command a plugin adds to the Ctrl+K palette: `id` is the name typed to find it and `usage` its argument hint. */
 export interface Command {
   id: string;
   title?: string;
@@ -157,7 +157,7 @@ export interface Buzzr {
 
 /** What a plugin declares about itself, in code. This is what a manifest used to hold. */
 export interface PluginSpec {
-  /** The name shown by `/plugins`; the folder name is always the id. */
+  /** The name shown by the `plugins` command; the folder name is always the id. */
   name?: string;
   /** What the plugin asks to do: `read:visible`, `messages:write`, `agents:read` and/or `agents:write`. buzzr grants only what it implements. */
   permissions?: string[];
@@ -167,7 +167,7 @@ export interface PluginSpec {
   ready?(buzzr: Buzzr): Contributions | void;
   /** The screen changed; `view` holds only what is on screen. */
   onSnapshot?(buzzr: Buzzr, view: View): void;
-  /** `/command args` was run. */
+  /** A command was run from the palette; `args` is what was typed for it. */
   onCommand?(buzzr: Buzzr, command: string, args: string): void;
   /** Enter was pressed on a panel row that had an action. */
   onPanelAction?(buzzr: Buzzr, panel: string, row: number, value: string | undefined): void;

@@ -67,13 +67,13 @@ pub struct Agents {
 }
 
 impl Agents {
-    /// The panel `/agents` opens: one pair of rows per agent, and a row at the end that starts a new one.
+    /// The panel `agents` opens: one pair of rows per agent, and a row at the end that starts a new one.
     fn panel(&self) -> PluginOutput {
         let mut rows: Vec<PanelRow> = Vec::new();
         if self.agents.is_empty() {
             rows.push(PanelRow { text: "No agents yet.".into(), tone: Tone::Bold, action: None });
             rows.push(PanelRow {
-                text: "Enter “new agent” below, or /agents create, makes one — its own identity and folder.".into(),
+                text: "Enter “new agent” below, or agents create, makes one — its own identity and folder.".into(),
                 tone: Tone::Dim,
                 action: None,
             });
@@ -97,12 +97,12 @@ impl Agents {
         vec![self.prompt_name()]
     }
 
-    /// `/agents` (list them) and `/agents create` (make one).
+    /// `agents` (list them) and `agents create` (make one).
     fn on_command(&mut self, args: &str) -> Vec<PluginOutput> {
         match args.trim() {
             "" => vec![PluginOutput::ListAgents { id: "list".into() }],
             "create" | "new" => self.start(),
-            _ => vec![PluginOutput::Flash("usage: /agents (list them) or /agents create (make one)".into())],
+            _ => vec![PluginOutput::Flash("usage: agents (list them) or agents create (make one)".into())],
         }
     }
 
@@ -302,7 +302,7 @@ impl Plugin for Agents {
             permissions: vec![AGENTS_READ.into(), AGENTS_WRITE.into()],
             tick_ms: 0,
             contributions: Contributions {
-                commands: vec![command(ID, "your local agents; /agents create makes one", "/agents [create]")],
+                commands: vec![command(ID, "your local agents; agents create makes one", "[create]")],
                 ..Contributions::default()
             },
         }
@@ -399,7 +399,7 @@ mod tests {
     #[test]
     fn the_flow_asks_for_a_name_then_the_instructions_then_the_harness_and_makes_the_agent() {
         let mut p = Agents::default();
-        // `/agents create` asks for a name
+        // `agents create` asks for a name
         let outs = p.on(PluginInput::Command { command: ID.into(), args: "create".into() });
         assert!(matches!(outs[0], PluginOutput::Prompt { ref id, multiline: false, .. } if id == "name"));
         // a name that cannot be used is refused, and the name is asked for again

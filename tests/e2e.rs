@@ -366,6 +366,7 @@ fn key_bytes(key: &str) -> (Vec<u8>, Duration) {
         "f1" => b"\x1bOP".to_vec(),
         "f2" => b"\x1bOQ".to_vec(),
         "ctrl+f" => b"\x06".to_vec(),
+        "ctrl+k" => b"\x0b".to_vec(),
         "ctrl+q" => b"\x11".to_vec(),
         other => other.as_bytes().to_vec(),
     };
@@ -456,6 +457,21 @@ fn session_in(relay: &Relay, config: PathBuf) -> Session {
     s
 }
 
+/// Run a command the way a user does now: open the `Ctrl+K` palette, type the command's name, Enter, then the
+/// argument and Enter again. `name` and `arg` are the two halves of what the old `/command` line held. It is for a
+/// command that takes an argument — the palette asks for one, so the second Enter runs it (an empty `arg` takes the
+/// command whose argument is optional).
+fn run_in_palette(s: &Session, name: &str, arg: &str) {
+    s.press("ctrl+k");
+    s.expect("the command palette", "Commands · Enter runs · Esc closes");
+    s.type_text(name);
+    s.press("enter");
+    if !arg.is_empty() {
+        s.type_text(arg);
+    }
+    s.press("enter");
+}
+
 /// A plugins folder with nothing in it: plugins are on, so the compiled-in ones start, but no runtime-loaded plugin
 /// is there to draw. (`session` starts with `--no-plugins` for isolation; a test of anything a plugin owns needs this.)
 fn empty_plugins_dir() -> PathBuf {
@@ -466,7 +482,7 @@ fn empty_plugins_dir() -> PathBuf {
 
 /// The fake `claude-agent-acp` on a directory of its own, made once and put first on every session's `PATH`.
 ///
-/// `/agents create` starts the harness and reads what it offers over ACP before it makes anything, and no real harness
+/// `agents create` starts the harness and reads what it offers over ACP before it makes anything, and no real harness
 /// is installed in a test environment. The fake is the script committed at `tests/fixtures/claude-agent-acp` (the same
 /// one the unit tests in `src/harness/acp.rs` drive); it is copied out, and made executable, so every session can find
 /// it by name on `PATH`. Only the agents flow ever starts a harness, so nothing else notices it.
@@ -831,10 +847,10 @@ fn f2_shows_the_help_and_esc_closes_it() {
     let Some(relay) = relay_or_skip("f2_shows_the_help_...") else { return };
     let s = session(&relay);
     s.press("f2");
-    s.expect("the help overlay", "/r N text");
-    s.expect("how to search", "/search text");
+    s.expect("the help overlay", "r N text");
+    s.expect("how to search", "search text");
     s.press("esc");
-    s.expect_gone("the help overlay to close", "/r N text");
+    s.expect_gone("the help overlay to close", "r N text");
 }
 
 #[test]
@@ -931,70 +947,71 @@ fn a_name_no_channel_has_shown_is_looked_up_in_the_relay_directory() {
     let s = session(&relay);
     s.press_all(&["tab", "tab"]); // channels -> messages -> input
     s.expect("the input box to take focus", "Send");
-    s.type_text("/whois dave");
-    s.press("enter");
+    run_in_palette(&s, "whois", "dave");
     s.expect("the card titled with the name the directory gave", "dave · Esc closes");
     s.expect("and his about line, which only the relay had", "I write things down");
     s.press("esc");
-    s.type_text("/whois nobodyish");
-    s.press("enter");
+    run_in_palette(&s, "whois", "nobodyish");
     s.expect("a name nobody has to be said plainly, not filled in with whoever the relay sent", "nobody here is called nobodyish");
     s.expect_gone("and no card opens for it", "· Esc closes");
 }
 
 #[test]
-fn a_slash_opens_the_command_palette_and_enter_runs_the_command() {
-    let Some(relay) = relay_or_skip("a_slash_opens_the_command_palette_...") else { return };
+fn ctrl_k_opens_the_command_palette_and_enter_runs_the_command() {
+    let Some(relay) = relay_or_skip("ctrl_k_opens_the_command_palette_...") else { return };
     let s = session(&relay);
     s.press_all(&["tab", "tab"]); // channels -> messages -> input
     s.expect("the input box to take focus", "Send");
-    // a lone slash lists the commands right away
-    s.type_text("/");
-    s.expect("the command palette", "Commands · Enter runs · Tab completes");
+    // Ctrl+K opens the palette with the whole list
+    s.press("ctrl+k");
+    s.expect("the command palette", "Commands · Enter runs · Esc closes");
     s.expect("a command with a line saying what it does", "the commands and how things work");
     s.expect("the footer to follow the palette", "Run");
     // typing narrows the list to the names that still match
     s.type_text("help");
-    s.expect("the list narrowed to /help", "/help");
+    s.expect("the list narrowed to help", "help");
     s.expect_gone("the other commands dropped out", "load older messages");
-    // Enter runs the command on the cursor line: /help opens the help overlay
+    // Enter runs the command on the cursor line: help opens the help overlay
     s.press("enter");
-    s.expect("Enter to run the command", "/r N text");
+    s.expect("Enter to run the command", "r N text");
     s.press("esc");
-    s.expect_gone("the help overlay to close", "/r N text");
+    s.expect_gone("the help overlay to close", "r N text");
 
-    // Tab fills the highlighted command into the input (with a space) instead of running it, so an argument can follow
-    s.type_text("/sea");
-    s.expect("the palette for /sea", "Commands · Enter runs · Tab completes");
-    s.press("tab");
-    s.expect("the command filled into the input", "/search");
-    s.expect_gone("the palette closed once a space ends the word", "Commands · Enter runs · Tab completes");
-    s.press("enter"); // /search with no argument opens the search overlay
-    s.expect("the completed command to run", "Search · Enter opens");
+    // a command that takes an argument asks for it in a step of its own, then runs with what was typed
+    s.press("ctrl+k");
+    s.type_text("search");
+    s.expect("the palette for search", "Commands · Enter runs · Esc closes");
+    s.press("enter");
+    s.expect("the argument step", "search · Enter runs · Esc goes back");
+    s.expect("the argument it takes", "search channels, people and messages");
+    s.type_text("sailing");
+    s.press("enter");
+    s.expect("the command to run with its argument", "Search · Enter opens");
 }
 
-/// Esc closes the palette but keeps the composer and the `/command` in it, so a half-written command can be finished or
-/// corrected; the text is still a command, so Enter runs it.
+/// The palette has a query of its own, so it never touches the composer: a leading slash is ordinary text, and a draft
+/// left in the box is exactly as it was when the palette closes.
 #[test]
-fn esc_closes_the_command_palette_and_keeps_what_was_typed() {
-    let Some(relay) = relay_or_skip("esc_closes_the_command_palette_...") else { return };
+fn the_command_palette_leaves_the_composer_alone() {
+    let Some(relay) = relay_or_skip("the_command_palette_leaves_the_composer_alone") else { return };
     let s = session(&relay);
     s.press_all(&["tab", "tab"]); // channels -> messages -> input
     s.expect("the input box to take focus", "Send");
+    // a slash is plain text now: no palette, just what was typed
     s.type_text("/help");
-    s.expect("the command palette", "Commands · Enter runs · Tab completes");
+    s.expect("the text in the composer", "/help");
+    s.expect_gone("no palette for a leading slash", "Commands · Enter runs · Esc closes");
+    // Ctrl+K opens the palette over the draft, and Esc closes it again without disturbing the draft
+    s.press("ctrl+k");
+    s.expect("the command palette", "Commands · Enter runs · Esc closes");
     s.expect("the footer to follow the palette", "Close");
     s.press("esc");
-    s.expect_gone("the palette to close", "Commands · Enter runs · Tab completes");
+    s.expect_gone("the palette to close", "Commands · Enter runs · Esc closes");
     s.expect("the composer to keep the keyboard", "Send");
-    s.expect("the command to stay in the input", "/help");
-    // The palette went away with the list, not with the text, so Enter still runs the command.
-    s.press("enter");
-    s.expect("the command left in the input to run", "/r N text");
-    s.press("esc");
+    s.expect("the draft untouched", "/help");
 }
 
-/// `/agents` and the "new agent" flow, all through the real UI: the list opens from the composer, Enter on its
+/// `agents` and the "new agent" flow, all through the real UI: the list opens from the composer, Enter on its
 /// "new agent…" row turns the composer into the flow's box (a name, then what the agent should do), the harness is
 /// asked what it offers (its models on a panel, a model's thinking levels on another), and the pick makes a local
 /// agent — a key of its own, a folder of its own, and a record on disk — which the list then shows. The flow reads and
@@ -1003,14 +1020,13 @@ fn esc_closes_the_command_palette_and_keeps_what_was_typed() {
 #[test]
 fn agents_are_listed_and_a_new_one_is_created_through_the_composer() {
     let Some(relay) = relay_or_skip("agents_are_listed_and_a_new_one_...") else { return };
-    // `/agents` is a compiled-in plugin, and `session` starts with `--no-plugins`, so this one starts with plugins on.
+    // `agents` is a compiled-in plugin, and `session` starts with `--no-plugins`, so this one starts with plugins on.
     let mut s = session_with_plugins(&relay);
     let config = s.config.clone();
     s.press_all(&["tab", "tab"]); // channels -> messages -> input
     s.expect("the input box to take focus", "Send");
     // nothing made yet: the panel says so, and its last row makes one
-    s.type_text("/agents");
-    s.press("enter");
+    run_in_palette(&s, "agents", "");
     s.expect("the local agents panel", "local agents");
     s.expect("the empty list", "No agents yet.");
     s.expect("the row that starts one", "new agent…");
@@ -1064,13 +1080,12 @@ fn agents_are_listed_and_a_new_one_is_created_through_the_composer() {
     std::fs::write(config.join("agents.json"), &written).unwrap();
     let again = session_in_with_plugins(&relay, config);
     again.press_all(&["tab", "tab"]);
-    again.type_text("/agents");
-    again.press("enter");
+    run_in_palette(&again, "agents", "");
     again.expect("the agent made before the restart", "Scout");
     again.expect("its harness still named", "claude-agent-acp");
 }
 
-/// A message that names a local agent is answered by it. The agent an `/agents create` makes is only an identity and a
+/// A message that names a local agent is answered by it. The agent an `agents create` makes is only an identity and a
 /// folder until something runs it: the **runner** (`src/runner.rs`, started with the app) watches `agents.json` and, for
 /// every message that carries the agent in a `p` tag, runs its harness over ACP and publishes what the harness answered
 /// back to the channel the mention named, as the agent's own message. This case drives that whole loop on the real
@@ -1085,14 +1100,13 @@ fn agents_are_listed_and_a_new_one_is_created_through_the_composer() {
 #[test]
 fn a_message_that_names_a_local_agent_is_answered_by_it() {
     let Some(relay) = relay_or_skip("a_message_that_names_a_local_agent_...") else { return };
-    // The runner is part of the app and `/agents` is a compiled-in plugin, so this session starts with plugins on.
+    // The runner is part of the app and `agents` is a compiled-in plugin, so this session starts with plugins on.
     let s = session_with_plugins(&relay);
     let config = s.config.clone();
     s.press_all(&["tab", "tab"]); // channels -> messages -> input
     s.expect("the input box to take focus", "Send");
     // make an agent, the way the case above does: a name, then what it should do, then a model and a level
-    s.type_text("/agents create");
-    s.press("enter");
+    run_in_palette(&s, "agents", "create");
     s.expect("the composer to ask for a name", "new agent · name");
     s.type_text("Scout");
     s.press("enter");
