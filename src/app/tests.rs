@@ -1514,9 +1514,11 @@ fn dm_opens_an_existing_conversation_and_starts_a_new_one() {
     assert_eq!(app.channel().map(|c| c.id.as_str()), Some("dm2"), "the new DM is opened as soon as its members are known");
     assert_eq!(app.focus, Focus::Input);
 
-    // a name nobody has, and an empty argument, are reported rather than guessed
+    // a name nobody here has met is looked up in the relay's directory, and only reported as unknown once that is empty
     type_text(&mut app, "/dm nobody");
-    assert!(press(&mut app, KeyCode::Enter).is_empty());
+    assert!(matches!(press(&mut app, KeyCode::Enter).as_slice(), [Cmd::FindPeople { query }] if query == "nobody"));
+    assert!(app.flash_text().unwrap().contains("looking for nobody"));
+    app.handle(AppEvent::People { query: "nobody".into(), result: Ok(Vec::new()) });
     assert!(app.flash_text().unwrap().contains("nobody here is called nobody"));
     type_text(&mut app, "/dm");
     assert!(press(&mut app, KeyCode::Enter).is_empty());
@@ -1562,11 +1564,12 @@ fn whois_shows_a_card_that_fills_in_when_the_profile_arrives() {
     // Esc closes the card and ends the wait, so the next command goes to the input
     press(&mut app, KeyCode::Esc);
     assert_eq!(app.overlay, Overlay::None);
-    // a name nobody has is reported, not guessed
+    // a name nobody has is looked up, and the card waits for the answer rather than opening on a guess
     app.focus = Focus::Input;
     type_text(&mut app, "/whois nobody");
-    assert!(press(&mut app, KeyCode::Enter).is_empty());
-    assert_eq!(app.overlay, Overlay::None);
+    assert!(matches!(press(&mut app, KeyCode::Enter).as_slice(), [Cmd::FindPeople { query }] if query == "nobody"));
+    assert_eq!(app.overlay, Overlay::None, "no card until the name has somebody");
+    app.handle(AppEvent::People { query: "nobody".into(), result: Ok(Vec::new()) });
     assert!(app.flash_text().unwrap().contains("nobody here is called"));
 }
 
@@ -1675,6 +1678,112 @@ fn invite_adds_someone_to_the_channel_and_refreshes_the_member_list() {
     assert!(app.flash_text().unwrap().contains("could not invite: not a relay member"));
 }
 
+/// A name nobody we have met is called is not the end of it: the relay's directory is asked, and the command that asked
+/// goes through once the directory names exactly one person. This is the case the local table alone cannot answer —
+/// somebody in the community that no channel we have loaded has ever shown us.
+#[test]
+fn a_name_nobody_here_has_met_is_looked_up_and_the_command_continues() {
+    let dave = "dd".repeat(32);
+    let mut app = app_with(1);
+    c1_members(&mut app);
+    app.focus = Focus::Input;
+
+    // /invite: the directory is asked, and the person it names is the one invited
+    type_text(&mut app, "/invite dave");
+    assert!(matches!(press(&mut app, KeyCode::Enter).as_slice(), [Cmd::FindPeople { query }] if query == "dave"));
+    assert_eq!(app.flash_text(), Some("looking for dave…"), "the wait is on the status line");
+    let cmds = app.handle(AppEvent::People { query: "dave".into(), result: Ok(vec![(dave.clone(), "Dave".into())]) });
+    assert_eq!(cmds, vec![Cmd::Invite { channel: "c1".into(), pubkey: dave.clone(), dm: false }]);
+    assert_eq!(app.flash_text(), Some("inviting Dave to #general…"));
+
+    // /whois: the answer opens the card for the person the directory named, not for something we guessed
+    type_text(&mut app, "/whois erin");
+    assert!(matches!(press(&mut app, KeyCode::Enter).as_slice(), [Cmd::FindPeople { query }] if query == "erin"));
+    let erin = "ee".repeat(32);
+    let cmds = app.handle(AppEvent::People { query: "erin".into(), result: Ok(vec![(erin.clone(), "Erin".into())]) });
+    assert_eq!(cmds, vec![Cmd::LoadProfile(erin.clone())]);
+    assert_eq!(app.overlay, Overlay::Whois);
+    assert_eq!(app.whois.as_ref().map(|w| w.name.as_str()), Some("Erin"));
+    press(&mut app, KeyCode::Esc);
+
+    // /dm: and the same for starting a conversation
+    type_text(&mut app, "/dm frank");
+    assert!(matches!(press(&mut app, KeyCode::Enter).as_slice(), [Cmd::FindPeople { query }] if query == "frank"));
+    let frank = "ff".repeat(32);
+    let cmds = app.handle(AppEvent::People { query: "frank".into(), result: Ok(vec![(frank.clone(), "Frank".into())]) });
+    assert_eq!(cmds, vec![Cmd::OpenDm { peer: frank.clone() }]);
+    assert_eq!(app.flash_text(), Some("opening a DM with Frank…"));
+
+    // the name is ours from then on: the next command resolves it off the table, without asking the relay again
+    type_text(&mut app, "/whois Dave");
+    assert_eq!(press(&mut app, KeyCode::Enter), vec![Cmd::LoadProfile(dave.clone())]);
+}
+
+/// The directory can answer with several people, with nobody, with a failure — and with an answer to a question that has
+/// since been replaced. None of those may quietly continue a command on the wrong person.
+#[test]
+fn a_directory_answer_is_never_a_guess() {
+    let anna = "1a".repeat(32);
+    let mut app = app_with(1);
+    c1_members(&mut app);
+    app.focus = Focus::Input;
+
+    // several people have the name: they are listed with their keys, and nothing is sent
+    type_text(&mut app, "/invite sam");
+    press(&mut app, KeyCode::Enter);
+    let sam = "2b".repeat(32);
+    assert!(app.handle(AppEvent::People { query: "sam".into(), result: Ok(vec![(anna.clone(), "Sam".into()), (sam.clone(), "Sam T".into())]) }).is_empty());
+    let said = app.flash_text().unwrap().to_owned();
+    assert!(said.contains("sam could be any of 2") && said.contains("Sam") && said.contains("Sam T"), "both names are shown: {said}");
+
+    // nobody at all has it
+    type_text(&mut app, "/invite nobodyatall");
+    press(&mut app, KeyCode::Enter);
+    assert!(app.handle(AppEvent::People { query: "nobodyatall".into(), result: Ok(Vec::new()) }).is_empty());
+    assert!(app.flash_text().unwrap().contains("nobody here is called nobodyatall"));
+
+    // the lookup itself did not come back: reported, not swallowed, and the command stays unrun
+    type_text(&mut app, "/invite offline");
+    press(&mut app, KeyCode::Enter);
+    assert!(app.handle(AppEvent::People { query: "offline".into(), result: Err("no route to the relay".into()) }).is_empty());
+    assert!(app.flash_text().unwrap().contains("could not look up offline"));
+
+    // an answer for a name we have stopped asking about is dropped: the last question asked is the one that counts
+    type_text(&mut app, "/invite first");
+    press(&mut app, KeyCode::Enter);
+    type_text(&mut app, "/invite second");
+    press(&mut app, KeyCode::Enter);
+    assert!(app.handle(AppEvent::People { query: "first".into(), result: Ok(vec![(anna.clone(), "First".into())]) }).is_empty(), "the replaced question sends nothing");
+    assert_eq!(app.flash_text(), Some("looking for second…"), "and it does not answer the question still open");
+    let second = "3c".repeat(32);
+    let cmds = app.handle(AppEvent::People { query: "second".into(), result: Ok(vec![(second.clone(), "Second".into())]) });
+    assert_eq!(cmds, vec![Cmd::Invite { channel: "c1".into(), pubkey: second.clone(), dm: false }]);
+}
+
+/// The relay's directory can name this identity itself (a profile whose name fits the query). The local resolver skips
+/// this identity on purpose, so the command has to act on the key the directory gave it and stop — not re-resolve the
+/// name, which resolves to nobody and would ask the directory again, forever.
+#[test]
+fn a_directory_answer_that_is_this_identity_ends_the_command() {
+    let mut app = app_with(1);
+    c1_members(&mut app);
+    app.focus = Focus::Input;
+
+    // /invite: there is nobody to invite, and it says so rather than asking the directory again
+    type_text(&mut app, "/invite ghost");
+    assert!(matches!(press(&mut app, KeyCode::Enter).as_slice(), [Cmd::FindPeople { query }] if query == "ghost"));
+    assert!(app.handle(AppEvent::People { query: "ghost".into(), result: Ok(vec![(ME.into(), "Ghost".into())]) }).is_empty());
+    assert_eq!(app.flash_text(), Some("you are already here"));
+
+    // /whois: the card opens for this identity, and the wait ends with it
+    type_text(&mut app, "/whois phantom");
+    assert!(matches!(press(&mut app, KeyCode::Enter).as_slice(), [Cmd::FindPeople { query }] if query == "phantom"));
+    let cmds = app.handle(AppEvent::People { query: "phantom".into(), result: Ok(vec![(ME.into(), "Phantom".into())]) });
+    assert_eq!(cmds, vec![Cmd::LoadProfile(ME.into())]);
+    assert_eq!(app.overlay, Overlay::Whois);
+    assert_eq!(app.whois.as_ref().map(|w| w.name.as_str()), Some("Phantom"));
+}
+
 #[test]
 fn invite_reports_a_member_an_unknown_name_and_read_only_mode() {
     let mut app = app_with(1);
@@ -1685,7 +1794,8 @@ fn invite_reports_a_member_an_unknown_name_and_read_only_mode() {
     assert!(press(&mut app, KeyCode::Enter).is_empty());
     assert_eq!(app.flash_text(), Some("Bob is already in #general"));
     type_text(&mut app, "/invite nobody");
-    assert!(press(&mut app, KeyCode::Enter).is_empty());
+    assert!(matches!(press(&mut app, KeyCode::Enter).as_slice(), [Cmd::FindPeople { query }] if query == "nobody"));
+    app.handle(AppEvent::People { query: "nobody".into(), result: Ok(Vec::new()) });
     assert!(app.flash_text().unwrap().contains("nobody here is called nobody"));
     type_text(&mut app, "/invite");
     assert!(press(&mut app, KeyCode::Enter).is_empty());

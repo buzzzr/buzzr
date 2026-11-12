@@ -6,6 +6,9 @@ use crate::model::{Channel, Ev, KIND_GROUP_MEMBERS, KIND_GROUP_METADATA, KIND_PR
 /// Messages per page of a channel, and the most messages loaded for one thread.
 pub const PAGE: u32 = 50;
 pub const THREAD_LIMIT: u32 = 200;
+/// Most profiles asked for when a name is looked up in the relay's directory: enough for the name itself and the few
+/// that contain it, so a short query does not pull the whole community.
+pub const DIRECTORY_LIMIT: u32 = 20;
 /// Most messages counted for one channel's unread badge on startup; a busier channel reads as this many.
 pub const UNREAD_LIMIT: u32 = 200;
 use anyhow::{anyhow, bail, Context, Result};
@@ -296,6 +299,42 @@ impl Relay {
     /// One person's profile; someone who never wrote one reads as an empty profile, which is not an error.
     pub async fn profile(&self, pubkey: &str) -> Result<Profile> {
         Ok(self.profiles(&[pubkey.to_owned()]).await?.remove(pubkey).unwrap_or_default())
+    }
+
+    /// People whose profile name fits `q`, exact names first, for a name nothing local knows: NIP-50 `search` over
+    /// `kind:0`. The matches are filtered here as well as asked for, because a relay that does not match profile names
+    /// (or ignores `search` and answers everything it holds) would otherwise hand back people the query does not fit —
+    /// and acting on the wrong key is worse than saying nobody has the name.
+    pub async fn find_people(&self, q: &str) -> Result<Vec<(String, String)>> {
+        let needle = q.trim().to_lowercase();
+        if needle.is_empty() {
+            return Ok(Vec::new());
+        }
+        let evs = self.query(&[json!({"kinds": [KIND_PROFILE], "search": q.trim(), "limit": DIRECTORY_LIMIT})]).await?;
+        // The newest profile per person: an older one is a name they have changed since.
+        let mut newest: HashMap<&str, &Ev> = HashMap::new();
+        for e in &evs {
+            if newest.get(e.pubkey.as_str()).map(|n| n.created_at <= e.created_at).unwrap_or(true) {
+                newest.insert(&e.pubkey, e);
+            }
+        }
+        let (mut exact, mut partial) = (Vec::new(), Vec::new());
+        for (pk, e) in newest {
+            let name = Profile::from_event(e).name;
+            if name.is_empty() {
+                continue;
+            }
+            let n = name.to_lowercase();
+            if n == needle {
+                exact.push((pk.to_owned(), name));
+            } else if n.contains(&needle) {
+                partial.push((pk.to_owned(), name));
+            }
+        }
+        exact.sort();
+        partial.sort();
+        exact.extend(partial);
+        Ok(exact)
     }
 
     /// Full-text search over the messages you can read, most relevant first (NIP-50).

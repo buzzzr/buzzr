@@ -206,6 +206,32 @@ pub struct PendingInvite {
     pub people: Vec<(String, String)>,
 }
 
+/// A name nothing local has matched: what the relay's directory is being asked for it, and the command to run once it
+/// answers (`Cmd::FindPeople`). Only one name is looked up at a time — a second one replaces the first.
+struct Lookup {
+    who: String,
+    then: Then,
+}
+
+/// The command waiting on a name: which one to continue once the relay's directory has said who it is.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Then {
+    Invite,
+    Dm,
+    Whois,
+}
+
+/// What a name, or a key, comes to among the people we have met. `Unknown` is not a failure: the relay's directory may
+/// still know the name (see `App::ask_directory`).
+enum Who {
+    /// The person's key.
+    One(String),
+    /// Several people have the name; the message says which.
+    Several(String),
+    /// Nobody we have met has it.
+    Unknown,
+}
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Conn {
     Connecting,
@@ -223,6 +249,9 @@ pub enum Cmd {
     LoadThread { channel: String, root: String },
     LoadMembers { channel: String },
     LoadNames(Vec<String>),
+    /// Ask the relay's directory for people whose profile name fits `query` (`relay::find_people`), for a name the local
+    /// table has never met. The answer continues the command that needed it (see `App::ask_directory`).
+    FindPeople { query: String },
     Send { channel: String, text: String, root: Option<String>, mentions: Vec<String> },
     Subscribe(Vec<String>),
     OpenUrl(String),
@@ -276,6 +305,8 @@ pub enum AppEvent {
     Thread { channel: String, root: String, result: Result<Vec<Ev>, String> },
     Members { channel: String, result: Result<Vec<(String, String)>, String> },
     Names(Result<HashMap<String, String>, String>),
+    /// The answer to `Cmd::FindPeople`: everyone whose profile name fits the query, exact names first.
+    People { query: String, result: Result<Vec<(String, String)>, String> },
     Sent(Result<String, String>),
     /// The id of the channel we asked to create.
     Created(Result<String, String>),
@@ -411,6 +442,8 @@ pub struct App {
     pub whois: Option<Whois>,
     /// The person a fresh DM was asked for: the channel is opened as soon as the reloaded list has it.
     pending_dm: Option<String>,
+    /// A name the local table did not have, while the relay's directory is asked who it is (`Cmd::FindPeople`).
+    lookup: Option<Lookup>,
     /// What loaded plugins put on the screen: status items, badges, marks, a pane and `/commands`.
     pub plugins: Registry,
     /// How this copy of buzzr was installed, for `/update`; the loop fills it in, tests set it directly.
@@ -532,6 +565,7 @@ impl App {
             search: Search { query: Editor::default(), messages: Vec::new(), cursor: 0, seq: 0, asked: String::new(), edited_at: Instant::now(), loading: false },
             whois: None,
             pending_dm: None,
+            lookup: None,
             plugins: Registry::default(),
             update_source: InstallSource::Other,
             latest: None,
@@ -1535,6 +1569,7 @@ impl App {
                 }
                 Vec::new()
             }
+            AppEvent::People { query, result } => self.find_people(query, result),
             AppEvent::Sent(r) => {
                 match r {
                     Ok(_) => {}
@@ -2413,15 +2448,16 @@ impl App {
             "new" => self.create_channel(arg),
             "dm" => {
                 if arg.trim().is_empty() {
-                    self.flash("usage: /dm NAME (a name from a channel, or an npub)");
+                    self.flash("usage: /dm NAME (a name, or an npub)");
                     return Vec::new();
                 }
-                match self.resolve_person(arg) {
-                    Ok(pk) => self.open_dm(&pk),
-                    Err(e) => {
-                        self.flash(e);
+                match self.who_is(arg) {
+                    Who::One(pk) => self.open_dm(&pk),
+                    Who::Several(why) => {
+                        self.flash(why);
                         Vec::new()
                     }
+                    Who::Unknown => self.ask_directory(arg, Then::Dm),
                 }
             }
             "whois" => self.show_whois(arg),
@@ -3152,18 +3188,71 @@ impl App {
         exact
     }
 
-    /// A name, or an npub/hex key, to the one person it names: the reason when it is none or more than one.
-    fn resolve_person(&self, who: &str) -> Result<String, String> {
+    /// A name, or an npub/hex key, to the person it names: `Several` carries the question to ask back, and `Unknown` means
+    /// nobody we have met has the name — the relay's directory is the next place to look (`ask_directory`).
+    fn who_is(&self, who: &str) -> Who {
         if let Some(pk) = relay::as_pubkey(who) {
-            return Ok(pk);
+            return Who::One(pk);
         }
         let found = self.people_matching(who);
         match found.len() {
-            0 => Err(format!("nobody here is called {who} — use a name from a channel, or an npub")),
-            1 => Ok(found[0].clone()),
+            0 => Who::Unknown,
+            1 => Who::One(found[0].clone()),
             n => {
                 let names: Vec<String> = found.iter().take(4).map(|pk| format!("{} ({})", self.name_of(pk), short_key(pk))).collect();
-                Err(format!("{who} could be any of {n}: {} — use more of the name, or an npub", names.join(", ")))
+                Who::Several(format!("{who} could be any of {n}: {} — use more of the name, or an npub", names.join(", ")))
+            }
+        }
+    }
+
+    /// A name nothing local matches: ask the relay's directory who it is, and continue `then` with the answer
+    /// (`Cmd::FindPeople`). The question replaces any earlier one — only the newest name is waited on.
+    fn ask_directory(&mut self, who: &str, then: Then) -> Vec<Cmd> {
+        let who = who.trim().to_owned();
+        self.flash(format!("looking for {who}…"));
+        self.lookup = Some(Lookup { who: who.clone(), then });
+        vec![Cmd::FindPeople { query: who }]
+    }
+
+    /// The directory's answer: one person continues the command that asked, several are listed rather than guessed, and
+    /// none is reported the way a name nobody has is. An answer for a name we are no longer asking about is dropped, and
+    /// one that failed to arrive says so rather than leaving the command waiting forever.
+    fn find_people(&mut self, query: String, result: Result<Vec<(String, String)>, String>) -> Vec<Cmd> {
+        let Some(l) = self.lookup.take() else { return Vec::new() };
+        if !l.who.eq_ignore_ascii_case(&query) {
+            self.lookup = Some(l); // a newer name is still waiting for its own answer
+            return Vec::new();
+        }
+        let people = match result {
+            Ok(p) => p,
+            Err(e) => {
+                self.flash(format!("could not look up {}: {e}", l.who));
+                return Vec::new();
+            }
+        };
+        match people.len() {
+            0 => {
+                self.flash(format!("nobody here is called {} — use a name from a channel, or an npub", l.who));
+                Vec::new()
+            }
+            1 => {
+                let Some((pk, name)) = people.into_iter().next() else { return Vec::new() };
+                // The name is ours now: the command that asked goes on with the key the directory named, and the card and
+                // the roster read the name from the same table. Acting on the key rather than re-resolving the name keeps
+                // a name only the directory knows from being looked up a second time — and would otherwise never finish,
+                // since the resolver skips this identity itself.
+                self.names.insert(pk.clone(), name);
+                self.content_changed();
+                match l.then {
+                    Then::Invite => self.invite_person(&pk),
+                    Then::Whois => self.show_whois_person(&pk),
+                    Then::Dm => self.open_dm(&pk),
+                }
+            }
+            n => {
+                let list: Vec<String> = people.iter().take(4).map(|(pk, name)| format!("{name} ({})", short_key(pk))).collect();
+                self.flash(format!("{} could be any of {n}: {} — use more of the name, or an npub", l.who, list.join(", ")));
+                Vec::new()
             }
         }
     }
@@ -3214,36 +3303,43 @@ impl App {
     /// NIP-29 add-member for a channel and a different event for a DM (see `relay::invite_builder`).
     fn invite(&mut self, who: &str) -> Vec<Cmd> {
         if who.trim().is_empty() {
-            self.flash("usage: /invite NAME (a name from a channel, or an npub)");
+            self.flash("usage: /invite NAME (a name, or an npub)");
             return Vec::new();
         }
         if self.read_only {
             self.flash("read-only mode: nothing is sent");
             return Vec::new();
         }
+        match self.who_is(who) {
+            Who::One(pk) => self.invite_person(&pk),
+            Who::Several(why) => {
+                self.flash(why);
+                Vec::new()
+            }
+            Who::Unknown => self.ask_directory(who, Then::Invite),
+        }
+    }
+
+    /// `/invite` once the person is a known key — the local name table, an npub, or the relay's directory all arrive
+    /// here — to the channel on screen (or the group DM you are in). A NIP-29 add-member for a channel and a different
+    /// event for a DM (see `relay::invite_builder`).
+    fn invite_person(&mut self, pubkey: &str) -> Vec<Cmd> {
         let Some(c) = self.channel() else {
             self.flash("pick a channel first");
             return Vec::new();
         };
         let (channel, dm, label) = (c.id.clone(), c.is_dm(), format!("{}{}", c.marker(), c.label));
-        let pubkey = match self.resolve_person(who) {
-            Ok(pk) => pk,
-            Err(e) => {
-                self.flash(e);
-                return Vec::new();
-            }
-        };
         if pubkey == self.me {
             self.flash("you are already here");
             return Vec::new();
         }
-        let name = self.name_of(&pubkey);
-        if self.members.get(&channel).map(|m| m.iter().any(|(p, _)| *p == pubkey)).unwrap_or(false) {
+        let name = self.name_of(pubkey);
+        if self.members.get(&channel).map(|m| m.iter().any(|(p, _)| p == pubkey)).unwrap_or(false) {
             self.flash(format!("{name} is already in {label}"));
             return Vec::new();
         }
         self.flash(format!("inviting {name} to {label}…"));
-        vec![Cmd::Invite { channel, pubkey, dm }]
+        vec![Cmd::Invite { channel, pubkey: pubkey.to_owned(), dm }]
     }
 
     /// An invite came back: on success the channel's member list is stale, so drop it and ask for the fresh one (the next
@@ -3270,25 +3366,31 @@ impl App {
     /// `/whois NAME`: the profile card, filled with the name we already have and the about line from the relay.
     fn show_whois(&mut self, who: &str) -> Vec<Cmd> {
         if who.trim().is_empty() {
-            self.flash("usage: /whois NAME (a name from a channel, or an npub)");
+            self.flash("usage: /whois NAME (a name, or an npub)");
             return Vec::new();
         }
-        let pk = match self.resolve_person(who) {
-            Ok(pk) => pk,
-            Err(e) => {
-                self.flash(e);
-                return Vec::new();
+        match self.who_is(who) {
+            Who::One(pk) => self.show_whois_person(&pk),
+            Who::Several(why) => {
+                self.flash(why);
+                Vec::new()
             }
-        };
+            Who::Unknown => self.ask_directory(who, Then::Whois),
+        }
+    }
+
+    /// `/whois` once the person is a known key: the card, filled with the name we already have and the about line from
+    /// the relay.
+    fn show_whois_person(&mut self, pk: &str) -> Vec<Cmd> {
         self.whois = Some(Whois {
-            name: self.names.get(&pk).cloned().unwrap_or_default(),
-            npub: relay::npub_of(&pk).unwrap_or_else(|| pk.clone()),
-            pubkey: pk.clone(),
+            name: self.names.get(pk).cloned().unwrap_or_default(),
+            npub: relay::npub_of(pk).unwrap_or_else(|| pk.to_owned()),
+            pubkey: pk.to_owned(),
             about: None,
             loading: true,
         });
         self.overlay = Overlay::Whois;
-        vec![Cmd::LoadProfile(pk)]
+        vec![Cmd::LoadProfile(pk.to_owned())]
     }
 
     // ---- compiled-in plugins (driven in this process) ----------------------------------------------------------------

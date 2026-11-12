@@ -55,8 +55,9 @@
   channel. `/join NAME` does the same by name, and `/leave` takes you out of the open channel after asking. Ctrl+F shows what a
   channel is for, how many people are in it and whether you are one of them.
 - **People and profiles.** `/whois name` shows a short card (name, npub, what they wrote about themselves); `/dm name` opens your DM with
-  someone or starts a new one. Both take a name from a channel or an npub.
-- **Invite people into a channel.** `/invite name` adds someone to the channel on screen (or the group DM you are in). A message
+  someone or starts a new one. Both take a name the relay's directory knows, or an npub.
+- **Invite people into a channel.** `/invite name` adds someone — a display name, or an npub — to the channel on screen (or the group
+  DM you are in). A message
   that `@mentions` someone who is not in the channel asks first: `y` invites them and sends, `n` sends without inviting, Esc
   keeps the message in the input.
 - **Agents.** `/agents` lists the agents this copy made; `/agents create` (or the “new agent…” row in that list) asks for a name, then for what
@@ -160,7 +161,7 @@ The full behaviour, for when the feature list above is not enough.
   the left, like the selected message; the bar is the accent colour while the list has focus and grey when it does not, so the accent
   marks where the focus is. The bar sits on the channel on screen; while the list has focus it follows the cursor, and leaving the
   list without opening a channel puts it back. The keyboard starts on the channel list, so Up/Down and Enter work as soon as buzzr opens.
-  `/dm name` opens the DM you already have with someone, or starts a new one; a name from a channel or an npub both work.
+  `/dm name` opens the DM you already have with someone, or starts a new one; a name from the relay's directory or an npub both work.
 - **Unread that survives a restart:** the last-read position per channel and per thread lives in
   `~/.config/buzzr/read-state.json`, so it is there again next time (each channel's count is asked of the relay on startup)
   and a `new messages` line marks where the unseen ones begin. Opening a channel marks it read; `/read` does it again and
@@ -214,14 +215,16 @@ The full behaviour, for when the feature list above is not enough.
   (`y` confirms) and sends `kind:9022`, then drops the channel from the list. The list and the membership are read again after a join
   or a leave, so they follow what the relay accepted.
 - **People:** `/whois name` shows a short card for someone — their name, npub and about line, filled in as the relay answers. `/dm name`
-  and `/whois name` take a display name from a channel, or a key (`npub1…`, `nostr:` URI or hex); an ambiguous or unknown name is
-  reported rather than guessed.
-- **Invite people:** `/invite name` adds someone — a display name from a channel, or an npub — to the channel on screen, or to
-  the group DM you are in; they join as a plain member (no role is asked for). A message you send that `@mentions` someone who
-  is not in the channel asks before it goes out: `y` invites them and sends, `n` sends it without inviting, Esc puts the message
-  back in the input. A name that is already a member is treated as that member, so a plain mention never asks; a DM is a
-  conversation rather than a room to join, so it never asks either; and nothing is offered before the channel's member list has
-  loaded. Only names the profiles have given us can be recognised this way.
+  and `/whois name` take a name or a key (`npub1…`, `nostr:` URI or hex). A name the channels we have loaded have never shown is looked
+  up in the relay's directory (`kind:0` matched by NIP-50 `search`), so somebody elsewhere in the community can be reached by the name
+  they go by; a name that fits more than one person, or nobody at all, is reported rather than guessed.
+- **Invite people:** `/invite name` adds someone — a name (looked up in the directory when no channel has shown it, the same way), or
+  an npub — to the channel on screen, or to the group DM you are in; they join as a plain member (no role is asked for). A message
+  you send that `@mentions` someone who is not in the channel asks before it goes out: `y` invites them and sends, `n` sends it
+  without inviting, Esc puts the message back in the input. A name that is already a member is treated as that member, so a plain
+  mention never asks; a DM is a conversation rather than a room to join, so it never asks either; and nothing is offered before the
+  channel's member list has loaded. Only names the profiles have given us are recognised this way: a name nobody we have met goes
+  through `/invite`, which looks it up in the relay's directory.
 - **Your typing shows:** others see `<your name> is typing…` while you write (once every three seconds; not for `/commands` or
   edits). `--no-typing` turns it off.
 - **Help on screen:** F1 lists the keys, F2 the commands. Esc closes the command palette first, then a panel, then cancels a reply,

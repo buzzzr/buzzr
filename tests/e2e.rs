@@ -917,6 +917,31 @@ fn a_mention_of_someone_outside_the_channel_asks_whether_to_invite_them() {
     s.expect_gone("the question to clear once it is answered", "Invite carol to #design?");
 }
 
+/// A name none of the loaded channels has ever shown is looked up in the relay's directory. `dave` is seeded there with a
+/// profile, in no room and in no message, so the lookup is the only way to reach him: the case a client's own table of
+/// names cannot answer. The card is the whole path — the app asked the directory, it named one person, and the card is his
+/// (name *and* about line, both only the relay had).
+///
+/// The invite itself cannot be driven here (see the case above). The second half asks for a name nobody has at all: the
+/// fake relay matches no names and answers a `search` filter with everything it holds, so acting on the wrong person
+/// there would show up as a card for somebody else rather than as "nobody here is called".
+#[test]
+fn a_name_no_channel_has_shown_is_looked_up_in_the_relay_directory() {
+    let Some(relay) = relay_or_skip("a_name_no_channel_has_shown_...") else { return };
+    let s = session(&relay);
+    s.press_all(&["tab", "tab"]); // channels -> messages -> input
+    s.expect("the input box to take focus", "Send");
+    s.type_text("/whois dave");
+    s.press("enter");
+    s.expect("the card titled with the name the directory gave", "dave · Esc closes");
+    s.expect("and his about line, which only the relay had", "I write things down");
+    s.press("esc");
+    s.type_text("/whois nobodyish");
+    s.press("enter");
+    s.expect("a name nobody has to be said plainly, not filled in with whoever the relay sent", "nobody here is called nobodyish");
+    s.expect_gone("and no card opens for it", "· Esc closes");
+}
+
 #[test]
 fn a_slash_opens_the_command_palette_and_enter_runs_the_command() {
     let Some(relay) = relay_or_skip("a_slash_opens_the_command_palette_...") else { return };
