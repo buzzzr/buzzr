@@ -21,6 +21,15 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
   JavaScript or TypeScript runtime needs nothing added to buzzr), and the plugin sends its display name, its permissions and its
   heartbeat (`tickMs`) in its `ready` message. The contract version is now `apiVersion` 2. A folder that will not load — no entry
   file, no executable bit, an id that is not safe — is listed with the reason instead of failing quietly.
+- **One plugin framework for two kinds of plugin.** A plugin is now either **runtime-loaded** (the separate process above, any
+  language, hot-reloaded) or **compiled-in** (a Rust type in buzzr's own tree, or in a crate of its own that depends on the `buzzr`
+  library, registered with `register_plugin!` and driven in-process). Both speak the same `PluginInput`/`PluginOutput` contract and
+  pass the same permission and screen gates, so the transport never changes what a plugin may do. A new **prompt** binding lets either
+  kind ask buzzr to put a question in the composer — one line, or a block of text — and hand the answer back, and two new bindings and
+  permissions (`agents:read`, `agents:write`) let either kind list the local agents and ask buzzr to make and publish one.
+- **`/agents` is now the first compiled-in plugin** (`src/plugins/agents.rs`), written against that same contract: it lists the
+  local agents as a panel, asks for a name and then for the instructions through prompts, and asks the host to make the agent. The
+  `/agents` overlay and its bespoke state are gone from the core — the feature is a plugin.
 - A **typed SDK for TypeScript** (`sdk/typescript/buzzr.ts`): one dependency-free file that turns the protocol into a single
   `definePlugin({ name, permissions, tickMs, ready, onTick, onCommand, … })` call, with `status`, `pane`, `panel`, `flash`, `draft`,
   `send` and `log` on the handle it gives back. `examples/plugins/clock` is written with it.
@@ -30,7 +39,7 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
 - **A draft belongs to the place it was typed**: switching channel, or going into or out of a thread, empties the box instead of
   carrying a half-written message along, and the text is back when you return to that channel or thread. Sending clears that
   place's draft. They are kept in `drafts.json` next to the read positions, so they survive a restart.
-- **Agents.** `/agents` lists the agents this copy made; `/agents create` — or `n` in that list — turns the composer into a
+- **Agents.** `/agents` lists the agents this copy made; `/agents create` — or the “new agent…” row in that list — turns the composer into a
   two-step flow that asks for a name and then for what the agent should do, and makes it an agent: a fresh key of its own, a
   folder of its own to work in, and a record in `agents.json` (mode 600, next to the read positions, since it holds the agent's
   key). It is then published to the relay, the way the Buzz app does it: the agent's own kind-0 profile, signed with its own key

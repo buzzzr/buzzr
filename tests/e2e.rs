@@ -412,6 +412,29 @@ fn session_in(relay: &Relay, config: PathBuf) -> Session {
     s
 }
 
+/// A plugins folder with nothing in it: plugins are on, so the compiled-in ones start, but no runtime-loaded plugin
+/// is there to draw. (`session` starts with `--no-plugins` for isolation; a test of anything a plugin owns needs this.)
+fn empty_plugins_dir() -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("buzzr-e2e-no-plugins-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+/// Like `session`, but with plugins on and an empty plugins folder, so a compiled-in plugin is there and no
+/// runtime-loaded one is.
+fn session_with_plugins(relay: &Relay) -> Session {
+    let s = Session::start_full(relay, fresh_config_dir(), false, ROWS, Some(empty_plugins_dir()));
+    settle(&s);
+    s
+}
+
+/// Like `session_in`, but with plugins on (see `session_with_plugins`).
+fn session_in_with_plugins(relay: &Relay, config: PathBuf) -> Session {
+    let s = Session::start_full(relay, config, false, ROWS, Some(empty_plugins_dir()));
+    settle(&s);
+    s
+}
+
 /// Wait for the app's first screen: the channel it opens by itself, the live connection, and the
 /// keyboard on the channel list.
 fn settle(s: &Session) {
@@ -870,27 +893,30 @@ fn esc_closes_the_command_palette_and_keeps_what_was_typed() {
     s.press("esc");
 }
 
-/// `/agents` and the two-step "new agent" flow, all through the real UI: the list opens from the composer, `n`
-/// turns the composer into the flow's box (a name, then what the agent should do), and accepting it makes a local
-/// agent — a key of its own, a folder of its own, and a record on disk — which the list then shows. The flow reads
-/// and writes only the config directory, so a session with its own temp config is safe to run it in.
+/// `/agents` and the two-step "new agent" flow, all through the real UI: the list opens from the composer, Enter on
+/// its "new agent…" row turns the composer into the flow's box (a name, then what the agent should do), and accepting
+/// it makes a local agent — a key of its own, a folder of its own, and a record on disk — which the list then shows.
+/// The flow reads and writes only the config directory, so a session with its own temp config is safe to run it in.
 #[test]
 fn agents_are_listed_and_a_new_one_is_created_through_the_composer() {
     let Some(relay) = relay_or_skip("agents_are_listed_and_a_new_one_...") else { return };
-    let mut s = session(&relay);
+    // `/agents` is a compiled-in plugin, and `session` starts with `--no-plugins`, so this one starts with plugins on.
+    let mut s = session_with_plugins(&relay);
     let config = s.config.clone();
     s.press_all(&["tab", "tab"]); // channels -> messages -> input
     s.expect("the input box to take focus", "Send");
-    // nothing made yet: the overlay says so, and names the command that makes one
+    // nothing made yet: the panel says so, and its last row makes one
     s.type_text("/agents");
     s.press("enter");
-    s.expect("the local agents overlay", "local agents · Up/Down · n new agent");
+    s.expect("the local agents panel", "local agents");
     s.expect("the empty list", "No agents yet.");
-    // `n` turns the composer into the flow's box, asking first for a name
-    s.press("n");
+    s.expect("the row that starts one", "new agent…");
+    // Enter on that row turns the composer into the flow's box, asking first for a name
+    s.press("end");
+    s.press("enter");
     s.expect("the composer to ask for a name", "new agent · name");
     s.expect("the hint for the first step", "New agent: type a name, then Enter");
-    s.expect_gone("the empty-list overlay to close", "No agents yet.");
+    s.expect_gone("the panel to give the composer back", "No agents yet.");
     // the name takes the Enter, and the second step asks what the agent should do
     s.type_text("Scout");
     s.press("enter");
@@ -904,7 +930,7 @@ fn agents_are_listed_and_a_new_one_is_created_through_the_composer() {
     s.expect("its harness", "claude-code-acp");
     s.expect("the folder of its own beside the record", "agents/scout");
     s.press("esc");
-    s.expect_gone("the overlay to close", "local agents · Up/Down");
+    s.expect_gone("the panel to close", "local agents");
     // it is on disk: a fresh run on the same config lists it again
     s.press("ctrl+q");
     s.wait_exit(Duration::from_secs(10)).expect("buzzr should exit on Ctrl+Q");
@@ -914,7 +940,7 @@ fn agents_are_listed_and_a_new_one_is_created_through_the_composer() {
     drop(s); // the session takes its config directory with it
     std::fs::create_dir_all(&config).unwrap();
     std::fs::write(config.join("agents.json"), &written).unwrap();
-    let again = session_in(&relay, config);
+    let again = session_in_with_plugins(&relay, config);
     again.press_all(&["tab", "tab"]);
     again.type_text("/agents");
     again.press("enter");

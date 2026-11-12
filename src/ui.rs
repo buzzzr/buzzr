@@ -1,7 +1,7 @@
 //! Drawing the screen. Everything here reads `App`; the only thing it changes is the geometry it reports back (so that clicks
 //! can be mapped to what is on screen).
 
-use crate::app::{AgentStep, App, Conn, Focus, Overlay, ReactRow, Row, SideRow, View};
+use crate::app::{App, Conn, Focus, Overlay, ReactRow, Row, SideRow, View};
 use crate::list;
 use ratatui::layout::{Alignment, Constraint, Layout, Position, Rect};
 use ratatui::style::{Modifier, Style};
@@ -92,7 +92,6 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Overlay::Search => draw_search(f, app, area),
         Overlay::Whois => draw_whois(f, app, area),
         Overlay::Panel => draw_panel(f, app, area),
-        Overlay::Agents => draw_agents(f, app, area),
         Overlay::None => {}
     }
 }
@@ -437,22 +436,17 @@ fn draw_command_palette(f: &mut Frame, app: &App, input: Rect) {
 fn draw_input(f: &mut Frame, app: &App, area: Rect, inner_w: usize) {
     let focused = app.focus == Focus::Input;
     let join = app.open_channel_not_joined();
-    // The composer is the new-agent flow's box while it is collecting: the title names the step it is on.
-    let step = match &app.agent_draft {
-        Some(AgentStep::Name) => Some(" new agent · name "),
-        Some(AgentStep::Instructions { .. }) => Some(" new agent · instructions "),
-        None => None,
-    };
-    let title = if let Some(t) = step {
-        t
+    // The composer is a plugin's box while a prompt is up: the title names the prompt and the hint asks the question.
+    let title: String = if let Some(p) = &app.prompt {
+        format!(" {} ", p.title)
     } else if join {
-        " join this channel "
+        " join this channel ".to_owned()
     } else if app.editing.is_some() {
-        " edit message "
+        " edit message ".to_owned()
     } else if app.reply_target.is_some() || app.in_thread() {
-        " reply in thread "
+        " reply in thread ".to_owned()
     } else {
-        " message "
+        " message ".to_owned()
     };
     let block = Block::default().borders(Borders::ALL).border_style(if focused { Style::default().fg(crate::theme::get().accent) } else { faint() }).title(title);
     let inner = block.inner(area);
@@ -467,9 +461,8 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect, inner_w: usize) {
         return;
     }
     if app.editor.is_empty() {
-        let hint = match &app.agent_draft {
-            Some(AgentStep::Name) => "New agent: type a name, then Enter. Esc cancels".to_owned(),
-            Some(AgentStep::Instructions { name }) => format!("What should {name} do? Enter makes it, Esc cancels (Alt+Enter for a new line)"),
+        let hint = match &app.prompt {
+            Some(p) => p.hint.clone(),
             None if app.read_only => "read-only: nothing will be sent".to_owned(),
             None => "Type a message · /help for commands · F1 for keys".to_owned(),
         };
@@ -595,11 +588,11 @@ pub const KEYS: &[(&str, &str)] = &[
     ("Esc", "close"),
     ("", ""),
     ("Local agents (from /agents)", ""),
-    ("Up / Down, PgUp / PgDn, Home / End", "move over your agents"),
-    ("n", "make a new agent: a name, then what it should do"),
+    ("Up / Down, PgUp / PgDn, Home / End", "move over the list"),
+    ("Enter", "on the “new agent…” row, start one: a name, then what it should do"),
     ("Esc", "close"),
     ("", ""),
-    ("New agent (in the composer, from /agents create or `n`)", ""),
+    ("New agent (in the composer, from /agents create or that row)", ""),
     ("type", "the agent's name, Enter for the next step"),
     ("type", "what it should do, Enter makes it"),
     ("Alt+Enter, Shift+Enter", "a new line in the instructions"),
@@ -684,12 +677,12 @@ pub const HELP: &[&str] = &[
     "Shift+Enter adds a line only where the terminal reports it: kitty, foot, WezTerm, Ghostty, iTerm2.",
     "",
     "/agents shows the local agents this copy made, with the identity each one speaks as and the folder it works in.",
-    "/agents create (or `n` in that list) asks for a name and then for what the agent should do, and makes it: a key of",
-    "its own, a folder of its own, and a record in ~/.config/buzzr/agents.json (mode 600 — it holds the agent's key, so",
-    "anyone who can read that file can act as the agent). The harness it is made for is a local Claude Code driven over",
-    "ACP (`claude-code-acp`). It is then published to the relay — the agent's own profile, signed with the agent's key",
-    "and carrying your attestation, and your listing of it — so other Buzz clients show it as your agent. A relay that",
-    "will not take it leaves the agent local, and the flow says so.",
+    "/agents create (or the “new agent…” row in that list) asks for a name and then for what the agent should do, and",
+    "makes it: a key of its own, a folder of its own, and a record in ~/.config/buzzr/agents.json (mode 600 — it holds",
+    "the agent's key, so anyone who can read that file can act as the agent). The harness it is made for is a local Claude",
+    "Code driven over ACP (`claude-code-acp`). It is then published to the relay — the agent's own profile, signed with the",
+    "agent's key and carrying your attestation, and your listing of it — so other Buzz clients show it as your agent. A",
+    "relay that will not take it leaves the agent local, and the flow says so.",
     "",
     "New messages, edits, deletions, reactions and typing indicators arrive live; there is no polling.",
     "Links: clicking one copies its URL to your clipboard (your terminal must allow OSC 52; in tmux:",
@@ -884,55 +877,6 @@ fn draw_whois(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(lines).block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(crate::theme::get().accent)).title(title)), r);
 }
 
-/// The local agents buzzr made (`/agents`): two lines each — the name and the identity it speaks with, then the harness it
-/// runs on and the folder it works in. `n` (or `/agents create`) starts the flow in the composer; this only lists them.
-fn draw_agents(f: &mut Frame, app: &App, area: Rect) {
-    let w = 96.min(area.width.saturating_sub(4)).max(24);
-    let blocks = app.agents.len() as u16 * 3;
-    let h = (blocks + 2).clamp(6, area.height.saturating_sub(2).max(6));
-    let r = Rect::new(area.x + (area.width.saturating_sub(w)) / 2, area.y + (area.height.saturating_sub(h)) / 2, w, h);
-    clear_popup(f, r);
-    let title = " local agents · Up/Down · n new agent · Esc closes ";
-    let block = Block::default().borders(Borders::ALL).border_style(Style::default().fg(crate::theme::get().accent)).title(title);
-    let inner = block.inner(r);
-    f.render_widget(block, r);
-    if inner.height == 0 {
-        return;
-    }
-    if app.agents.is_empty() {
-        let lines = vec![
-            Line::from(Span::styled("No agents yet.", Style::default().add_modifier(Modifier::BOLD))),
-            Line::default(),
-            Line::from(Span::styled("`n`, or `/agents create`, makes one: it gets an identity of its own to speak", dim())),
-            Line::from(Span::styled("with, and a folder of its own to work in.", dim())),
-        ];
-        f.render_widget(Paragraph::new(lines), inner);
-        return;
-    }
-    // An agent takes three rows (its name and identity, where it runs, a blank), so whole agents are shown and never half
-    // of one; the window follows the cursor the way the other lists do.
-    let room = (inner.height as usize / 3).max(1);
-    let start = app.agent_cursor.saturating_sub(room / 2).min(app.agents.len().saturating_sub(room));
-    let mut lines: Vec<Line> = Vec::new();
-    for (i, a) in app.agents.iter().enumerate().skip(start).take(room) {
-        let sel = i == app.agent_cursor;
-        let name_room = (inner.width as usize).saturating_sub(21); // the marker, the gap and the key short enough to fit
-        let mut head = Line::from(vec![
-            Span::raw(if sel { "▌ " } else { "  " }),
-            Span::styled(clipped(&a.name, name_room), if sel { Style::default().add_modifier(Modifier::BOLD) } else { Style::default() }),
-            Span::raw("  "),
-            Span::styled(crate::app::short_key(&a.pubkey), dim()),
-        ]);
-        if sel {
-            head = head.style(Style::default().bg(crate::theme::get().sel_bg));
-        }
-        lines.push(head);
-        lines.push(Line::from(Span::styled(format!("   {} · {}", a.harness, a.workspace), dim())));
-        lines.push(Line::default());
-    }
-    f.render_widget(Paragraph::new(lines), inner);
-}
-
 fn draw_help(f: &mut Frame, area: Rect) {
     let w = 100.min(area.width.saturating_sub(4));
     let h = (HELP.len() as u16 + 4).min(area.height);
@@ -1020,39 +964,23 @@ mod tests {
     }
 
     #[test]
-    fn the_local_agents_overlay_lists_the_agents_and_the_flow_names_the_step_it_is_on() {
+    fn a_prompt_a_plugin_asked_for_takes_over_the_composer() {
         let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
         let mut app = app();
-        app.overlay = Overlay::Agents;
+        app.focus = Focus::Input;
+        // A plugin's prompt (see `plugin::PluginOutput::Prompt`): buzzr owns the box, and the title and hint are the
+        // plugin's own words. The agents flow is its first user.
+        app.prompt = Some(crate::app::PromptState {
+            plugin: "agents".into(),
+            id: "instructions".into(),
+            title: "new agent · instructions".into(),
+            hint: "What should Scout do? Enter makes it, Esc cancels (Alt+Enter for a new line)".into(),
+            multiline: true,
+        });
         term.draw(|f| draw(f, &mut app)).unwrap();
         let s = screen(&term).join("\n");
-        assert!(s.contains("No agents yet"), "an empty list says so\n{s}");
-        assert!(s.contains("/agents create"), "and names the command that makes one\n{s}");
-
-        app.seed_agents(vec![crate::agents::Agent {
-            name: "Scout".into(),
-            pubkey: "aa".repeat(32),
-            harness: crate::agents::HARNESS.into(),
-            workspace: "/home/me/.config/buzzr/agents/scout".into(),
-            instructions: String::new(),
-            created_at: 1,
-        }]);
-        term.draw(|f| draw(f, &mut app)).unwrap();
-        let s = screen(&term).join("\n");
-        assert!(s.contains("Scout") && s.contains("npub1"), "the agent and the identity it speaks with\n{s}");
-        assert!(s.contains(crate::agents::HARNESS) && s.contains("agents/scout"), "where it runs and the folder it works in\n{s}");
-
-        // the flow turns the composer into its box: the title names the step, and the hint asks the question
-        app.overlay = Overlay::None;
-        app.agent_draft = Some(crate::app::AgentStep::Name);
-        term.draw(|f| draw(f, &mut app)).unwrap();
-        let s = screen(&term).join("\n");
-        assert!(s.contains("new agent · name"), "the composer names the step it is on\n{s}");
-        app.agent_draft = Some(crate::app::AgentStep::Instructions { name: "Scout".into() });
-        term.draw(|f| draw(f, &mut app)).unwrap();
-        let s = screen(&term).join("\n");
-        assert!(s.contains("new agent · instructions"), "and moves to the next\n{s}");
-        assert!(s.contains("What should Scout do?"), "with the question about the agent named\n{s}");
+        assert!(s.contains("new agent · instructions"), "the composer names the prompt\n{s}");
+        assert!(s.contains("What should Scout do?"), "and its hint asks the question\n{s}");
     }
 
     #[test]

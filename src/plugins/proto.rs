@@ -1,7 +1,8 @@
 //! The wire between buzzr and a plugin process: one JSON object per line, both ways.
 //!
-//! Host to plugin: `hello`, `snapshot`, `tick`, `invoke`, `panel_action`, `bye`.
-//! Plugin to host: `ready`, `status`, `pane`, `panel`, `flash`, `draft`, `send`, `log`.
+//! Host to plugin: `hello`, `snapshot`, `tick`, `invoke`, `panel_action`, `prompt_answer`, `agents`, `created`, `bye`.
+//! Plugin to host: `ready`, `status`, `pane`, `panel`, `flash`, `draft`, `send`, `prompt`, `list_agents`,
+//! `create_agent`, `log`.
 //! Unknown message types and unknown fields are ignored (and logged), so a newer plugin can talk to an older buzzr; a
 //! plugin that cannot speak the `apiVersion` in `hello` refuses it and exits instead.
 
@@ -26,6 +27,18 @@ pub enum ToPlugin<'a> {
     Tick { seq: u64 },
     Invoke { id: u64, command: &'a str, args: &'a str },
     PanelAction { id: &'a str, row: usize, value: Option<&'a str> },
+    /// The user answered (or, with no `text`, cancelled) a prompt the plugin asked for with `prompt`.
+    PromptAnswer { id: &'a str, #[serde(skip_serializing_if = "Option::is_none")] text: Option<&'a str> },
+    /// The local agents, as the answer to the plugin's `list_agents`.
+    Agents { id: &'a str, agents: &'a [crate::plugin::AgentView] },
+    /// The answer to the plugin's `create_agent`: the agent that was made (`agent`), or why not (`error`).
+    Created {
+        id: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        agent: Option<&'a crate::plugin::CreatedAgent>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<&'a str>,
+    },
     Bye,
 }
 
@@ -59,6 +72,13 @@ pub enum FromPlugin {
     Flash { text: String },
     Draft { text: String },
     Send { channel: Option<String>, text: String },
+    /// Ask the user for a line (`multiline == false`) or a block of text: buzzr draws and owns the prompt, and the
+    /// answer comes back as a `prompt_answer` with this `id`.
+    Prompt { id: String, title: String, hint: String, multiline: bool },
+    /// Ask for the local agents; the answer comes back as `agents` with this `id`.
+    ListAgents { id: String },
+    /// Ask buzzr to make and publish a local agent; the answer comes back as `created` with this `id`.
+    CreateAgent { id: String, name: String, instructions: String },
     Log { level: String, text: String },
 }
 
@@ -115,6 +135,36 @@ pub fn parse(line: &str) -> Result<Option<FromPlugin>, String> {
             channel: field("channel").and_then(Value::as_str).map(|c| clean_line(c)),
             text: clean_block(field("text").and_then(Value::as_str).unwrap_or_default()),
         },
+        "prompt" => {
+            let id = clean_line(field("id").and_then(Value::as_str).unwrap_or_default());
+            if id.is_empty() {
+                return Err("a prompt needs an id".into());
+            }
+            FromPlugin::Prompt {
+                id,
+                title: clean_line(field("title").and_then(Value::as_str).unwrap_or_default()),
+                hint: clean_line(field("hint").and_then(Value::as_str).unwrap_or_default()),
+                multiline: field("multiline").and_then(Value::as_bool).unwrap_or(false),
+            }
+        }
+        "list_agents" => {
+            let id = clean_line(field("id").and_then(Value::as_str).unwrap_or_default());
+            if id.is_empty() {
+                return Err("a list_agents needs an id".into());
+            }
+            FromPlugin::ListAgents { id }
+        }
+        "create_agent" => {
+            let id = clean_line(field("id").and_then(Value::as_str).unwrap_or_default());
+            if id.is_empty() {
+                return Err("a create_agent needs an id".into());
+            }
+            FromPlugin::CreateAgent {
+                id,
+                name: clean_line(field("name").and_then(Value::as_str).unwrap_or_default()),
+                instructions: clean_block(field("instructions").and_then(Value::as_str).unwrap_or_default()),
+            }
+        }
         "log" => FromPlugin::Log {
             level: clean_line(field("level").and_then(Value::as_str).unwrap_or("info")),
             text: clean_line(field("text").and_then(Value::as_str).unwrap_or_default()),

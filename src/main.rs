@@ -1,25 +1,7 @@
-mod agents;
-mod app;
-mod config;
-mod contrib;
-mod editor;
-mod emoji;
-mod keyfile;
-mod list;
-mod live;
-mod markdown;
-mod model;
-mod plugins;
-mod relay;
-mod release;
-mod selftest;
-mod setup;
-mod theme;
-mod ui;
-mod update;
-
 use anyhow::{anyhow, Context, Result};
-use app::{App, AppEvent, Cmd};
+use buzzr::{agents, config, keyfile, live, plugin, plugins, relay, release, selftest, setup, ui, update};
+use buzzr::app::{App, AppEvent, Cmd};
+use buzzr::relay::Relay;
 use clap::Parser;
 use futures_util::StreamExt;
 use nostr::Keys;
@@ -30,7 +12,6 @@ use ratatui::crossterm::event::{
 use ratatui::crossterm::terminal::{disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::crossterm::{execute, ExecutableCommand};
 use ratatui::{backend::CrosstermBackend, Terminal};
-use relay::Relay;
 use std::io::{stdout, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -254,6 +235,12 @@ async fn run_tui(relay: Arc<Relay>, read_only: bool, send_typing: bool, mouse: b
     app.seed_drafts(config::load_drafts(&paths.drafts()));
     // The local agents buzzr made: the identity and the folder each one works in, from `agents.json` (see `agents.rs`).
     app.seed_agents(agents::load(&paths.agents()));
+    // The compiled-in plugins this build registered (see `plugin`): their commands, contributions and permissions, kept
+    // beside the external ones the `plugins::Host` supervises. Both are driven through the same contract, and both kinds
+    // are off together — `plugin_dirs` is `None` under `--no-plugins` and `BUZZR_SAFE_MODE=1`, so this seeds nothing then.
+    if plugin_dirs.is_some() {
+        app.seed_plugins(plugin::PluginRuntime::new());
+    }
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
     // The release feed: seed the notice from what the last check learned, and ask GitHub again only when that is stale. A failure
     // (offline, no release yet) is silent — see `release.rs`.
@@ -319,11 +306,22 @@ async fn run_tui(relay: Arc<Relay>, read_only: bool, send_typing: bool, mouse: b
             _ = tick.tick() => Some(AppEvent::Tick),
         };
         if let Some(ev) = event {
+            let ticked = matches!(ev, AppEvent::Tick);
             for cmd in app.handle(ev) {
                 run(cmd, &relay, &tx, &live.channels, &host, paths);
             }
+            // A compiled-in plugin's heartbeat, on the same tick the host drives an external one's.
+            if ticked {
+                for cmd in app.plugin_tick() {
+                    run(cmd, &relay, &tx, &live.channels, &host, paths);
+                }
+            }
         }
-        // Only what changed is sent, and only to plugins that are ready; a stalled plugin never slows the loop.
+        // Only what changed is sent, and only to plugins that are ready; a stalled plugin never slows the loop. The
+        // compiled-in plugins are shown the same projection, on the same "only what changed" rule.
+        for cmd in app.plugin_snapshot(app.projection()) {
+            run(cmd, &relay, &tx, &live.channels, &host, paths);
+        }
         host.snapshot(app.projection());
     }
 }
