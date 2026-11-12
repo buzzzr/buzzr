@@ -2502,6 +2502,21 @@ fn an_unknown_agents_argument_flashes_the_usage() {
 }
 
 #[test]
+fn a_turn_a_local_agent_ran_is_reported_on_the_status_line() {
+    let mut app = app_with(1);
+    // The runner reports every turn it takes (see `runner.rs`). The answer is on the relay already, so the app only
+    // says what happened: an agent that answered, or why it could not.
+    app.handle(AppEvent::AgentTurn { agent: "Scout".into(), result: Ok(()) });
+    assert_eq!(app.flash_text(), Some("Scout replied"));
+    app.handle(AppEvent::AgentTurn { agent: "Scout".into(), result: Err("claude-agent-acp is not installed, or is not on PATH".into()) });
+    assert_eq!(
+        app.flash_text(),
+        Some("Scout could not answer: claude-agent-acp is not installed, or is not on PATH"),
+        "a turn that could not run says why"
+    );
+}
+
+#[test]
 fn without_the_plugin_agents_is_an_unknown_command() {
     // The command comes from the compiled-in `agents` plugin, so with no plugin seed (the `--no-plugins` /
     // `BUZZR_SAFE_MODE=1` state, as `main.rs` seeds nothing there) the command does not exist.

@@ -90,6 +90,21 @@ pub fn load(path: &Path) -> Vec<Agent> {
     read(path).map(|f| f.agents.iter().map(Record::agent).collect()).unwrap_or_default()
 }
 
+/// The agents in `path` with their keys: what [`load`] returns, plus the identity each one speaks with. The runner
+/// (`runner.rs`) is the caller — an agent that answers a mention signs as itself, so it needs its own key. A record
+/// whose key does not parse is left out rather than reported: a hand-edited file must not stop the others from
+/// running, and a damaged one is already [`load`]'s to ignore.
+pub fn load_with_keys(path: &Path) -> Vec<(Agent, Keys)> {
+    read(path)
+        .map(|f| {
+            f.agents
+                .iter()
+                .filter_map(|r| Keys::parse(&r.nsec).ok().map(|k| (r.agent(), k)))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn read(path: &Path) -> Result<File, String> {
     match std::fs::read_to_string(path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(File::default()),

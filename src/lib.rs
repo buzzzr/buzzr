@@ -23,6 +23,7 @@ pub mod plugin;
 pub mod plugins;
 pub mod relay;
 pub mod release;
+pub mod runner;
 pub mod selftest;
 pub mod setup;
 pub mod theme;

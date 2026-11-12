@@ -119,6 +119,12 @@ impl Relay {
         &self.keys
     }
 
+    /// The relay's HTTP base (`https://host`): what another `Relay` for the same relay is built from — the runner
+    /// builds one per agent, so the agent's own events go to the relay the person is connected to.
+    pub fn base_url(&self) -> &str {
+        &self.base
+    }
+
     pub fn ws_url(&self) -> &str {
         &self.ws
     }

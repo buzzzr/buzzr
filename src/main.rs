@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Context, Result};
-use buzzr::{agents, config, harness, keyfile, live, plugin, plugins, relay, release, selftest, setup, ui, update};
+use buzzr::{agents, config, harness, keyfile, live, plugin, plugins, relay, release, runner, selftest, setup, ui, update};
 use buzzr::app::{App, AppEvent, Cmd};
 use buzzr::relay::Relay;
 use clap::Parser;
@@ -263,6 +263,11 @@ async fn run_tui(relay: Arc<Relay>, read_only: bool, send_typing: bool, mouse: b
         None => plugins::Host::none(),
     };
     let mut live = live::spawn(relay.clone(), Vec::new());
+    // The local agents: a mention of one is answered by its harness (see `runner.rs`). An answer is a message, so a
+    // read-only run, and safe mode, start no watcher at all — an agent that could not send would only report failures.
+    if !read_only && config::env("SAFE_MODE").as_deref() != Some("1") {
+        runner::spawn(relay.clone(), paths.clone(), tx.clone());
+    }
     for cmd in app.start() {
         run(cmd, &relay, &tx, &live.channels, &host, paths);
     }

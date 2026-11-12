@@ -299,6 +299,9 @@ pub enum AppEvent {
     /// The answer to `Cmd::ProbeHarness`: what the harness offers for a new agent, or why it could not be asked (it is
     /// not installed, or it did not answer).
     HarnessOffer(Result<crate::plugin::HarnessOffer, String>),
+    /// What a local agent's turn for one mention came to (`runner.rs`): the agent answered, or why it could not. The
+    /// answer itself is already on the relay, so this is only what the status line has to say about it.
+    AgentTurn { agent: String, result: Result<(), String> },
     /// From the plugin runtime: ready/status/panel/flash/draft/send/gone, and the plugin list.
     Plugin(PluginEvent),
     /// The release feed found a later version than the one running.
@@ -1620,6 +1623,15 @@ impl App {
                     Some((plugin, id)) => self.plugin_input(&plugin, PluginInput::HarnessOffer { id, result }),
                     None => Vec::new(),
                 }
+            }
+            AppEvent::AgentTurn { agent, result } => {
+                // A local agent ran a turn for a mention (see `runner.rs`): the answer is on the relay already, so the
+                // status line only says that it happened — or why it could not.
+                match result {
+                    Ok(()) => self.flash(format!("{agent} replied")),
+                    Err(e) => self.flash(format!("{agent} could not answer: {e}")),
+                }
+                Vec::new()
             }
             AppEvent::Plugin(e) => self.plugin_event(e),
             AppEvent::Update(v) => {
