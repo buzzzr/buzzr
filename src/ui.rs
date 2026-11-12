@@ -149,19 +149,27 @@ fn draw_channels(f: &mut Frame, app: &App, area: Rect) {
         let c = &app.channels[i];
         let open = app.cur == Some(i);
         let bar = app.channel_bar() == Some(i);
-        let unread = app.unread.get(&c.id).copied().unwrap_or(0);
+        let top = app.unread.get(&c.id).copied().unwrap_or(0);
+        // Unread replies inside a thread are a circle, not a count: a thread is not a timeline row, so opening the channel
+        // would never clear a count that stood for them. The two markers are independent, and a row that has both says so.
+        let thread = app.channel_thread_unread(&c.id);
         let mut style = Style::default();
         if open {
             style = style.add_modifier(Modifier::BOLD);
         }
-        if unread > 0 {
+        if top > 0 || thread {
             style = style.fg(crate::theme::get().warn).add_modifier(Modifier::BOLD);
         }
         let marker = if bar { "▌" } else { " " };
         // `#` for an open channel, `*` for a private one (RFC 2811's private-channel prefix), `@` for a DM (a person, not a
         // room); all ASCII, so every font has them and a DM row never opens with a box it cannot draw.
         let glyph = c.marker();
-        let badge = if unread > 0 { format!(" ({unread})") } else { String::new() };
+        let badge = match (top, thread) {
+            (0, false) => String::new(),
+            (n, false) => format!(" ({n})"),
+            (0, true) => " ●".to_owned(),
+            (n, true) => format!(" ({n}) ●"),
+        };
         let mark = app.plugins.channel_mark(&c.id);
         let mark_text = mark.map(|m| format!(" {}", m.text)).unwrap_or_default();
         let room = (inner.width as usize).saturating_sub(2 + glyph.width() + badge.width() + mark_text.width());
@@ -1052,6 +1060,36 @@ mod tests {
         assert!(s.contains("(3)") && s.contains("3 unread"), "the unread count is written out, not only coloured\n{s}");
         assert!(s.contains("✕ offline, retrying (boom)"), "the connection state is a word, not only a colour\n{s}");
         assert!(s.contains("▌ #general"), "the selection is the bar glyph, not only a background\n{s}");
+    }
+
+    #[test]
+    fn the_channel_list_counts_top_level_unreads_and_circles_thread_replies() {
+        use std::collections::HashMap;
+        let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        let mut app = app();
+        // #general's only news is a reply inside its thread: a stored thread position that predates the reply marks the row
+        // with a circle, and the row carries no count — a thread is not a timeline row, so a count could never clear.
+        app.seed_read(crate::config::ReadState {
+            channels: HashMap::new(),
+            threads: [("a".to_owned(), 1u64)].into_iter().collect(),
+            marks: HashMap::new(),
+        });
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(s.contains("#general ●"), "a thread-only unread is a circle, not a count:\n{s}");
+        assert!(!s.contains("#general ("), "and it is never written as a counted unread:\n{s}");
+
+        // Top-level unreads keep their count.
+        app.unread.insert("c2".into(), 3);
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(s.contains("#random (3)"), "top-level unreads are counted:\n{s}");
+
+        // A channel with both says both.
+        app.unread.insert("c1".into(), 1);
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(s.contains("#general (1) ●"), "a channel with both shows the count and the circle:\n{s}");
     }
 
     #[test]

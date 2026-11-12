@@ -863,6 +863,43 @@ fn read_all_clears_thread_marks_too() {
 }
 
 #[test]
+fn a_thread_reply_marks_its_channel_in_the_list_without_counting_as_unread() {
+    let mut app = app_with(2);
+    seed_threads(&mut app, &[("m000", 1500)]);
+    live_reply(&mut app, "r1", 2000, "alice", "m000");
+    assert_eq!(app.unread.get("c1"), None, "a reply is not on the timeline, so the counted unread stays at zero");
+    assert!(app.channel_thread_unread("c1"), "but the channel list marks the news inside its thread");
+    assert!(!app.channel_thread_unread("c2"), "a channel with no thread is not marked");
+}
+
+#[test]
+fn the_channel_lists_thread_mark_clears_when_the_thread_is_read() {
+    let mut app = app_with(2);
+    seed_threads(&mut app, &[("m000", 1500)]);
+    live_reply(&mut app, "r1", 2000, "alice", "m000");
+    assert!(app.channel_thread_unread("c1"));
+    app.state.selected = Some("m000".into());
+    press(&mut app, KeyCode::Enter); // open the thread, which reads it
+    press(&mut app, KeyCode::Esc);
+    assert!(!app.channel_thread_unread("c1"), "reading the thread clears the channel row with it");
+}
+
+#[test]
+fn a_thread_the_relay_only_summarised_still_marks_the_channel_list() {
+    let mut app = app_with(2);
+    seed_threads(&mut app, &[("m000", 1500)]);
+    // The replies are not loaded, but the relay's summary says the thread has news after our stored position.
+    let summary = Ev {
+        kind: crate::model::KIND_THREAD_SUMMARY,
+        content: r#"{"reply_count":3,"last_reply_at":5000}"#.into(),
+        tags: vec![vec!["e".into(), "m000".into()]],
+        ..msg("s1", 5001, "alice", "", &[])
+    };
+    app.handle(AppEvent::Live(Live::Event(summary)));
+    assert!(app.channel_thread_unread("c1"), "the summary alone is enough to mark the channel");
+}
+
+#[test]
 fn thread_read_positions_round_trip_through_save_and_seed() {
     let mut app = app_with(2);
     seed_threads(&mut app, &[("m000", 1500)]);

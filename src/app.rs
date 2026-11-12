@@ -910,15 +910,31 @@ impl App {
     /// when the replies are loaded and can be counted, `● new` when only the relay's summary says so (they are not loaded yet).
     /// `None` when the thread is read, or has never been opened: with no stored position nothing is marked, as for a channel.
     fn thread_unread_badge(&self, store: &Store, root: &str) -> Option<Span<'static>> {
+        let loaded = self.thread_new_replies(store, root)?;
+        let text = if loaded == 0 { "  ● new".to_owned() } else { format!("  ● {loaded} new") };
+        Some(Span::styled(text, Style::default().fg(crate::theme::get().warn).add_modifier(Modifier::BOLD)))
+    }
+
+    /// How many of a thread's replies are loaded and newer than the reader's stored position in it, when the thread has any
+    /// news at all — `None` when it is read or was never opened (with no stored position nothing is marked, as for a channel).
+    /// The relay's summary covers replies it knows about but we have not fetched, so a row that already says `💬 2 replies` is
+    /// marked before they load, and a count of zero then means "there is news, but it is not loaded yet". This is the one
+    /// condition behind both the message list's thread mark and the channel list's `●`, so the two never drift apart.
+    fn thread_new_replies(&self, store: &Store, root: &str) -> Option<usize> {
         let at = *self.thread_read.get(root)?;
         let loaded = store.thread(root).iter().filter(|m| m.id != root && m.pubkey != self.me && m.created_at > at).count();
         let newer = store.summaries.get(root).and_then(|s| s.last_reply_at).map(|t| t > at).unwrap_or(false);
-        let text = match (loaded, newer) {
-            (0, false) => return None,
-            (0, true) => "  ● new".to_owned(),
-            (n, _) => format!("  ● {n} new"),
-        };
-        Some(Span::styled(text, Style::default().fg(crate::theme::get().warn).add_modifier(Modifier::BOLD)))
+        (loaded > 0 || newer).then_some(loaded)
+    }
+
+    /// Whether a channel's news is inside a thread rather than on its timeline: some thread in it has replies newer than the
+    /// reader's stored position, so the channel list marks the row with a `●` even though its counted unread — what `(N)`
+    /// stands for — is zero. It mirrors `thread_unread_badge` over every thread the store knows about, so the channel row and
+    /// the message list agree, and it clears when the thread is opened the same way. It holds only for a channel whose store
+    /// is loaded: a channel buzzr has not opened this run has no layer to look in (the startup count is timeline-only).
+    pub fn channel_thread_unread(&self, channel: &str) -> bool {
+        let Some(store) = self.stores.get(channel) else { return false };
+        Self::thread_roots(store).iter().any(|root| self.thread_new_replies(store, root).is_some())
     }
 
     fn render_message(&self, store: &Store, m: &Ev, number: usize, width: usize) -> Rendered {
