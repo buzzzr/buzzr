@@ -7,7 +7,7 @@ reload (a process swap), crash isolation and any language possible.
 That is one of buzzr's two kinds of plugin: the **runtime-loaded** one, added later, in any language. The other kind is
 **compiled-in**: a Rust type in buzzr's own tree (or in a crate that depends on buzzr) that registers itself with
 `register_plugin!`. Both speak the same contract described here and are held to the same rules — a compiled-in plugin gets no door
-this one lacks. `plugins/agents.rs` (`/agents`) is the worked example of the compiled-in kind; the rest of this document is the
+this one lacks. `plugins/agents/` (`/agents`) is the worked example of the compiled-in kind; the rest of this document is the
 wire a runtime-loaded plugin speaks.
 
 A plugin can put things on these surfaces and nothing else:

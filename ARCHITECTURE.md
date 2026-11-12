@@ -36,8 +36,8 @@ into `AppEvent`s. Because `App` never touches the network or the terminal, its b
 | `keyfile.rs` | The password-protected key file format (scrypt + AES-256-GCM): `encrypt` and `decrypt`, no I/O. |
 | `selftest.rs` | `--selftest`: a read-only check against a real relay. |
 | `contrib.rs` | What a plugin is allowed to put on the screen (segments, panes, panels, marks) and the `Registry` the app holds; also the bounded `Projection` sent to plugins and the `PluginCmd`/`PluginEvent` that cross between `App` and the plugin runtime. |
-| `plugin.rs` | The plugin API: the one `Plugin` trait and the `PluginInput`/`PluginOutput` vocabulary both kinds speak, the `register_plugin!` macro and the `inventory` registry behind it, the permissions, and the compiled-in runtime. `plugins/agents.rs` is the worked example. |
-| `plugins/` | The runtime-loaded provider: `proto.rs` is the newline-delimited-JSON wire, `discover.rs` finds plugin folders, their entry file and their hot-reload stamps, `host.rs` is the one task that supervises every child process, and `agents.rs` is the compiled-in plugin that backs `/agents`. See `PLUGIN.md`. |
+| `plugin.rs` | The plugin API: the one `Plugin` trait and the `PluginInput`/`PluginOutput` vocabulary both kinds speak, the `register_plugin!` macro and the `inventory` registry behind it, the permissions, and the compiled-in runtime. `plugins/agents/` is the worked example. |
+| `plugins/` | The runtime-loaded provider: `proto.rs` is the newline-delimited-JSON wire, `discover.rs` finds plugin folders, their entry file and their hot-reload stamps, `host.rs` is the one task that supervises every child process, and `agents/mod.rs` is the compiled-in plugin that backs `/agents`. See `PLUGIN.md`. |
 | `update.rs` | How the running copy was installed (Homebrew's Cellar, `~/.cargo/bin`, a checkout build, anything else) and the shell command that upgrades it, for `/update`. Path inspection only, no network. |
 | `release.rs` | The release feed: one throttled GET of the repository's latest release (at most once a day; `BUZZR_NO_UPDATE_CHECK` skips it), the `State` remembered between runs, and the notice printed after the UI closes. Failures are silent. |
 
@@ -53,7 +53,7 @@ language, hot-reloaded. A **compiled-in** plugin is a Rust type in buzzr's own t
 `buzzr` library (`lib.rs`) — that registers itself with `register_plugin!` and is driven in this process. Both are handed the same
 `PluginInput`, answer with the same `PluginOutput`, declare the same `ready`, and pass the same permission and screen gates — the
 transport is the only difference, so a compiled-in plugin gets no door a runtime-loaded one lacks. `plugin.rs` is the contract and the
-compiled-in runtime; `plugins/agents.rs` (`/agents`) is the worked example.
+compiled-in runtime; `plugins/agents/` (`/agents`) is the worked example.
 
 ```
                        ┌─────────────────────────┐

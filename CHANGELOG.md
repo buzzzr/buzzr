@@ -27,7 +27,7 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
   pass the same permission and screen gates, so the transport never changes what a plugin may do. A new **prompt** binding lets either
   kind ask buzzr to put a question in the composer — one line, or a block of text — and hand the answer back, and two new bindings and
   permissions (`agents:read`, `agents:write`) let either kind list the local agents and ask buzzr to make and publish one.
-- **`/agents` is now the first compiled-in plugin** (`src/plugins/agents.rs`), written against that same contract: it lists the
+- **`/agents` is now the first compiled-in plugin** (`src/plugins/agents/`), written against that same contract: it lists the
   local agents as a panel, asks for a name and then for the instructions through prompts, and asks the host to make the agent. The
   `/agents` overlay and its bespoke state are gone from the core — the feature is a plugin.
 - A **typed SDK for TypeScript** (`sdk/typescript/buzzr.ts`): one dependency-free file that turns the protocol into a single
