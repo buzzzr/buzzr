@@ -1,16 +1,49 @@
 #!/bin/sh
 # A fake `claude-agent-acp` for the tests: one JSON-RPC request per line on stdin, one answer per line on stdout,
-# echoing the request id back. It answers the ACP a probe reads and nothing more — `initialize`, `session/new`
-# (two models and three thinking levels) and `session/set_config_option` (the levels of the model it is moved to).
+# echoing the request id back. It answers what the client reads — `initialize`, `session/new` (two models and three
+# thinking levels), `session/set_config_option` (the levels of the model it is moved to) — and a whole turn:
+# `session/prompt` asks permission for a tool call the way a real harness does, waits for the client's answer, then
+# streams the reply back as two `agent_message_chunk` updates.
+#
+# The reply quotes the prompt it was given, the permission it was granted, and any system prompt `session/new`
+# carried, so a test can check that all three came through. Run this same file under a name ending in `-sysprompt`
+# and it advertises ACP's `systemPrompt` capability, the way a harness that takes one does.
+#
 # No real harness is installed in a test environment, so this stands in for one; both the unit tests in
 # `src/harness/acp.rs` and the end-to-end suite drive this same file.
+
+say() { printf '%s\n' "$1"; }
+# The value of a `"field":"value"` pair in one JSON line (the values here never contain a quote).
+field() { printf '%s' "$1" | sed -n "s/.*\"$2\":\"\([^\"]*\)\".*/\1/p"; }
+
+caps='{}'
+case "$0" in *-sysprompt) caps='{"sessionCapabilities":{"systemPrompt":{}}}' ;; esac
+system=""
+
 while IFS= read -r line; do
   id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
   case "$line" in
-    *'"initialize"'*) result='{"protocolVersion":1,"agentCapabilities":{}}' ;;
-    *'"session/new"'*) result='{"sessionId":"s1","configOptions":[{"id":"model","category":"model","currentValue":"sonnet","options":[{"value":"sonnet","name":"Sonnet"},{"value":"opus","name":"Opus"}]},{"id":"thought_level","category":"thought_level","currentValue":"medium","options":[{"value":"low"},{"value":"medium"},{"value":"high"}]}]}' ;;
-    *'"session/set_config_option"'*) result='{"configOptions":[{"id":"model","category":"model","currentValue":"opus","options":[{"value":"sonnet"},{"value":"opus"}]},{"id":"thought_level","category":"thought_level","currentValue":"high","options":[{"value":"low"},{"value":"high"}]}]}' ;;
-    *) result='{}' ;;
+    *'"initialize"'*) say "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"protocolVersion\":1,\"agentCapabilities\":$caps}}" ;;
+    *'"session/new"'*)
+      system=$(field "$line" text)
+      say "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"sessionId\":\"s1\",\"configOptions\":[{\"id\":\"model\",\"category\":\"model\",\"currentValue\":\"sonnet\",\"options\":[{\"value\":\"sonnet\",\"name\":\"Sonnet\"},{\"value\":\"opus\",\"name\":\"Opus\"}]},{\"id\":\"thought_level\",\"category\":\"thought_level\",\"currentValue\":\"medium\",\"options\":[{\"value\":\"low\"},{\"value\":\"medium\"},{\"value\":\"high\"}]}]}}" ;;
+    *'"session/set_config_option"'*) say "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"configOptions\":[{\"id\":\"model\",\"category\":\"model\",\"currentValue\":\"opus\",\"options\":[{\"value\":\"sonnet\"},{\"value\":\"opus\"}]},{\"id\":\"thought_level\",\"category\":\"thought_level\",\"currentValue\":\"high\",\"options\":[{\"value\":\"low\"},{\"value\":\"high\"}]}]}}" ;;
+    *'"session/prompt"'*)
+      # A turn asks permission for its tool call, and waits for the client to answer before it goes on.
+      say '{"jsonrpc":"2.0","id":424242,"method":"session/request_permission","params":{"sessionId":"s1","toolCall":{"toolCallId":"t1"},"options":[{"optionId":"no","name":"No","kind":"reject_once"},{"optionId":"yes","name":"Yes","kind":"allow_always"}]}}'
+      answer=""
+      while IFS= read -r reply; do
+        case "$reply" in
+          *'"id":424242'*) answer="$reply"; break ;;
+        esac
+      done
+      chosen=$(field "$answer" optionId)
+      text=$(field "$line" text)
+      if [ -n "$system" ]; then text="$text [system: $system]"; fi
+      say "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"sessionId\":\"s1\",\"update\":{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"heard: \"}}}}"
+      say "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"sessionId\":\"s1\",\"update\":{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"$text (permission: $chosen)\"}}}}"
+      say "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"stopReason\":\"end_turn\"}}"
+      ;;
+    *) say "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{}}" ;;
   esac
-  printf '{"jsonrpc":"2.0","id":%s,"result":%s}\n' "$id" "$result"
 done

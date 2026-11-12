@@ -12,6 +12,7 @@
 pub mod acp;
 
 use crate::plugin::HarnessOffer;
+use std::path::Path;
 
 /// One supported harness: the program buzzr runs for an agent, and the agent type the owner's listing names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -68,6 +69,17 @@ pub fn offer(harness: &Harness, model: Option<&str>) -> Result<HarnessOffer, Str
     let result = acp::probe(harness.program(), &dir, model, harness.missing);
     let _ = std::fs::remove_dir_all(&dir);
     result
+}
+
+/// Open a session for one agent: `harness` started in the agent's own folder (`cwd`), on the `model` and thinking
+/// level `effort` it was made with (either may be empty for the harness's own choice), with `instructions` as what it
+/// was told to do. The session is the agent's, so it is kept for the turn that uses it and dropped after — which
+/// stops the harness.
+///
+/// This blocks while the harness starts and opens its session, so call it from a task, never from the event loop
+/// (principle 6 in `AGENTS.md`); `runner.rs` is the one caller.
+pub fn session(harness: &Harness, cwd: &Path, model: Option<&str>, effort: Option<&str>, instructions: &str) -> Result<acp::Session, String> {
+    acp::Session::open(harness.program(), cwd, model, effort, instructions, harness.missing)
 }
 
 #[cfg(test)]
