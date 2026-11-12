@@ -54,7 +54,7 @@ pub struct AgentView {
     pub pubkey: String,
     /// The same key as `npub1…`, for display.
     pub npub: String,
-    /// What runs it: a harness id, the program to run (`claude-code-acp`).
+    /// What runs it: a harness id, the program to run (`claude-agent-acp`).
     pub harness: String,
     /// The model the harness is asked to run, when one was chosen (`None` = the harness's own default).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -403,7 +403,7 @@ mod tests {
             id: "new".into(),
             name: "Scout".into(),
             instructions: "a\nb".into(),
-            harness: "claude-code-acp".into(),
+            harness: "claude-agent-acp".into(),
             model: "opus".into(),
             effort: "high".into(),
         }
@@ -415,7 +415,7 @@ mod tests {
                 id: "new".into(),
                 name: "Scout".into(),
                 instructions: "a\nb".into(),
-                harness: "claude-code-acp".into(),
+                harness: "claude-agent-acp".into(),
                 model: "opus".into(),
                 effort: "high".into(),
             }
@@ -425,10 +425,10 @@ mod tests {
     #[test]
     fn a_probe_and_a_create_carry_the_harness_and_the_picks() {
         // Asking the harness what it offers: the id, and no model yet (the first look).
-        let ev = PluginOutput::ProbeHarness { id: "offer".into(), harness: "claude-code-acp".into(), model: None }.into_event("agents");
-        assert_eq!(ev, PluginEvent::ProbeHarness { plugin: "agents".into(), id: "offer".into(), harness: "claude-code-acp".into(), model: None });
+        let ev = PluginOutput::ProbeHarness { id: "offer".into(), harness: "claude-agent-acp".into(), model: None }.into_event("agents");
+        assert_eq!(ev, PluginEvent::ProbeHarness { plugin: "agents".into(), id: "offer".into(), harness: "claude-agent-acp".into(), model: None });
         // A second look, for one model's levels, names the model; control characters never survive.
-        let ev = PluginOutput::ProbeHarness { id: "levels".into(), harness: "claude-code-acp".into(), model: Some("opus\u{1b}[31m".into()) }
+        let ev = PluginOutput::ProbeHarness { id: "levels".into(), harness: "claude-agent-acp".into(), model: Some("opus\u{1b}[31m".into()) }
             .into_event("agents");
         let PluginEvent::ProbeHarness { model, .. } = ev else { panic!("not a probe") };
         assert_eq!(model.as_deref(), Some("opus[31m"));

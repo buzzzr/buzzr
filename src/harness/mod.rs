@@ -17,7 +17,7 @@ use crate::plugin::HarnessOffer;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Harness {
     /// The id — which is also the program to run, looked up on `PATH`: it speaks ACP on its standard input and output
-    /// (`claude-code-acp`). An agent's record and the panel name the harness by this.
+    /// (`claude-agent-acp`). An agent's record and the panel name the harness by this.
     pub id: &'static str,
     /// A human name, for the panel (`Claude Code`).
     pub label: &'static str,
@@ -35,12 +35,12 @@ impl Harness {
     }
 }
 
-/// Claude Code, driven over ACP by the `claude-code-acp` adapter.
+/// Claude Code, driven over ACP by the `claude-agent-acp` adapter.
 pub const CLAUDE_CODE: Harness = Harness {
-    id: "claude-code-acp",
+    id: "claude-agent-acp",
     label: "Claude Code",
     runtime: "buzz.claude-code/claude-code",
-    missing: "claude-code-acp is not installed, or is not on PATH",
+    missing: "claude-agent-acp is not installed, or is not on PATH",
 };
 
 /// Every harness buzzr knows, in the order a menu would show them. A new one — codex, say — is a new entry here, and
@@ -78,7 +78,7 @@ mod tests {
     fn the_default_harness_is_in_the_table_and_named_by_its_program() {
         assert_eq!(get(DEFAULT.id), Some(DEFAULT));
         assert_eq!(DEFAULT.program(), DEFAULT.id, "the id names the program to run");
-        assert_eq!(get("claude-code-acp"), Some(&CLAUDE_CODE));
+        assert_eq!(get("claude-agent-acp"), Some(&CLAUDE_CODE));
         assert!(ALL.contains(&CLAUDE_CODE));
         assert_eq!(get("nope"), None, "an unknown harness is not a harness");
     }

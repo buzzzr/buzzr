@@ -63,7 +63,7 @@
   the agent should do, then asks the harness what it offers — its models, and a model's thinking levels — so you can pick one of each, and makes
   it — a key of its own, a folder of its own, and a record in `agents.json` (mode 600, beside the read positions) — and publishes it to the
   relay: the agent's own profile, signed with its own key and carrying your attestation of it, and your listing of it, so other Buzz clients
-  show it as yours. The harness it is made for is a local Claude Code driven over ACP (`claude-code-acp`, as the Buzz app does). The harness is
+  show it as yours. The harness it is made for is a local Claude Code driven over ACP (`claude-agent-acp`, as the Buzz app does). The harness is
   asked what it offers, and the relay asked to take the agent, before anything is written: a harness that will not answer, like an agent the
   relay will not take, stops the flow and makes nothing, and says why.
 - **Plugins.** Add your own `/commands`, status items, badges, a pane under the channel list and panels — from any language, as a runtime-loaded plugin, or as a compiled-in Rust plugin in buzzr's own tree. See [PLUGIN.md](PLUGIN.md).

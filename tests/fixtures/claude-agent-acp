@@ -1,5 +1,5 @@
 #!/bin/sh
-# A fake `claude-code-acp` for the tests: one JSON-RPC request per line on stdin, one answer per line on stdout,
+# A fake `claude-agent-acp` for the tests: one JSON-RPC request per line on stdin, one answer per line on stdout,
 # echoing the request id back. It answers the ACP a probe reads and nothing more — `initialize`, `session/new`
 # (two models and three thinking levels) and `session/set_config_option` (the levels of the model it is moved to).
 # No real harness is installed in a test environment, so this stands in for one; both the unit tests in

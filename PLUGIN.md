@@ -78,9 +78,9 @@ that cannot speak it should say why on the log and exit.
 {"type":"invoke","id":11,"command":"hello","args":"the text after /hello"}
 {"type":"panel_action","id":"hello","row":1,"value":"pick"}
 {"type":"prompt_answer","id":"name","text":"Scout"}
-{"type":"agents","id":"list","agents":[{"name":"Scout","pubkey":"<hex>","npub":"npub1…","harness":"claude-code-acp","model":"opus","effort":"high","workspace":"/…/agents/scout","created_at":1700000000}]}
+{"type":"agents","id":"list","agents":[{"name":"Scout","pubkey":"<hex>","npub":"npub1…","harness":"claude-agent-acp","model":"opus","effort":"high","workspace":"/…/agents/scout","created_at":1700000000}]}
 {"type":"harness_offer","id":"offer","offer":{"models":[{"value":"sonnet","label":"Sonnet"}],"model":"sonnet","efforts":[{"value":"low","label":"low"}],"effort":"low"}}
-{"type":"harness_offer","id":"offer","error":"claude-code-acp is not installed, or is not on PATH"}
+{"type":"harness_offer","id":"offer","error":"claude-agent-acp is not installed, or is not on PATH"}
 {"type":"created","id":"new","agent":{"name":"Scout","pubkey":"<hex>","npub":"npub1…"}}
 {"type":"bye"}
 ```
@@ -116,9 +116,9 @@ Only the rows on screen are included. The private key, the relay address, filter
 {"type":"send","channel":"<channel id, optional>","text":"a message"}
 {"type":"prompt","id":"name","title":"new agent · name","hint":"Type a name, then Enter","multiline":false}
 {"type":"list_agents","id":"list"}
-{"type":"probe_harness","id":"offer","harness":"claude-code-acp"}
-{"type":"probe_harness","id":"levels","harness":"claude-code-acp","model":"opus"}
-{"type":"create_agent","id":"new","name":"Scout","instructions":"watch the repo","harness":"claude-code-acp","model":"opus","effort":"high"}
+{"type":"probe_harness","id":"offer","harness":"claude-agent-acp"}
+{"type":"probe_harness","id":"levels","harness":"claude-agent-acp","model":"opus"}
+{"type":"create_agent","id":"new","name":"Scout","instructions":"watch the repo","harness":"claude-agent-acp","model":"opus","effort":"high"}
 {"type":"log","level":"error","text":"something went wrong"}
 ```
 

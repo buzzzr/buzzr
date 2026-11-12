@@ -448,10 +448,10 @@ fn empty_plugins_dir() -> PathBuf {
     dir
 }
 
-/// The fake `claude-code-acp` on a directory of its own, made once and put first on every session's `PATH`.
+/// The fake `claude-agent-acp` on a directory of its own, made once and put first on every session's `PATH`.
 ///
 /// `/agents create` starts the harness and reads what it offers over ACP before it makes anything, and no real harness
-/// is installed in a test environment. The fake is the script committed at `tests/fixtures/claude-code-acp` (the same
+/// is installed in a test environment. The fake is the script committed at `tests/fixtures/claude-agent-acp` (the same
 /// one the unit tests in `src/harness/acp.rs` drive); it is copied out, and made executable, so every session can find
 /// it by name on `PATH`. Only the agents flow ever starts a harness, so nothing else notices it.
 fn fake_acp_dir() -> &'static PathBuf {
@@ -459,8 +459,8 @@ fn fake_acp_dir() -> &'static PathBuf {
     DIR.get_or_init(|| {
         let dir = std::env::temp_dir().join(format!("buzzr-e2e-harness-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("could not make the fake harness directory");
-        let path = dir.join("claude-code-acp");
-        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/claude-code-acp");
+        let path = dir.join("claude-agent-acp");
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/claude-agent-acp");
         std::fs::copy(fixture, &path).expect("could not copy the fake harness");
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("could not make the fake harness executable");
         dir
@@ -984,7 +984,7 @@ fn agents_are_listed_and_a_new_one_is_created_through_the_composer() {
     s.press("enter");
     s.expect("the confirmation", "Scout created");
     s.expect("the agent in the list", "Scout");
-    s.expect("its harness", "claude-code-acp");
+    s.expect("its harness", "claude-agent-acp");
     s.expect("the folder of its own beside the record", "agents/scout");
     s.press("esc");
     s.expect_gone("the panel to close", "local agents");
@@ -992,7 +992,7 @@ fn agents_are_listed_and_a_new_one_is_created_through_the_composer() {
     s.press("ctrl+q");
     s.wait_exit(Duration::from_secs(10)).expect("buzzr should exit on Ctrl+Q");
     let written = std::fs::read_to_string(config.join("agents.json")).expect("the agent is on disk");
-    assert!(written.contains("Scout") && written.contains("claude-code-acp"), "the record names the agent and its harness: {written}");
+    assert!(written.contains("Scout") && written.contains("claude-agent-acp"), "the record names the agent and its harness: {written}");
     assert!(written.contains("\"model\": \"opus\""), "the record keeps the model the flow picked: {written}");
     assert!(written.contains("\"effort\": \"low\""), "and the thinking level it picked: {written}");
     assert!(written.contains("nsec1"), "the agent keeps its own key in the file: {written}");
@@ -1013,7 +1013,7 @@ fn agents_are_listed_and_a_new_one_is_created_through_the_composer() {
     again.type_text("/agents");
     again.press("enter");
     again.expect("the agent made before the restart", "Scout");
-    again.expect("its harness still named", "claude-code-acp");
+    again.expect("its harness still named", "claude-agent-acp");
 }
 
 #[test]

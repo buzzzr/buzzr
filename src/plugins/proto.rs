@@ -350,16 +350,16 @@ mod tests {
     #[test]
     fn a_probe_and_a_create_carry_the_harness_and_the_picks() {
         let Some(FromPlugin::ProbeHarness { id, harness, model }) =
-            parse(r#"{"type":"probe_harness","id":"offer","harness":"claude-code-acp"}"#).unwrap()
+            parse(r#"{"type":"probe_harness","id":"offer","harness":"claude-agent-acp"}"#).unwrap()
         else {
             panic!("not a probe")
         };
         assert_eq!(id, "offer");
-        assert_eq!(harness, "claude-code-acp");
+        assert_eq!(harness, "claude-agent-acp");
         assert_eq!(model, None, "no model is the first look");
         // a model is asked for on the second look, and control characters never survive
         let Some(FromPlugin::ProbeHarness { model, .. }) =
-            parse("{\"type\":\"probe_harness\",\"id\":\"levels\",\"harness\":\"claude-code-acp\",\"model\":\"opus\\u001b[31m\"}").unwrap()
+            parse("{\"type\":\"probe_harness\",\"id\":\"levels\",\"harness\":\"claude-agent-acp\",\"model\":\"opus\\u001b[31m\"}").unwrap()
         else {
             panic!("not a probe")
         };
@@ -369,12 +369,12 @@ mod tests {
         assert!(parse(r#"{"type":"probe_harness","harness":"x"}"#).is_err(), "a probe needs an id");
 
         let Some(FromPlugin::CreateAgent { harness, model, effort, .. }) =
-            parse(r#"{"type":"create_agent","id":"new","name":"Scout","instructions":"watch","harness":"claude-code-acp","model":"opus","effort":"high"}"#)
+            parse(r#"{"type":"create_agent","id":"new","name":"Scout","instructions":"watch","harness":"claude-agent-acp","model":"opus","effort":"high"}"#)
                 .unwrap()
         else {
             panic!("not a create")
         };
-        assert_eq!((harness.as_str(), model.as_str(), effort.as_str()), ("claude-code-acp", "opus", "high"));
+        assert_eq!((harness.as_str(), model.as_str(), effort.as_str()), ("claude-agent-acp", "opus", "high"));
         // the picks are optional: a create that names none is still a create
         let Some(FromPlugin::CreateAgent { harness, model, effort, .. }) = parse(r#"{"type":"create_agent","id":"new"}"#).unwrap() else {
             panic!()
@@ -392,7 +392,7 @@ mod tests {
         };
         let line = ToPlugin::HarnessOffer { id: "offer", offer: Some(&offer), error: None }.line();
         assert!(line.contains(r#""type":"harness_offer""#) && line.contains(r#""offer":{"models""#), "{line}");
-        let line = ToPlugin::HarnessOffer { id: "offer", offer: None, error: Some("claude-code-acp is not installed") }.line();
-        assert!(line.contains(r#""error":"claude-code-acp is not installed""#) && !line.contains(r#""offer":"#), "{line}");
+        let line = ToPlugin::HarnessOffer { id: "offer", offer: None, error: Some("claude-agent-acp is not installed") }.line();
+        assert!(line.contains(r#""error":"claude-agent-acp is not installed""#) && !line.contains(r#""offer":"#), "{line}");
     }
 }

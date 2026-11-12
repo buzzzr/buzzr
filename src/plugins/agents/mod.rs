@@ -344,7 +344,7 @@ mod tests {
             name: name.into(),
             pubkey: "00".repeat(32),
             npub: "npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqs2d".into(),
-            harness: "claude-code-acp".into(),
+            harness: "claude-agent-acp".into(),
             model: Some("opus".into()),
             effort: Some("high".into()),
             workspace: "/home/me/.config/buzzr/agents/scout".into(),
@@ -392,7 +392,7 @@ mod tests {
         assert_eq!(panel.id, ID);
         assert!(panel.rows.iter().any(|r| r.text.contains("Scout")), "the agent is listed");
         // the second line names what runs it and on what, and where it works
-        assert!(panel.rows.iter().any(|r| r.text.contains("claude-code-acp · opus · high")), "{:?}", panel.rows);
+        assert!(panel.rows.iter().any(|r| r.text.contains("claude-agent-acp · opus · high")), "{:?}", panel.rows);
         assert_eq!(panel.rows.last().and_then(|r| r.action.clone()).as_deref(), Some("new"), "and a row makes a new one");
     }
 
@@ -492,7 +492,7 @@ mod tests {
         up_to_the_probe(&mut p);
         let outs = p.on(PluginInput::HarnessOffer {
             id: "offer".into(),
-            result: Err("claude-code-acp is not installed, or is not on PATH".into()),
+            result: Err("claude-agent-acp is not installed, or is not on PATH".into()),
         });
         assert_eq!(outs.len(), 1, "nothing was made: only the reason is said");
         assert!(

@@ -31,7 +31,7 @@ pub struct Agent {
     pub name: String,
     /// The identity's public key (hex).
     pub pubkey: String,
-    /// What will run it: a harness id, the program to run (`claude-code-acp`).
+    /// What will run it: a harness id, the program to run (`claude-agent-acp`).
     pub harness: String,
     /// The model the harness is asked to run, when one was chosen (`None` = the harness's own default).
     pub model: Option<String>,
@@ -362,7 +362,7 @@ mod tests {
         // an older build wrote no `model`/`effort`; the record must still load, with no choice pinned
         std::fs::write(
             paths.agents(),
-            r#"{"agents":[{"name":"Scout","pubkey":"aa","nsec":"x","harness":"claude-code-acp","workspace":"/tmp/x","instructions":"","created_at":1}]}"#,
+            r#"{"agents":[{"name":"Scout","pubkey":"aa","nsec":"x","harness":"claude-agent-acp","workspace":"/tmp/x","instructions":"","created_at":1}]}"#,
         )
         .unwrap();
         let agents = load(&paths.agents());

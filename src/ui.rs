@@ -680,7 +680,7 @@ pub const HELP: &[&str] = &[
     "/agents create (or the “new agent…” row in that list) asks for a name and then for what the agent should do, and",
     "makes it: a key of its own, a folder of its own, and a record in ~/.config/buzzr/agents.json (mode 600 — it holds",
     "the agent's key, so anyone who can read that file can act as the agent). The harness it is made for is a local Claude",
-    "Code driven over ACP (`claude-code-acp`). It is published to the relay first — the agent's own profile, signed with the",
+    "Code driven over ACP (`claude-agent-acp`). It is published to the relay first — the agent's own profile, signed with the",
     "agent's key and carrying your attestation, and your listing of it — so other Buzz clients show it as your agent. A relay",
     "that will not take it means no agent is made at all, and the flow says why.",
     "",

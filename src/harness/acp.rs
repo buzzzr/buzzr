@@ -173,12 +173,12 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
 
-    /// The fake harness the tests drive: the shell script committed at `tests/fixtures/claude-code-acp`, copied into
+    /// The fake harness the tests drive: the shell script committed at `tests/fixtures/claude-agent-acp`, copied into
     /// `dir` and made executable so it can be started by path. The end-to-end suite drives the same file, so there is
     /// one fake to keep in step with the client.
     fn fake_acp(dir: &Path) -> PathBuf {
-        let path = dir.join("claude-code-acp");
-        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/claude-code-acp");
+        let path = dir.join("claude-agent-acp");
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/claude-agent-acp");
         std::fs::copy(fixture, &path).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         path
@@ -220,8 +220,8 @@ mod tests {
     #[test]
     fn a_program_that_is_not_installed_is_the_missing_message() {
         let dir = tempdir();
-        let err = probe("definitely-not-a-real-program-xyz", &dir, None, "claude-code-acp is not installed").unwrap_err();
-        assert_eq!(err, "claude-code-acp is not installed");
+        let err = probe("definitely-not-a-real-program-xyz", &dir, None, "claude-agent-acp is not installed").unwrap_err();
+        assert_eq!(err, "claude-agent-acp is not installed");
         std::fs::remove_dir_all(dir).unwrap();
     }
 

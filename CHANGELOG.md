@@ -49,7 +49,7 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
   identity's `kind:30177` listing of it, so the owner's other Buzz clients show it. The harness is asked what it offers, and the relay asked to
   take the agent, before anything is written down: a harness that will not start or will not answer, or an agent the relay refuses, stops the
   flow and makes nothing — no key, no folder, no record — and the flow says why. The harness it is made for is a local Claude Code driven over
-  ACP (`claude-code-acp`); a second one (codex, say) is a new entry in the harness table (`src/harness/mod.rs`) and nothing else. Read-only
+  ACP (`claude-agent-acp`); a second one (codex, say) is a new entry in the harness table (`src/harness/mod.rs`) and nothing else. Read-only
   mode refuses to make one.
 
 ### Changed
