@@ -611,6 +611,8 @@ pub const HELP: &[&str] = &[
     "Channels list the top-level messages only; replies live in their thread (Enter or a click opens it, and reads it).",
     "A message with replies shows how many, when the last one was, and `● N new` for replies since you last opened it.",
     "Esc returns you to the same place.",
+    "In a thread, its root is the one-line header at the top (number, time, author, then the first line of it, cut with `…` if there",
+    "is more) and every reply is indented two columns under it, so the pane reads as a thread.",
     "",
     "Commands, typed in the input (N is the message number shown as #N):",
     "  /r N text   reply to message N        /t N   open the thread of message N",

@@ -158,7 +158,9 @@ The full behaviour, for when the feature list above is not enough.
   Enter brings it back and opens it. The set lives in `~/.config/buzzr/archived.json` and survives a restart.
 - **A channel shows only its top-level messages**, as the Buzz app does, each with `💬 3 replies · last Thu 13:33` when it has a
   thread. The relay supplies the counts and says whether older messages exist.
-- **Threads:** Enter or a click opens one, Esc returns to the same place. Opening a thread reads its replies, so a thread with
+- **Threads:** Enter or a click opens one, Esc returns to the same place. The thread's root sits at the top as one header line —
+  its number, time and author, then the first line of what it says, cut with `…` when there is more — and the replies are indented
+  two columns under it, so the pane reads as a thread rather than a flat list. Opening a thread reads its replies, so a thread with
   replies since you last looked at it shows `● 2 new` after its reply count. `r` replies in the thread of the selected message.
 - **Live:** new messages, edits, deletions, reactions, reply counts and typing indicators arrive over a WebSocket as they happen
   (`Bob is typing…`), and the header shows the connection state. If the connection drops it reconnects and reloads.

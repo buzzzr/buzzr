@@ -23,8 +23,9 @@ use std::time::{Duration, Instant};
 const ROWS: u16 = 36;
 const COLS: u16 = 110;
 /// A pane short enough that a channel's history is taller than the message pane. The fake relay gives every
-/// channel a single message, so only in a short pane can the newest one fall out of view.
-const SHORT_ROWS: u16 = 14;
+/// channel a single message, so only in a short pane can the newest one fall out of view. Twelve rows leave a
+/// five-line pane, one line short of #general's seven-line thread (its root header, and two two-line replies).
+const SHORT_ROWS: u16 = 12;
 /// Any fixed key: the fake relay accepts AUTH without checking it.
 const KEY: &str = "0505050505050505050505050505050505050505050505050505050505050505";
 /// How long to wait for the screen to show something. Generous: a loaded machine must not flake.
@@ -357,6 +358,29 @@ fn header(screen: &str) -> String {
     screen.lines().next().unwrap_or_default().trim_end().to_string()
 }
 
+/// The lines of the messages pane, top to bottom: what sits right of the divider that separates it from the
+/// channel list. Lines that are not part of the pane (the sidebar's own rows, the footer) come back empty.
+fn messages_pane(screen: &str) -> Vec<String> {
+    screen
+        .lines()
+        .skip(1) // the header row
+        .map(|l| match l.split_once('│') {
+            Some((_, right)) => right.trim_end().to_string(),
+            None => String::new(),
+        })
+        .collect()
+}
+
+/// How far a pane line is pushed in: its count of leading spaces. The cursor bar (`▌`) covers the line's first
+/// column, so it is read as the blank it hides (`unbarred` first).
+fn indent_of(line: &str) -> usize {
+    let line = match line.strip_prefix('▌') {
+        Some(rest) => format!(" {rest}"),
+        None => line.to_string(),
+    };
+    line.chars().take_while(|c| *c == ' ').count()
+}
+
 /// How many lines the input box is showing: the rows between its top border (which carries the ` message ` title)
 /// and its bottom one. A composer that has sent its text is back to the one-line empty state.
 fn composer_height(screen: &str) -> usize {
@@ -487,6 +511,55 @@ fn enter_on_a_message_opens_its_thread_and_esc_goes_back_to_the_channel() {
     let h = header(&screen);
     assert!(h.contains("#general"), "back in the channel: {h:?}");
     s.expect("the thread summary again", "2 replies");
+}
+
+#[test]
+fn a_thread_reads_as_a_root_header_line_with_the_replies_indented_under_it() {
+    let Some(relay) = relay_or_skip("a_thread_reads_as_a_root_header_line_...") else { return };
+    let s = session(&relay);
+    // #general is the third channel, and its newest message carries a two-reply thread.
+    s.press_all(&["down", "down", "enter"]);
+    s.expect("the general channel", "hello from c-general");
+    s.press("enter"); // open the thread of the selected message
+    s.expect("the thread view", "› thread");
+    // The root is the thread's header: its number, time and author share the line with the first line of
+    // what it says, instead of taking a row of its own in the reply feed.
+    let screen = s.until("the root on the first line of the pane", |sc| {
+        messages_pane(sc).first().is_some_and(|l| l.contains("hello from c-general"))
+    });
+    let pane = messages_pane(&screen);
+    let root = pane[0].clone();
+    assert!(
+        root.contains("#1") && root.contains("hello from c-general"),
+        "the root's number and text are on one header line: {root:?}"
+    );
+    let root_indent = indent_of(&root);
+
+    // Every reply sits two columns further in than the root — head line and body alike — so the pane reads
+    // as a root with replies under it.
+    for (head, body) in [
+        ("#2", "the sidebar keeps a fixed order"),
+        ("#3", "and Enter opens the thread"),
+    ] {
+        let head_line = pane
+            .iter()
+            .find(|l| l.trim_start_matches('▌').trim_start().starts_with(head))
+            .unwrap_or_else(|| panic!("reply {head} is on screen. The pane is:\n{}", pane.join("\n")));
+        let body_line = pane
+            .iter()
+            .find(|l| l.contains(body))
+            .unwrap_or_else(|| panic!("reply {body:?} is on screen. The pane is:\n{}", pane.join("\n")));
+        assert_eq!(
+            indent_of(head_line),
+            root_indent + 2,
+            "reply {head} is indented under the root: {head_line:?} (root {root:?})"
+        );
+        assert_eq!(
+            indent_of(body_line),
+            root_indent + 2,
+            "reply {head}'s text lines up with its head: {body_line:?} (root {root:?})"
+        );
+    }
 }
 
 #[test]
