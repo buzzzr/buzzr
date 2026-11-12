@@ -463,14 +463,17 @@ fn draw_command_palette(f: &mut Frame, app: &App, input: Rect) {
 fn draw_input(f: &mut Frame, app: &App, area: Rect, inner_w: usize) {
     let focused = app.focus == Focus::Input;
     let join = app.open_channel_not_joined();
-    let title = if join {
-        " join this channel "
+    // The composer is a plugin's box while a prompt is up: the title names the prompt and the hint asks the question.
+    let title: String = if let Some(p) = &app.prompt {
+        format!(" {} ", p.title)
+    } else if join {
+        " join this channel ".to_owned()
     } else if app.editing.is_some() {
-        " edit message "
+        " edit message ".to_owned()
     } else if app.reply_target.is_some() || app.in_thread() {
-        " reply in thread "
+        " reply in thread ".to_owned()
     } else {
-        " message "
+        " message ".to_owned()
     };
     let block = Block::default().borders(Borders::ALL).border_style(if focused { Style::default().fg(crate::theme::get().accent) } else { faint() }).title(title);
     let inner = block.inner(area);
@@ -485,12 +488,12 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect, inner_w: usize) {
         return;
     }
     if app.editor.is_empty() {
-        let hint = if app.read_only {
-            "read-only: nothing will be sent"
-        } else {
-            "Type a message · /help for commands · F1 for keys"
+        let hint = match &app.prompt {
+            Some(p) => p.hint.clone(),
+            None if app.read_only => "read-only: nothing will be sent".to_owned(),
+            None => "Type a message · /help for commands · F1 for keys".to_owned(),
         };
-        f.render_widget(Paragraph::new(Span::styled(hint, dim())), inner);
+        f.render_widget(Paragraph::new(Span::styled(clipped(&hint, inner.width as usize), dim())), inner);
     } else {
         let lines: Vec<Line> = app.editor.rows(inner_w).iter().map(|r| Line::raw(app.editor.row_text(r))).collect();
         let scroll = lines.len().saturating_sub(inner.height as usize) as u16;
@@ -611,6 +614,17 @@ pub const KEYS: &[(&str, &str)] = &[
     ("Profile card (from /whois)", ""),
     ("Esc", "close"),
     ("", ""),
+    ("Local agents (from /agents)", ""),
+    ("Up / Down, PgUp / PgDn, Home / End", "move over the list"),
+    ("Enter", "on the “new agent…” row, start one: a name, then what it should do"),
+    ("Esc", "close"),
+    ("", ""),
+    ("New agent (in the composer, from /agents create or that row)", ""),
+    ("type", "the agent's name, Enter for the next step"),
+    ("type", "what it should do, Enter makes it"),
+    ("Alt+Enter, Shift+Enter", "a new line in the instructions"),
+    ("Esc", "cancel, and put the draft back in the box"),
+    ("", ""),
     ("Writing", ""),
     ("Enter", "send; in a channel you are not in, join it (the composer is a Join button)"),
     ("/", "start a `/command`: a palette lists the commands and narrows as you type"),
@@ -661,6 +675,7 @@ pub const HELP: &[&str] = &[
     "  /help       this screen                /q   quit",
     "  /edit N     edit your message N        /delete N   delete your message N (asks first)",
     "  /whois NAME their profile             /dm NAME   start (or open) a DM",
+    "  /agents     your local agents          /agents create   make a new one",
     "  /invite NAME   add them to this channel (or the group DM you are in)",
     "  /search text   search                  /new [private] name [about]   create a channel",
     "  /join NAME  join (or open) a channel   /leave   leave this channel (asks first, y confirms)",
@@ -688,6 +703,14 @@ pub const HELP: &[&str] = &[
     "and its first row takes it back — so `a` then Enter changes nothing, and Enter on that row removes yours.",
     "Enter sends. Alt+Enter and Ctrl+J add a line in any terminal; the footer names the one that works here.",
     "Shift+Enter adds a line only where the terminal reports it: kitty, foot, WezTerm, Ghostty, iTerm2.",
+    "",
+    "/agents shows the local agents this copy made, with the identity each one speaks as and the folder it works in.",
+    "/agents create (or the “new agent…” row in that list) asks for a name and then for what the agent should do, and",
+    "makes it: a key of its own, a folder of its own, and a record in ~/.config/buzzr/agents.json (mode 600 — it holds",
+    "the agent's key, so anyone who can read that file can act as the agent). The harness it is made for is a local Claude",
+    "Code driven over ACP (`claude-agent-acp`). It is published to the relay first — the agent's own profile, signed with the",
+    "agent's key and carrying your attestation, and your listing of it — so other Buzz clients show it as your agent. A relay",
+    "that will not take it means no agent is made at all, and the flow says why.",
     "",
     "New messages, edits, deletions, reactions and typing indicators arrive live; there is no polling.",
     "Links: clicking one copies its URL to your clipboard (your terminal must allow OSC 52; in tmux:",
@@ -966,6 +989,26 @@ mod tests {
         assert!(s.contains("I sail. A lot."), "the about line is rendered as markdown\n{s}");
         assert!(!s.contains("**"), "and not shown raw");
         assert!(s.contains("Esc closes"), "the card says how to close it\n{s}");
+    }
+
+    #[test]
+    fn a_prompt_a_plugin_asked_for_takes_over_the_composer() {
+        let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        let mut app = app();
+        app.focus = Focus::Input;
+        // A plugin's prompt (see `plugin::PluginOutput::Prompt`): buzzr owns the box, and the title and hint are the
+        // plugin's own words. The agents flow is its first user.
+        app.prompt = Some(crate::app::PromptState {
+            plugin: "agents".into(),
+            id: "instructions".into(),
+            title: "new agent · instructions".into(),
+            hint: "What should Scout do? Enter makes it, Esc cancels (Alt+Enter for a new line)".into(),
+            multiline: true,
+        });
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(s.contains("new agent · instructions"), "the composer names the prompt\n{s}");
+        assert!(s.contains("What should Scout do?"), "and its hint asks the question\n{s}");
     }
 
     #[test]

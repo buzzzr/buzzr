@@ -1,7 +1,9 @@
 //! The wire between buzzr and a plugin process: one JSON object per line, both ways.
 //!
-//! Host to plugin: `hello`, `snapshot`, `tick`, `invoke`, `panel_action`, `bye`.
-//! Plugin to host: `ready`, `status`, `pane`, `panel`, `flash`, `draft`, `send`, `log`.
+//! Host to plugin: `hello`, `snapshot`, `tick`, `invoke`, `panel_action`, `prompt_answer`, `agents`, `harness_offer`,
+//! `created`, `bye`.
+//! Plugin to host: `ready`, `status`, `pane`, `panel`, `flash`, `draft`, `send`, `prompt`, `list_agents`, `probe_harness`,
+//! `create_agent`, `log`.
 //! Unknown message types and unknown fields are ignored (and logged), so a newer plugin can talk to an older buzzr; a
 //! plugin that cannot speak the `apiVersion` in `hello` refuses it and exits instead.
 
@@ -26,6 +28,27 @@ pub enum ToPlugin<'a> {
     Tick { seq: u64 },
     Invoke { id: u64, command: &'a str, args: &'a str },
     PanelAction { id: &'a str, row: usize, value: Option<&'a str> },
+    /// The user answered (or, with no `text`, cancelled) a prompt the plugin asked for with `prompt`.
+    PromptAnswer { id: &'a str, #[serde(skip_serializing_if = "Option::is_none")] text: Option<&'a str> },
+    /// The local agents, as the answer to the plugin's `list_agents`.
+    Agents { id: &'a str, agents: &'a [crate::plugin::AgentView] },
+    /// The answer to the plugin's `probe_harness`: what the harness offers (`offer`), or why it could not be asked
+    /// (`error`: it is not installed, or it did not answer ACP).
+    HarnessOffer {
+        id: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        offer: Option<&'a crate::plugin::HarnessOffer>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<&'a str>,
+    },
+    /// The answer to the plugin's `create_agent`: the agent that was made (`agent`), or why not (`error`).
+    Created {
+        id: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        agent: Option<&'a crate::plugin::CreatedAgent>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<&'a str>,
+    },
     Bye,
 }
 
@@ -59,6 +82,17 @@ pub enum FromPlugin {
     Flash { text: String },
     Draft { text: String },
     Send { channel: Option<String>, text: String },
+    /// Ask the user for a line (`multiline == false`) or a block of text: buzzr draws and owns the prompt, and the
+    /// answer comes back as a `prompt_answer` with this `id`.
+    Prompt { id: String, title: String, hint: String, multiline: bool },
+    /// Ask for the local agents; the answer comes back as `agents` with this `id`.
+    ListAgents { id: String },
+    /// Ask buzzr to start a harness and read what it offers for a new agent. When `model` is given the session is put
+    /// on that model first, so the levels that come back are that model's. The answer comes back as `harness_offer`
+    /// with this `id`. The harness is buzzr's to run: a plugin never starts a process.
+    ProbeHarness { id: String, harness: String, model: Option<String> },
+    /// Ask buzzr to make and publish a local agent; the answer comes back as `created` with this `id`.
+    CreateAgent { id: String, name: String, instructions: String, harness: String, model: String, effort: String },
     Log { level: String, text: String },
 }
 
@@ -115,6 +149,50 @@ pub fn parse(line: &str) -> Result<Option<FromPlugin>, String> {
             channel: field("channel").and_then(Value::as_str).map(|c| clean_line(c)),
             text: clean_block(field("text").and_then(Value::as_str).unwrap_or_default()),
         },
+        "prompt" => {
+            let id = clean_line(field("id").and_then(Value::as_str).unwrap_or_default());
+            if id.is_empty() {
+                return Err("a prompt needs an id".into());
+            }
+            FromPlugin::Prompt {
+                id,
+                title: clean_line(field("title").and_then(Value::as_str).unwrap_or_default()),
+                hint: clean_line(field("hint").and_then(Value::as_str).unwrap_or_default()),
+                multiline: field("multiline").and_then(Value::as_bool).unwrap_or(false),
+            }
+        }
+        "list_agents" => {
+            let id = clean_line(field("id").and_then(Value::as_str).unwrap_or_default());
+            if id.is_empty() {
+                return Err("a list_agents needs an id".into());
+            }
+            FromPlugin::ListAgents { id }
+        }
+        "probe_harness" => {
+            let id = clean_line(field("id").and_then(Value::as_str).unwrap_or_default());
+            if id.is_empty() {
+                return Err("a probe_harness needs an id".into());
+            }
+            FromPlugin::ProbeHarness {
+                id,
+                harness: clean_line(field("harness").and_then(Value::as_str).unwrap_or_default()),
+                model: field("model").and_then(Value::as_str).map(clean_line).filter(|m| !m.is_empty()),
+            }
+        }
+        "create_agent" => {
+            let id = clean_line(field("id").and_then(Value::as_str).unwrap_or_default());
+            if id.is_empty() {
+                return Err("a create_agent needs an id".into());
+            }
+            FromPlugin::CreateAgent {
+                id,
+                name: clean_line(field("name").and_then(Value::as_str).unwrap_or_default()),
+                instructions: clean_block(field("instructions").and_then(Value::as_str).unwrap_or_default()),
+                harness: clean_line(field("harness").and_then(Value::as_str).unwrap_or_default()),
+                model: clean_line(field("model").and_then(Value::as_str).unwrap_or_default()),
+                effort: clean_line(field("effort").and_then(Value::as_str).unwrap_or_default()),
+            }
+        }
         "log" => FromPlugin::Log {
             level: clean_line(field("level").and_then(Value::as_str).unwrap_or("info")),
             text: clean_line(field("text").and_then(Value::as_str).unwrap_or_default()),
@@ -267,5 +345,54 @@ mod tests {
     fn log_and_flash_text_is_stripped_too() {
         let Some(FromPlugin::Flash { text }) = parse(r#"{"type":"flash","text":"hi\u001b]52;c;QQ==\u0007"}"#).unwrap() else { panic!() };
         assert_eq!(text, "hi]52;c;QQ==");
+    }
+
+    #[test]
+    fn a_probe_and_a_create_carry_the_harness_and_the_picks() {
+        let Some(FromPlugin::ProbeHarness { id, harness, model }) =
+            parse(r#"{"type":"probe_harness","id":"offer","harness":"claude-agent-acp"}"#).unwrap()
+        else {
+            panic!("not a probe")
+        };
+        assert_eq!(id, "offer");
+        assert_eq!(harness, "claude-agent-acp");
+        assert_eq!(model, None, "no model is the first look");
+        // a model is asked for on the second look, and control characters never survive
+        let Some(FromPlugin::ProbeHarness { model, .. }) =
+            parse("{\"type\":\"probe_harness\",\"id\":\"levels\",\"harness\":\"claude-agent-acp\",\"model\":\"opus\\u001b[31m\"}").unwrap()
+        else {
+            panic!("not a probe")
+        };
+        assert_eq!(model.as_deref(), Some("opus[31m"));
+        let Some(FromPlugin::ProbeHarness { model, .. }) = parse(r#"{"type":"probe_harness","id":"x","model":""}"#).unwrap() else { panic!() };
+        assert_eq!(model, None, "an empty model is no model at all");
+        assert!(parse(r#"{"type":"probe_harness","harness":"x"}"#).is_err(), "a probe needs an id");
+
+        let Some(FromPlugin::CreateAgent { harness, model, effort, .. }) =
+            parse(r#"{"type":"create_agent","id":"new","name":"Scout","instructions":"watch","harness":"claude-agent-acp","model":"opus","effort":"high"}"#)
+                .unwrap()
+        else {
+            panic!("not a create")
+        };
+        assert_eq!((harness.as_str(), model.as_str(), effort.as_str()), ("claude-agent-acp", "opus", "high"));
+        // the picks are optional: a create that names none is still a create
+        let Some(FromPlugin::CreateAgent { harness, model, effort, .. }) = parse(r#"{"type":"create_agent","id":"new"}"#).unwrap() else {
+            panic!()
+        };
+        assert!(harness.is_empty() && model.is_empty() && effort.is_empty());
+    }
+
+    #[test]
+    fn a_harness_offer_is_the_offer_or_the_reason() {
+        let offer = crate::plugin::HarnessOffer {
+            models: vec![crate::plugin::Choice { value: "opus".into(), label: "Opus".into() }],
+            model: "opus".into(),
+            efforts: vec![crate::plugin::Choice { value: "high".into(), label: "high".into() }],
+            effort: "high".into(),
+        };
+        let line = ToPlugin::HarnessOffer { id: "offer", offer: Some(&offer), error: None }.line();
+        assert!(line.contains(r#""type":"harness_offer""#) && line.contains(r#""offer":{"models""#), "{line}");
+        let line = ToPlugin::HarnessOffer { id: "offer", offer: None, error: Some("claude-agent-acp is not installed") }.line();
+        assert!(line.contains(r#""error":"claude-agent-acp is not installed""#) && !line.contains(r#""offer":"#), "{line}");
     }
 }

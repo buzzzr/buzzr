@@ -2437,6 +2437,250 @@ fn the_palette_names_every_command_that_is_handled() {
     }
 }
 
+// ---- local agents -------------------------------------------------------------------------------------------------------------
+
+/// One local agent as `agents.json` would read it; the secret key never reaches `App` (see `agents.rs`).
+fn agent(name: &str) -> crate::agents::Agent {
+    crate::agents::Agent {
+        name: name.into(),
+        pubkey: format!("{:0>64}", name.len()),
+        harness: crate::harness::DEFAULT.id.into(),
+        model: None,
+        effort: None,
+        workspace: format!("/tmp/{name}"),
+        instructions: String::new(),
+        created_at: 1,
+    }
+}
+
+/// An app with the compiled-in `agents` plugin started, the way the loop starts it before the first event. `/agents`
+/// is that plugin's command now, so the list, the prompts and the create all run through the plugin contract.
+fn agent_app() -> App {
+    let mut app = at_input(3);
+    app.seed_plugins(plugin::PluginRuntime::from_plugins(vec![Box::new(crate::plugins::agents::Agents::default())]));
+    app
+}
+
+/// What a harness answers with in these cases: two models, the second on two thinking levels. Built by hand so the app
+/// tests need no harness on `PATH` — starting a real one is covered where it lives, in `harness` and `plugins`.
+fn harness_offer() -> crate::plugin::HarnessOffer {
+    let choice = |v: &str| crate::plugin::Choice { value: v.into(), label: v.into() };
+    crate::plugin::HarnessOffer {
+        models: vec![choice("sonnet"), choice("opus")],
+        model: "sonnet".into(),
+        efforts: vec![choice("low"), choice("high")],
+        effort: "low".into(),
+    }
+}
+
+/// Run `/agents create` all the way through: a name, the instructions, the harness's offer, a model and a level. The
+/// commands the last step returns are handed back, so a caller can assert the create (or its refusal).
+fn ask_for_agent(app: &mut App, name: &str) -> Vec<Cmd> {
+    app.command("agents", "create");
+    type_text(app, name);
+    press(app, KeyCode::Enter);
+    type_text(app, "watch the repo");
+    press(app, KeyCode::Enter); // the instructions ask the harness what it offers
+    app.handle(AppEvent::HarnessOffer(Ok(harness_offer()))); // the model panel comes up
+    press(app, KeyCode::Enter); // take the model in force — its levels are already in hand
+    press(app, KeyCode::Enter) // take the level in force, which makes the agent
+}
+
+#[test]
+fn the_agents_command_lists_the_local_agents_and_closes_on_esc() {
+    let mut app = agent_app();
+    app.seed_agents(vec![agent("Scout"), agent("Scribe")]);
+    type_text(&mut app, "/agents");
+    let cmds = press(&mut app, KeyCode::Enter);
+    assert!(cmds.is_empty(), "the list is local: nothing is sent and no relay is told: {cmds:?}");
+    assert_eq!(app.overlay, Overlay::Panel, "the plugin's list panel is up");
+    let panel = app.panel.as_ref().expect("a panel");
+    assert_eq!(panel.plugin, "agents");
+    assert!(panel.rows.iter().any(|r| r.text.contains("Scout")), "the agents are listed");
+    press(&mut app, KeyCode::Esc);
+    assert_eq!(app.overlay, Overlay::None, "Esc closes the list");
+    assert!(app.panel.is_none());
+}
+
+#[test]
+fn an_unknown_agents_argument_flashes_the_usage() {
+    let mut app = agent_app();
+    type_text(&mut app, "/agents bogus");
+    assert!(press(&mut app, KeyCode::Enter).is_empty());
+    assert_eq!(app.overlay, Overlay::None, "nothing opens");
+    assert!(app.flash_text().unwrap().contains("/agents create"), "the usage names the one argument: {:?}", app.flash_text());
+}
+
+#[test]
+fn a_turn_a_local_agent_ran_is_reported_on_the_status_line() {
+    let mut app = app_with(1);
+    // The runner reports every turn it takes (see `runner.rs`). The answer is on the relay already, so the app only
+    // says what happened: an agent that answered, or why it could not.
+    app.handle(AppEvent::AgentTurn { agent: "Scout".into(), result: Ok(()) });
+    assert_eq!(app.flash_text(), Some("Scout replied"));
+    app.handle(AppEvent::AgentTurn { agent: "Scout".into(), result: Err("claude-agent-acp is not installed, or is not on PATH".into()) });
+    assert_eq!(
+        app.flash_text(),
+        Some("Scout could not answer: claude-agent-acp is not installed, or is not on PATH"),
+        "a turn that could not run says why"
+    );
+}
+
+#[test]
+fn without_the_plugin_agents_is_an_unknown_command() {
+    // The command comes from the compiled-in `agents` plugin, so with no plugin seed (the `--no-plugins` /
+    // `BUZZR_SAFE_MODE=1` state, as `main.rs` seeds nothing there) the command does not exist.
+    let mut app = at_input(3);
+    type_text(&mut app, "/agents");
+    assert!(press(&mut app, KeyCode::Enter).is_empty());
+    assert_eq!(app.overlay, Overlay::None, "nothing opens");
+    assert!(app.flash_text().unwrap().contains("unknown command /agents"), "{:?}", app.flash_text());
+}
+
+#[test]
+fn the_agents_panel_moves_its_cursor_and_enter_on_the_new_row_starts_the_flow() {
+    let mut app = agent_app();
+    app.seed_agents(vec![agent("one"), agent("two"), agent("three")]);
+    app.command("agents", "");
+    assert_eq!(app.overlay, Overlay::Panel);
+    let rows = app.panel.as_ref().unwrap().rows.len();
+    press(&mut app, KeyCode::Down);
+    assert_eq!(app.panel.as_ref().unwrap().cursor, 1, "Down moves over the list");
+    press(&mut app, KeyCode::End);
+    assert_eq!(app.panel.as_ref().unwrap().cursor, rows - 1, "End goes to the last row");
+    press(&mut app, KeyCode::Down);
+    assert_eq!(app.panel.as_ref().unwrap().cursor, rows - 1, "already at the bottom: the cursor stays");
+    press(&mut app, KeyCode::Home);
+    assert_eq!(app.panel.as_ref().unwrap().cursor, 0, "Home goes back to the first");
+    // Enter on the "new agent…" row starts the flow, which lives in the composer: the panel gets out of the way
+    press(&mut app, KeyCode::End);
+    let cmds = press(&mut app, KeyCode::Enter);
+    assert!(cmds.is_empty(), "starting the flow sends nothing");
+    assert_eq!(app.overlay, Overlay::None, "the panel gives the composer back");
+    assert_eq!(app.prompt.as_ref().map(|p| p.id.as_str()), Some("name"), "the first step asks for a name");
+    assert_eq!(app.focus, Focus::Input);
+}
+
+#[test]
+fn the_agents_create_flow_asks_for_a_name_then_the_instructions_then_the_harness_and_makes_the_agent() {
+    let mut app = agent_app();
+    type_text(&mut app, "/agents create");
+    assert!(press(&mut app, KeyCode::Enter).is_empty(), "starting the flow sends nothing");
+    assert_eq!(app.prompt.as_ref().map(|p| p.id.as_str()), Some("name"), "the first step asks for a name");
+    assert_eq!(app.focus, Focus::Input);
+    // the name is tidied, and the second step asks what the agent should do
+    type_text(&mut app, "  Scout  ");
+    assert!(press(&mut app, KeyCode::Enter).is_empty(), "the name alone makes nothing");
+    assert_eq!(app.prompt.as_ref().map(|p| p.id.as_str()), Some("instructions"));
+    assert!(app.editor.is_empty(), "the box is cleared for the instructions");
+    // the instructions are not the last step: the host is asked to start the harness and read what it offers first
+    type_text(&mut app, "watch the repo");
+    assert_eq!(
+        press(&mut app, KeyCode::Enter),
+        vec![Cmd::ProbeHarness { harness: crate::harness::DEFAULT.id.into(), model: None }],
+        "the harness is asked what it offers, before anything is made"
+    );
+    assert!(app.prompt.is_none(), "the composer is free once the harness is asked");
+    // the answer brings the models up on a panel, the one in force marked; taking it needs no second look
+    app.handle(AppEvent::HarnessOffer(Ok(harness_offer())));
+    let panel = app.panel.as_ref().expect("the model panel");
+    assert_eq!(panel.title, "new agent · model");
+    assert!(panel.rows[0].text.contains("current"), "the model in force is marked: {:?}", panel.rows[0]);
+    assert!(press(&mut app, KeyCode::Enter).is_empty(), "picking a model asks for nothing yet");
+    let panel = app.panel.as_ref().expect("the level panel");
+    assert_eq!(panel.title, "new agent · level");
+    // taking a level makes the agent: the name, the instructions, the harness and both picks
+    assert_eq!(
+        press(&mut app, KeyCode::Enter),
+        vec![Cmd::CreateAgent {
+            name: "Scout".into(),
+            instructions: "watch the repo".into(),
+            harness: crate::harness::DEFAULT.id.into(),
+            model: "sonnet".into(),
+            effort: "low".into(),
+        }]
+    );
+    assert!(app.editor.is_empty(), "and the box is empty again");
+}
+
+#[test]
+fn a_name_the_agent_cannot_have_is_refused_where_it_is_typed() {
+    let mut app = agent_app();
+    app.command("agents", "create");
+    assert!(press(&mut app, KeyCode::Enter).is_empty(), "an empty name makes nothing");
+    assert_eq!(app.prompt.as_ref().map(|p| p.id.as_str()), Some("name"), "the flow stays on the name step");
+    assert!(app.flash_text().unwrap().contains("name"), "and says a name is needed: {:?}", app.flash_text());
+    // a name is what the flow accepts; from here it moves on
+    type_text(&mut app, "Scout");
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(app.prompt.as_ref().map(|p| p.id.as_str()), Some("instructions"));
+}
+
+#[test]
+fn esc_cancels_the_agent_flow_and_puts_the_draft_back_in_the_box() {
+    let mut app = agent_app();
+    type_text(&mut app, "half written");
+    // the flow takes over the box, the way an edit does: the draft it held is stored
+    let cmds = app.command("agents", "create");
+    assert!(
+        cmds.iter().any(|c| matches!(c, Cmd::SaveDrafts(d) if d.contains_key(&("c1".to_owned(), None)))),
+        "the draft goes to disk when the flow takes the box: {cmds:?}"
+    );
+    assert!(app.editor.is_empty());
+    assert_eq!(app.prompt.as_ref().map(|p| p.id.as_str()), Some("name"));
+    let cmds = press(&mut app, KeyCode::Esc);
+    assert!(app.prompt.is_none(), "Esc ends the flow");
+    assert_eq!(app.editor.text(), "half written", "and the draft is back where it was typed");
+    assert!(!cmds.iter().any(|c| matches!(c, Cmd::CreateAgent { .. })), "cancelling makes nothing: {cmds:?}");
+}
+
+#[test]
+fn the_answer_to_a_creation_lands_in_the_list_and_is_reported() {
+    let mut app = agent_app();
+    // the answer belongs to the plugin that asked, so the flow runs first: that is what sets up the pending creation
+    ask_for_agent(&mut app, "Scout");
+    let scout = agent("Scout");
+    app.handle(AppEvent::AgentCreated(Ok(scout.clone())));
+    assert_eq!(app.agents, vec![scout], "the made agent is in the list");
+    let flash = app.flash_text().unwrap();
+    assert!(flash.contains("Scout"), "the plugin's flash names it: {flash:?}");
+    assert!(flash.contains("published to the relay"), "and says the relay took it: {flash:?}");
+    assert_eq!(app.overlay, Overlay::Panel, "the list it lands in comes up");
+    // a relay that would not take it makes no agent at all: the failure is said, and nothing is added
+    ask_for_agent(&mut app, "Pilot");
+    app.handle(AppEvent::AgentCreated(Err("the relay returned 500".into())));
+    assert_eq!(app.agents.len(), 1, "a refused agent is not created");
+    let flash = app.flash_text().unwrap();
+    assert!(flash.contains("could not create") && flash.contains("relay returned 500"), "the refusal is named: {flash:?}");
+    // a name that is taken fails the same way: nothing is added, and the reason is said
+    ask_for_agent(&mut app, "Scout");
+    app.handle(AppEvent::AgentCreated(Err("an agent called Scout already exists".into())));
+    assert_eq!(app.agents.len(), 1, "nothing was added");
+    assert!(app.flash_text().unwrap().contains("already exists"));
+}
+
+#[test]
+fn read_only_still_lists_agents_and_refuses_to_make_one() {
+    let mut app = agent_app();
+    app.read_only = true;
+    app.seed_agents(vec![agent("Scout")]);
+    // listing writes nothing, so it is allowed and shows the panel
+    assert!(app.command("agents", "").is_empty(), "listing writes nothing, so it is allowed");
+    assert_eq!(app.overlay, Overlay::Panel);
+    assert!(app.panel.as_ref().unwrap().rows.iter().any(|r| r.text.contains("Scout")));
+    // the flow may ask for text — a question is not a write — but starting a harness to make an agent is, and read-only
+    // refuses that first: the harness is never started, and the agent is never asked for
+    app.command("agents", "create");
+    type_text(&mut app, "Scout");
+    press(&mut app, KeyCode::Enter);
+    type_text(&mut app, "watch the repo");
+    let cmds = press(&mut app, KeyCode::Enter);
+    assert!(!cmds.iter().any(|c| matches!(c, Cmd::CreateAgent { .. })), "read-only makes nothing: {cmds:?}");
+    assert!(!cmds.iter().any(|c| matches!(c, Cmd::ProbeHarness { .. })), "and does not even start a harness: {cmds:?}");
+    assert_eq!(app.agents.len(), 1, "and no agent is added");
+    assert!(app.flash_text().unwrap().contains("read-only"), "{:?}", app.flash_text());
+}
+
 // ---- joining and leaving channels -------------------------------------------------------------------------------------------
 
 /// A channel with its own visibility, for the join/leave cases.

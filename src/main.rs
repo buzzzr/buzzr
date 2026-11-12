@@ -1,24 +1,7 @@
-mod app;
-mod config;
-mod contrib;
-mod editor;
-mod emoji;
-mod keyfile;
-mod list;
-mod live;
-mod markdown;
-mod model;
-mod plugins;
-mod relay;
-mod release;
-mod selftest;
-mod setup;
-mod theme;
-mod ui;
-mod update;
-
 use anyhow::{anyhow, Context, Result};
-use app::{App, AppEvent, Cmd};
+use buzzr::{agents, config, harness, keyfile, live, plugin, plugins, relay, release, runner, selftest, setup, ui, update};
+use buzzr::app::{App, AppEvent, Cmd};
+use buzzr::relay::Relay;
 use clap::Parser;
 use futures_util::StreamExt;
 use nostr::Keys;
@@ -29,7 +12,6 @@ use ratatui::crossterm::event::{
 use ratatui::crossterm::terminal::{disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::crossterm::{execute, ExecutableCommand};
 use ratatui::{backend::CrosstermBackend, Terminal};
-use relay::Relay;
 use std::io::{stdout, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -251,6 +233,14 @@ async fn run_tui(relay: Arc<Relay>, read_only: bool, send_typing: bool, mouse: b
     app.seed_archived(config::load_archived(&paths.archived()));
     // What was typed but not sent, per channel and thread: it comes back into the box where it was written.
     app.seed_drafts(config::load_drafts(&paths.drafts()));
+    // The local agents buzzr made: the identity and the folder each one works in, from `agents.json` (see `agents.rs`).
+    app.seed_agents(agents::load(&paths.agents()));
+    // The compiled-in plugins this build registered (see `plugin`): their commands, contributions and permissions, kept
+    // beside the external ones the `plugins::Host` supervises. Both are driven through the same contract, and both kinds
+    // are off together — `plugin_dirs` is `None` under `--no-plugins` and `BUZZR_SAFE_MODE=1`, so this seeds nothing then.
+    if plugin_dirs.is_some() {
+        app.seed_plugins(plugin::PluginRuntime::new());
+    }
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
     // The release feed: seed the notice from what the last check learned, and ask GitHub again only when that is stale. A failure
     // (offline, no release yet) is silent — see `release.rs`.
@@ -273,6 +263,11 @@ async fn run_tui(relay: Arc<Relay>, read_only: bool, send_typing: bool, mouse: b
         None => plugins::Host::none(),
     };
     let mut live = live::spawn(relay.clone(), Vec::new());
+    // The local agents: a mention of one is answered by its harness (see `runner.rs`). An answer is a message, so a
+    // read-only run, and safe mode, start no watcher at all — an agent that could not send would only report failures.
+    if !read_only && config::env("SAFE_MODE").as_deref() != Some("1") {
+        runner::spawn(relay.clone(), paths.clone(), tx.clone());
+    }
     for cmd in app.start() {
         run(cmd, &relay, &tx, &live.channels, &host, paths);
     }
@@ -316,11 +311,22 @@ async fn run_tui(relay: Arc<Relay>, read_only: bool, send_typing: bool, mouse: b
             _ = tick.tick() => Some(AppEvent::Tick),
         };
         if let Some(ev) = event {
+            let ticked = matches!(ev, AppEvent::Tick);
             for cmd in app.handle(ev) {
                 run(cmd, &relay, &tx, &live.channels, &host, paths);
             }
+            // A compiled-in plugin's heartbeat, on the same tick the host drives an external one's.
+            if ticked {
+                for cmd in app.plugin_tick() {
+                    run(cmd, &relay, &tx, &live.channels, &host, paths);
+                }
+            }
         }
-        // Only what changed is sent, and only to plugins that are ready; a stalled plugin never slows the loop.
+        // Only what changed is sent, and only to plugins that are ready; a stalled plugin never slows the loop. The
+        // compiled-in plugins are shown the same projection, on the same "only what changed" rule.
+        for cmd in app.plugin_snapshot(app.projection()) {
+            run(cmd, &relay, &tx, &live.channels, &host, paths);
+        }
         host.snapshot(app.projection());
     }
 }
@@ -328,6 +334,37 @@ async fn run_tui(relay: Arc<Relay>, read_only: bool, send_typing: bool, mouse: b
 /// The stderr notice for a session that has ended: only when the feed named a newer release, and only once the screen is back.
 fn exit_notice(app: &App) -> Option<String> {
     app.latest.as_ref().map(|v| release::notice(release::CURRENT, v, app.update_source))
+}
+
+/// Make a local agent and publish it to the relay. The relay comes first: the agent is checked and its key made in
+/// memory, published, and only written down (its folder and its record) once the relay has taken it — so an agent the
+/// relay refuses is not created at all. The harness, model and thinking level the flow picked are named here; the
+/// harness is one buzzr knows (or `prepare` refuses it), and the picks may be empty for the harness's own choice.
+async fn create_and_publish(
+    relay: &Relay,
+    paths: &config::Paths,
+    name: String,
+    instructions: String,
+    harness: String,
+    model: String,
+    effort: String,
+) -> Result<agents::Agent, String> {
+    let pending = agents::prepare(paths, &name, &instructions, &harness, &model, &effort)?;
+    publish_agent(relay, &pending).await?;
+    agents::commit(paths, &pending)
+}
+
+/// The relay half of `/agents create`: the agent's own kind-0 profile — signed by the agent's key and sent as the
+/// agent, carrying this identity's attestation — and then this identity's listing of it. Either failing is reported,
+/// and nothing is written locally, so the agent is not created.
+async fn publish_agent(relay: &Relay, pending: &agents::Pending) -> Result<(), String> {
+    let agent = pending.agent();
+    // The listing names the agent type the harness runs (`pluginId/typeId`), so an owner's client can resolve it.
+    let runtime = harness::get(&agent.harness).map(|h| h.runtime).unwrap_or(harness::DEFAULT.runtime);
+    let attestation = agents::attestation(relay.keys(), &agent.pubkey)?;
+    relay.publish_agent_profile(pending.keys(), &agent.name, &attestation).await.map_err(|e| format!("{e:#}"))?;
+    relay.publish_agent_listing(&agent.pubkey, &agent.name, runtime).await.map_err(|e| format!("{e:#}"))?;
+    Ok(())
 }
 
 /// Start the work a command asks for; the result comes back as an `AppEvent`.
@@ -364,6 +401,28 @@ fn run(cmd: Cmd, relay: &Arc<Relay>, tx: &UnboundedSender<AppEvent>, subscriptio
         Cmd::SaveDrafts(drafts) => {
             // Written here too: each save is the whole map, so an older one must not land after a newer one.
             let _ = config::save_drafts(&paths.drafts(), &drafts);
+        }
+        Cmd::CreateAgent { name, instructions, harness, model, effort } => {
+            // The relay first, the disk second: the agent is published (its own kind-0 profile carrying this
+            // identity's attestation, and this identity's listing of it) and only then written down. A relay that
+            // refuses it means no agent — no key, no folder, no record — and the error is what the overlay shows.
+            let paths = paths.clone();
+            tokio::spawn(async move {
+                let _ = tx.send(AppEvent::AgentCreated(create_and_publish(&relay, &paths, name, instructions, harness, model, effort).await));
+            });
+        }
+        Cmd::ProbeHarness { harness: id, model } => {
+            // A harness that will not start, or will not answer ACP, is reported rather than hung on: the probe blocks
+            // (it waits on the harness), so it runs on the blocking pool, off the loop and off the async workers.
+            tokio::spawn(async move {
+                let result = tokio::task::spawn_blocking(move || match harness::get(&id) {
+                    Some(h) => harness::offer(h, model.as_deref()),
+                    None => Err(format!("{id} is not a harness buzzr knows")),
+                })
+                .await
+                .unwrap_or_else(|e| Err(format!("the harness check failed: {e}")));
+                let _ = tx.send(AppEvent::HarnessOffer(result));
+            });
         }
         Cmd::LoadWindow { channel, cursor } => {
             tokio::spawn(async move {

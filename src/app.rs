@@ -11,6 +11,7 @@ use crate::list::{self, Layout, ListState, Rendered};
 use crate::live::Live;
 use crate::markdown::{self, Line};
 use crate::model::{Channel, Ev, Section, Store, MESSAGE_KINDS};
+use crate::plugin::{self, PluginInput, PluginOutput};
 use crate::relay::{self, Profile, Window};
 use crate::update::InstallSource;
 use base64::Engine;
@@ -19,7 +20,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, M
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Span;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 const FLASH: Duration = Duration::from_secs(5);
@@ -62,6 +63,18 @@ pub enum Overlay {
     Panel,
 }
 
+/// A prompt a plugin asked buzzr to put to the user (see `plugin::PluginOutput::Prompt`): the composer shows it, buzzr
+/// owns it, and the text comes back to the plugin as `PluginInput::Prompt`. `multiline` is whether Enter accepts (a
+/// line) or Alt+Enter adds a newline (a block of text).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PromptState {
+    pub plugin: String,
+    pub id: String,
+    pub title: String,
+    pub hint: String,
+    pub multiline: bool,
+}
+
 /// Somebody's profile card: what `/whois NAME` shows. The name and the about line come back from the relay a moment later, so
 /// the card opens at once with what is already known and fills in.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -74,7 +87,7 @@ pub struct Whois {
 }
 
 /// `npub1abcd…wxyz` for a pubkey, or its first characters when it is not a hex key we can encode.
-fn short_key(pubkey: &str) -> String {
+pub(crate) fn short_key(pubkey: &str) -> String {
     match relay::npub_of(pubkey) {
         Some(n) if n.len() > 16 => format!("{}…{}", &n[..12], &n[n.len() - 4..]),
         Some(n) => n,
@@ -240,6 +253,14 @@ pub enum Cmd {
     SaveArchived(HashSet<String>),
     /// Write the messages typed but not sent, per channel and thread, to disk (the loop owns the file).
     SaveDrafts(HashMap<(String, Option<String>), String>),
+    /// Make an agent: a fresh key, a folder of its own and a record in `agents.json` (the loop owns the file), on
+    /// `harness` and its `model`/`effort` (either may be empty), then publish it to the relay (the agent's own profile
+    /// and this identity's listing of it).
+    CreateAgent { name: String, instructions: String, harness: String, model: String, effort: String },
+    /// Ask a harness what it offers for a new agent — its models, and a model's thinking levels. The answer comes back
+    /// as `AppEvent::HarnessOffer`; the plugin that asked is answered with it. Runs off the loop: a harness that will
+    /// not answer is waited on, never the event loop.
+    ProbeHarness { harness: String, model: Option<String> },
     /// Work for the plugin runtime (start, reload, or send a command to a plugin process).
     Plugin(PluginCmd),
 }
@@ -273,6 +294,14 @@ pub enum AppEvent {
     Search { seq: u64, result: Result<Vec<Ev>, String> },
     /// How many unread messages a channel had when we started (see `Cmd::LoadUnread`).
     Unread { channel: String, count: u32 },
+    /// The answer to `Cmd::CreateAgent`: the agent that was made, or why it was not (including a relay that refused it).
+    AgentCreated(Result<crate::agents::Agent, String>),
+    /// The answer to `Cmd::ProbeHarness`: what the harness offers for a new agent, or why it could not be asked (it is
+    /// not installed, or it did not answer).
+    HarnessOffer(Result<crate::plugin::HarnessOffer, String>),
+    /// What a local agent's turn for one mention came to (`runner.rs`): the agent answered, or why it could not. The
+    /// answer itself is already on the relay, so this is only what the status line has to say about it.
+    AgentTurn { agent: String, result: Result<(), String> },
     /// From the plugin runtime: ready/status/panel/flash/draft/send/gone, and the plugin list.
     Plugin(PluginEvent),
     /// The release feed found a later version than the one running.
@@ -392,6 +421,26 @@ pub struct App {
     pub plugin_meta: Vec<PluginMeta>,
     /// The open panel, if any; `Overlay::Panel` is set while it is up.
     pub panel: Option<PanelState>,
+    /// The local agents buzzr created, from `agents.json` (see `agents.rs`). No key is in here; it is the host-side
+    /// data the `agents` plugin is handed as `PluginInput::Agents` when it asks for it.
+    pub agents: Vec<crate::agents::Agent>,
+    /// The compiled-in plugins, driven in this process (the counterpart of the external `plugins::Host`; see `plugin`).
+    pub internal: plugin::PluginRuntime,
+    /// What each compiled-in plugin declared, kept for the permission checks and `/plugins` (the external ones come
+    /// back in `plugin_meta`).
+    internal_declared: BTreeMap<String, plugin::Declared>,
+    /// The prompt a plugin asked buzzr to put to the user, if any: the composer is the plugin's box while it is set.
+    pub prompt: Option<PromptState>,
+    /// The plugin waiting on a `Cmd::CreateAgent` result, and the id it will be answered with.
+    pending_create: Option<(String, String)>,
+    /// The plugin waiting on a `Cmd::ProbeHarness` result, and the id it will be answered with.
+    pending_probe: Option<(String, String)>,
+    /// When each compiled-in plugin last got a heartbeat, and when each last sent (the same limits the host applies to
+    /// an external one).
+    plugin_ticks: HashMap<String, Instant>,
+    plugin_sends: HashMap<String, Vec<Instant>>,
+    /// The last projection the compiled-in plugins were shown, so only a change is sent (as `Host::snapshot` does).
+    pushed_projection: Option<Projection>,
     open_after: Option<String>,
     pending_select: Option<String>,
 }
@@ -488,6 +537,15 @@ impl App {
             latest: None,
             plugin_meta: Vec::new(),
             panel: None,
+            agents: Vec::new(),
+            internal: plugin::PluginRuntime::default(),
+            internal_declared: BTreeMap::new(),
+            prompt: None,
+            pending_create: None,
+            pending_probe: None,
+            plugin_ticks: HashMap::new(),
+            plugin_sends: HashMap::new(),
+            pushed_projection: None,
             open_after: None,
             pending_select: None,
         }
@@ -1555,6 +1613,45 @@ impl App {
             }
             AppEvent::Search { seq, result } => self.search_results(seq, result),
             AppEvent::Unread { channel, count } => self.unread_loaded(channel, count),
+            AppEvent::AgentCreated(result) => {
+                // The host made the agent (or could not — the relay refused it, or the name was taken). The plugin that
+                // asked owns the flow and the words, so the result goes back to it as `PluginInput::Created`; the agent
+                // is also kept here, as the list the plugin is handed when it asks for one.
+                match result {
+                    Ok(agent) => {
+                        let view = created_view(&agent);
+                        self.agents.push(agent);
+                        match self.pending_create.take() {
+                            Some((plugin, id)) => self.plugin_input(&plugin, PluginInput::Created { id, result: Ok(view) }),
+                            None => Vec::new(),
+                        }
+                    }
+                    Err(e) => match self.pending_create.take() {
+                        Some((plugin, id)) => self.plugin_input(&plugin, PluginInput::Created { id, result: Err(e) }),
+                        None => {
+                            self.flash(format!("could not create the agent: {e}"));
+                            Vec::new()
+                        }
+                    },
+                }
+            }
+            AppEvent::HarnessOffer(result) => {
+                // The host asked a harness what it offers (or could not — it is not installed, or it did not answer).
+                // The plugin that asked owns the words, so the result goes back to it as `PluginInput::HarnessOffer`.
+                match self.pending_probe.take() {
+                    Some((plugin, id)) => self.plugin_input(&plugin, PluginInput::HarnessOffer { id, result }),
+                    None => Vec::new(),
+                }
+            }
+            AppEvent::AgentTurn { agent, result } => {
+                // A local agent ran a turn for a mention (see `runner.rs`): the answer is on the relay already, so the
+                // status line only says that it happened — or why it could not.
+                match result {
+                    Ok(()) => self.flash(format!("{agent} replied")),
+                    Err(e) => self.flash(format!("{agent} could not answer: {e}")),
+                }
+                Vec::new()
+            }
             AppEvent::Plugin(e) => self.plugin_event(e),
             AppEvent::Update(v) => {
                 self.latest = Some(v);
@@ -1900,6 +1997,11 @@ impl App {
         if self.confirm_leave.is_some() {
             return self.answer_leave(k);
         }
+        // A prompt a plugin asked for owns the keyboard while it is in the box: the panes must not take what is being
+        // typed for it.
+        if self.prompt.is_some() {
+            return self.key_prompt(k);
+        }
         if self.react.is_some() {
             return self.key_react(k);
         }
@@ -2146,7 +2248,7 @@ impl App {
                 _ => Vec::new(),
             };
         }
-        let width = self.areas.input.width.saturating_sub(4).max(10) as usize;
+        let width = self.input_width();
         match k.code {
             KeyCode::Enter if shift || alt => self.editor.insert_char('\n'),
             KeyCode::Char('j') if ctrl => self.editor.insert_char('\n'),
@@ -2366,8 +2468,9 @@ impl App {
             other => {
                 if let Some((plugin, c)) = self.plugins.command(other) {
                     let (plugin, command) = (plugin.to_owned(), c.id.clone());
-                    self.flash(format!("{plugin}: /{command}"));
-                    return vec![Cmd::Plugin(PluginCmd::Invoke { plugin, command, args: arg.to_owned() })];
+                    // A command a plugin registered — compiled-in or external — is its own to run, through the one
+                    // `plugin_input` door both kinds share.
+                    return self.plugin_input(&plugin, PluginInput::Command { command, args: arg.to_owned() });
                 }
                 self.flash(format!("unknown command /{other} (try /help)"));
                 Vec::new()
@@ -2381,7 +2484,7 @@ impl App {
     /// lone `/`. `None` once an argument begins (a space or a newline) or when the input is not a command at all — including
     /// while a message is being edited, where a leading `/` is message text rather than a command.
     pub fn command_query(&self) -> Option<String> {
-        if self.editing.is_some() {
+        if self.editing.is_some() || self.prompt.is_some() {
             return None;
         }
         let text = self.editor.text();
@@ -2614,7 +2717,7 @@ impl App {
     /// Tell the others we are typing: at most once every three seconds per channel/thread, never for commands, edits or in
     /// read-only mode.
     fn maybe_typing(&mut self) -> Vec<Cmd> {
-        if !self.send_typing || self.read_only || self.editing.is_some() || self.editor.is_empty() || self.editor.text().starts_with('/') {
+        if !self.send_typing || self.read_only || self.editing.is_some() || self.prompt.is_some() || self.editor.is_empty() || self.editor.text().starts_with('/') {
             return Vec::new();
         }
         let Some(c) = self.channel() else { return Vec::new() };
@@ -3188,6 +3291,193 @@ impl App {
         vec![Cmd::LoadProfile(pk)]
     }
 
+    // ---- compiled-in plugins (driven in this process) ----------------------------------------------------------------
+
+    /// Take the compiled-in plugins this build registered and start them: apply what each declared when it was ready,
+    /// and remember it for the permission checks and `/plugins`. The loop calls this once, before the first event.
+    pub fn seed_plugins(&mut self, runtime: plugin::PluginRuntime) {
+        self.internal = runtime;
+        let declared = self.internal.ready();
+        for (id, d) in declared {
+            self.plugin_ready(&id, d);
+        }
+    }
+
+    /// Apply one plugin's `ready`: its contributions join the registry, its permissions are remembered, and it shows in
+    /// `/plugins` beside the external ones.
+    fn plugin_ready(&mut self, id: &str, mut declared: plugin::Declared) {
+        let name = if declared.name.is_empty() { id.to_owned() } else { declared.name.clone() };
+        // The same filter the wire applies to an external plugin's `ready`: a plugin only holds a permission this build
+        // enforces, so both kinds are granted from the same list (`plugins::discover::KNOWN_PERMISSIONS`).
+        declared.permissions.retain(|p| crate::plugins::discover::KNOWN_PERMISSIONS.contains(&p.as_str()));
+        declared.permissions.sort();
+        declared.permissions.dedup();
+        self.plugins.set(id, &name, declared.contributions.clone());
+        self.internal_declared.insert(id.to_owned(), declared);
+        self.content_changed();
+        self.refresh_plugin_panel();
+    }
+
+    /// Show the compiled-in plugins the open view — but only when it changed, the same "only what changed" rule the
+    /// host follows for an external one. Called by the loop after every event.
+    pub fn plugin_snapshot(&mut self, projection: Projection) -> Vec<Cmd> {
+        if self.internal.is_empty() || self.pushed_projection.as_ref() == Some(&projection) {
+            return Vec::new();
+        }
+        self.pushed_projection = Some(projection.clone());
+        // A plugin sees the view only while it holds `read:visible` — the same gate the host applies to an external one.
+        let ids: Vec<String> = self.internal.ids().iter().map(|s| (*s).to_owned()).collect();
+        let mut outs = Vec::new();
+        for id in ids {
+            if !self.plugin_may(&id, plugin::READ_VISIBLE) {
+                continue;
+            }
+            for out in self.internal.on_for(&id, PluginInput::Snapshot(projection.clone())) {
+                outs.push((id.clone(), out));
+            }
+        }
+        self.apply_tagged_outputs(outs)
+    }
+
+    /// Give a heartbeat to every compiled-in plugin whose own code asked for one and is due. Called on the tick.
+    pub fn plugin_tick(&mut self) -> Vec<Cmd> {
+        if self.internal.is_empty() {
+            return Vec::new();
+        }
+        let now = Instant::now();
+        let ids: Vec<String> = self.internal.ids().iter().map(|s| (*s).to_owned()).collect();
+        let mut due = Vec::new();
+        for id in ids {
+            let Some(ms) = self.internal.tick_ms(&id) else { continue };
+            let last = self.plugin_ticks.entry(id.clone()).or_insert(now);
+            if now.duration_since(*last) >= Duration::from_millis(ms) {
+                *last = now;
+                due.push(id);
+            }
+        }
+        let mut cmds = Vec::new();
+        for id in due {
+            let outs = self.internal.on_for(&id, PluginInput::Tick);
+            cmds.extend(self.apply_outputs(&id, outs));
+        }
+        cmds
+    }
+
+    /// Hand one input to one plugin: in-process for a compiled-in plugin, or out to the host for an external one.
+    fn plugin_input(&mut self, plugin: &str, input: PluginInput) -> Vec<Cmd> {
+        if self.internal.has(plugin) {
+            let outs = self.internal.on_for(plugin, input);
+            self.apply_outputs(plugin, outs)
+        } else {
+            match plugin_cmd(plugin, input) {
+                Some(cmd) => vec![Cmd::Plugin(cmd)],
+                None => Vec::new(),
+            }
+        }
+    }
+
+    /// Apply one plugin's outputs, in order, through the same door an external plugin's events come through
+    /// (`plugin_event`), so a compiled-in plugin is held to exactly the same rules.
+    fn apply_outputs(&mut self, plugin: &str, outputs: Vec<PluginOutput>) -> Vec<Cmd> {
+        let mut cmds = Vec::new();
+        for out in outputs {
+            cmds.extend(self.plugin_event(out.into_event(plugin)));
+        }
+        cmds
+    }
+
+    fn apply_tagged_outputs(&mut self, outputs: Vec<(String, PluginOutput)>) -> Vec<Cmd> {
+        let mut cmds = Vec::new();
+        for (id, out) in outputs {
+            cmds.extend(self.plugin_event(out.into_event(&id)));
+        }
+        cmds
+    }
+
+    /// Whether a plugin was granted a permission. A compiled-in plugin's declaration is kept here; an external one's
+    /// comes back with its `Ready`, in `plugin_meta`.
+    fn plugin_may(&self, plugin: &str, permission: &str) -> bool {
+        if let Some(d) = self.internal_declared.get(plugin) {
+            return d.permissions.iter().any(|p| p == permission);
+        }
+        self.plugin_meta.iter().find(|m| m.id == plugin).map(|m| m.permissions.iter().any(|p| p == permission)).unwrap_or(false)
+    }
+
+    /// The per-plugin send limit both kinds share (the same numbers the host applies to an external one).
+    fn allow_send(&mut self, plugin: &str) -> bool {
+        let now = Instant::now();
+        let times = self.plugin_sends.entry(plugin.to_owned()).or_default();
+        times.retain(|t| now.duration_since(*t) < Duration::from_secs(60));
+        if times.len() >= plugin::SENDS_PER_MINUTE || times.last().map(|t| now.duration_since(*t) < plugin::SEND_INTERVAL).unwrap_or(false) {
+            return false;
+        }
+        times.push(now);
+        true
+    }
+
+    // ---- plugin prompts (a plugin asks buzzr to ask the user) --------------------------------------------------------
+
+    /// Put a prompt a plugin asked for in the composer. The box takes over from whatever was typed in it, the way an
+    /// edit does, so a half-written message is stored and comes back when the prompt ends.
+    fn begin_prompt(&mut self, plugin: String, id: String, title: String, hint: String, multiline: bool) -> Vec<Cmd> {
+        let cmds = self.stash_draft();
+        self.editor.clear();
+        self.cmd_cursor = 0;
+        // The prompt lives in the composer, so whatever was covering it gets out of the way — the same way starting a
+        // flow from a panel row closes the panel. Without this a prompt a plugin asked for from a panel would be drawn
+        // under the panel, and the user could not see what they are answering.
+        self.overlay = Overlay::None;
+        self.panel = None;
+        self.prompt = Some(PromptState { plugin, id, title, hint: hint.clone(), multiline });
+        self.set_focus(Focus::Input);
+        self.flash(hint);
+        cmds
+    }
+
+    /// A key while a plugin's prompt is up: Esc cancels it, Enter accepts it, and everything else edits the box.
+    fn key_prompt(&mut self, k: KeyEvent) -> Vec<Cmd> {
+        self.set_focus(Focus::Input);
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = k.modifiers.contains(KeyModifiers::ALT);
+        let shift = k.modifiers.contains(KeyModifiers::SHIFT);
+        match k.code {
+            KeyCode::Esc => self.finish_prompt(None),
+            // A newline inside a block-of-text prompt is Shift+Enter or Alt+Enter, as anywhere in the composer; Enter
+            // accepts.
+            KeyCode::Enter if !shift && !alt => self.finish_prompt(Some(self.editor.text())),
+            // Up and Down move the cursor inside the box here, rather than leaving for the message list.
+            KeyCode::Up => {
+                self.editor.up(self.input_width());
+                Vec::new()
+            }
+            KeyCode::Down => {
+                self.editor.down(self.input_width());
+                Vec::new()
+            }
+            _ => self.key_input(k, ctrl, alt, shift),
+        }
+    }
+
+    /// Answer (or cancel, with `None`) the prompt that is up, and give the composer back to what it was writing.
+    fn finish_prompt(&mut self, text: Option<String>) -> Vec<Cmd> {
+        let Some(prompt) = self.prompt.take() else { return Vec::new() };
+        self.editor.clear();
+        self.cmd_cursor = 0;
+        let mut cmds = self.plugin_input(&prompt.plugin, PluginInput::Prompt { id: prompt.id, text });
+        cmds.extend(self.switch_draft()); // the box belonged to the prompt; it goes back to its draft
+        cmds
+    }
+
+    /// Take the agents read from disk; the loop fills this in before the first event, tests set it directly.
+    pub fn seed_agents(&mut self, agents: Vec<crate::agents::Agent>) {
+        self.agents = agents;
+    }
+
+    /// The columns the composer's text has, as `ui::draw_input` lays the box out.
+    fn input_width(&self) -> usize {
+        self.areas.input.width.saturating_sub(4).max(10) as usize
+    }
+
     // ---- search
 
     /// Open the search overlay. The channel rows carry what a channel is for, how many people are in it and whether we are one
@@ -3313,10 +3603,52 @@ impl App {
 
 // ---- plugins ------------------------------------------------------------------------------------------------------------
 
+/// The wire command for one input to an external plugin. `None` for an input only the compiled-in kind gets
+/// (`Snapshot`, `Tick`), which the host drives itself — the same inputs the compiled-in runtime routes internally.
+fn plugin_cmd(plugin: &str, input: PluginInput) -> Option<PluginCmd> {
+    let plugin = plugin.to_owned();
+    Some(match input {
+        PluginInput::Command { command, args } => PluginCmd::Invoke { plugin, command, args },
+        PluginInput::PanelAction { id, row, value } => PluginCmd::PanelAction { plugin, id, row, value },
+        PluginInput::Prompt { id, text } => PluginCmd::PromptAnswer { plugin, id, text },
+        PluginInput::Agents { id, agents } => PluginCmd::Agents { plugin, id, agents },
+        PluginInput::Created { id, result } => PluginCmd::Created { plugin, id, result },
+        PluginInput::HarnessOffer { id, result } => PluginCmd::HarnessOffer { plugin, id, result },
+        PluginInput::Snapshot(_) | PluginInput::Tick => return None,
+    })
+}
+
+/// An agent as the plugin's answer to `CreateAgent`: the identity it speaks with. The relay was asked first, so an
+/// agent that exists here is one the relay took.
+fn created_view(agent: &crate::agents::Agent) -> plugin::CreatedAgent {
+    plugin::CreatedAgent {
+        name: agent.name.clone(),
+        pubkey: agent.pubkey.clone(),
+        npub: relay::npub_of(&agent.pubkey).unwrap_or_else(|| agent.pubkey.clone()),
+    }
+}
+
 impl App {
     /// A plugin's display name for a message, falling back to its id when it is not registered.
     fn plugin_name(&self, id: &str) -> String {
         self.plugins.name_of(id).unwrap_or(id).to_owned()
+    }
+
+    /// The local agents as a plugin may see them: the words and the public identity, never a key (see `plugin::AgentView`).
+    fn agent_views(&self) -> Vec<plugin::AgentView> {
+        self.agents
+            .iter()
+            .map(|a| plugin::AgentView {
+                name: a.name.clone(),
+                pubkey: a.pubkey.clone(),
+                npub: relay::npub_of(&a.pubkey).unwrap_or_else(|| a.pubkey.clone()),
+                harness: a.harness.clone(),
+                model: a.model.clone(),
+                effort: a.effort.clone(),
+                workspace: a.workspace.clone(),
+                created_at: a.created_at,
+            })
+            .collect()
     }
 
     fn plugin_event(&mut self, ev: PluginEvent) -> Vec<Cmd> {
@@ -3369,6 +3701,18 @@ impl App {
                     self.flash("read-only mode: nothing is sent");
                     return Vec::new();
                 }
+                // An external plugin's send was already permission-checked and rate-limited by the host; a compiled-in
+                // plugin gets the same gate here, so the transport never changes what a plugin may do.
+                if self.internal.has(&plugin) {
+                    if !self.plugin_may(&plugin, plugin::MESSAGES_WRITE) {
+                        self.flash(format!("{name} needs the messages:write permission to send"));
+                        return Vec::new();
+                    }
+                    if !self.allow_send(&plugin) {
+                        self.flash(format!("{name} is sending too fast"));
+                        return Vec::new();
+                    }
+                }
                 let Some(open) = self.channel().map(|c| c.id.clone()) else {
                     self.flash(format!("{name} wanted to send, but no channel is open"));
                     return Vec::new();
@@ -3379,6 +3723,57 @@ impl App {
                 }
                 self.flash(format!("a message from {name}"));
                 self.send(text, None)
+            }
+            PluginEvent::Prompt { plugin, id, title, hint, multiline } => {
+                // A prompt is the host's to draw and own, but only one at a time: a second one while a prompt is up is
+                // refused rather than clobbering what the user is already answering.
+                if self.prompt.is_some() {
+                    self.flash(format!("{} asked for a prompt, but one is already up", self.plugin_name(&plugin)));
+                    return Vec::new();
+                }
+                self.begin_prompt(plugin, id, title, hint, multiline)
+            }
+            PluginEvent::ListAgents { plugin, id } => {
+                if !self.plugin_may(&plugin, plugin::AGENTS_READ) {
+                    self.flash(format!("{} is not allowed to read the local agents", self.plugin_name(&plugin)));
+                    return Vec::new();
+                }
+                let agents = self.agent_views();
+                self.plugin_input(&plugin, PluginInput::Agents { id, agents })
+            }
+            PluginEvent::ProbeHarness { plugin, id, harness, model } => {
+                // The harness is buzzr's to start (principle 8: no plugin code in the core — and no process either), so
+                // the ask comes here and the answer goes back as `AppEvent::HarnessOffer`. Refusing it in read-only mode
+                // is the first half of "an agent is not created"; the second is the same guard on `CreateAgent`.
+                if self.read_only {
+                    self.flash("read-only mode: agents are not created");
+                    return Vec::new();
+                }
+                if !self.plugin_may(&plugin, plugin::AGENTS_WRITE) {
+                    self.flash(format!("{} is not allowed to create agents", self.plugin_name(&plugin)));
+                    return Vec::new();
+                }
+                // One probe at a time: the flow asks for one look at a time, so a second while one is in flight is
+                // refused rather than letting its answer clobber the first.
+                if self.pending_probe.is_some() {
+                    self.flash(format!("{} asked for a harness check, but one is already running", self.plugin_name(&plugin)));
+                    return Vec::new();
+                }
+                self.pending_probe = Some((plugin, id));
+                vec![Cmd::ProbeHarness { harness, model }]
+            }
+            PluginEvent::CreateAgent { plugin, id, name, instructions, harness, model, effort } => {
+                if self.read_only {
+                    self.flash("read-only mode: nothing is written");
+                    return Vec::new();
+                }
+                if !self.plugin_may(&plugin, plugin::AGENTS_WRITE) {
+                    self.flash(format!("{} is not allowed to create agents", self.plugin_name(&plugin)));
+                    return Vec::new();
+                }
+                // The result comes back as `AppEvent::AgentCreated`; the plugin that asked is answered with it.
+                self.pending_create = Some((plugin, id));
+                vec![Cmd::CreateAgent { name, instructions, harness, model, effort }]
             }
             PluginEvent::Gone { id, why } => {
                 self.plugins.remove(&id);
@@ -3397,8 +3792,30 @@ impl App {
     /// The `/plugins` overlay: what is on disk, what is running, what it may do, and the commands it added.
     fn show_plugins(&mut self) {
         let mut rows = Vec::new();
-        if self.plugin_meta.is_empty() {
+        let builtin: Vec<String> = self.internal.ids().iter().map(|s| (*s).to_owned()).collect();
+        if builtin.is_empty() && self.plugin_meta.is_empty() {
             rows.push(PanelRow { text: "No plugins found. Put a folder with an executable entry file in the plugins directory.".into(), tone: contrib::Tone::Dim, action: None });
+        }
+        if !builtin.is_empty() {
+            rows.push(PanelRow { text: "Compiled in".into(), tone: contrib::Tone::Bold, action: None });
+            for id in &builtin {
+                let (perms, commands) = match self.internal_declared.get(id) {
+                    Some(d) => (
+                        if d.permissions.is_empty() { String::new() } else { format!(" · {}", d.permissions.join(", ")) },
+                        d.contributions.commands.len(),
+                    ),
+                    None => (String::new(), 0),
+                };
+                rows.push(PanelRow {
+                    text: format!("{:<18} {:<9} {} command(s){perms}", id, "built in", commands),
+                    tone: contrib::Tone::Ok,
+                    action: None,
+                });
+            }
+            if !self.plugin_meta.is_empty() {
+                rows.push(PanelRow { text: String::new(), tone: contrib::Tone::Default, action: None });
+                rows.push(PanelRow { text: "Loaded from disk".into(), tone: contrib::Tone::Bold, action: None });
+            }
         }
         for m in &self.plugin_meta {
             let tone = match m.state {
@@ -3485,12 +3902,8 @@ impl App {
                     return Vec::new(); // the built-in list has nothing to run
                 }
                 let Some(action) = p.rows.get(p.cursor).and_then(|r| r.action.clone()) else { return Vec::new() };
-                return vec![Cmd::Plugin(PluginCmd::PanelAction {
-                    plugin: p.plugin.clone(),
-                    id: p.id.clone(),
-                    row: p.cursor,
-                    value: Some(action),
-                })];
+                let (plugin, id, row) = (p.plugin.clone(), p.id.clone(), p.cursor);
+                return self.plugin_input(&plugin, PluginInput::PanelAction { id, row, value: Some(action) });
             }
             _ => {}
         }

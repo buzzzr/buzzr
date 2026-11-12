@@ -394,6 +394,7 @@ dependencies = [
  "futures-util",
  "hex",
  "iana-time-zone",
+ "inventory",
  "nix 0.31.3",
  "nostr",
  "pulldown-cmark",
@@ -1467,6 +1468,15 @@ dependencies = [
  "js-sys",
  "wasm-bindgen",
  "web-sys",
+]
+
+[[package]]
+name = "inventory"
+version = "0.3.25"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6928282826c822ad91bf1c9a1cb90a30ba1c26770749929b4656cd6be829cd7c"
+dependencies = [
+ "rustversion",
 ]
 
 [[package]]

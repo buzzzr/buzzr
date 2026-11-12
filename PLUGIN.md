@@ -4,6 +4,12 @@ A plugin is a **separate process** that adds commands, status items, badges, pan
 the network: it speaks newline-delimited JSON on stdin/stdout, and buzzr owns every cell of the terminal. That is what makes hot
 reload (a process swap), crash isolation and any language possible.
 
+That is one of buzzr's two kinds of plugin: the **runtime-loaded** one, added later, in any language. The other kind is
+**compiled-in**: a Rust type in buzzr's own tree (or in a crate that depends on buzzr) that registers itself with
+`register_plugin!`. Both speak the same contract described here and are held to the same rules — a compiled-in plugin gets no door
+this one lacks. `plugins/agents/` (`/agents`) is the worked example of the compiled-in kind; the rest of this document is the
+wire a runtime-loaded plugin speaks.
+
 A plugin can put things on these surfaces and nothing else:
 
 | Contribution | Where it shows |
@@ -71,6 +77,11 @@ that cannot speak it should say why on the log and exit.
 {"type":"tick","seq":3}
 {"type":"invoke","id":11,"command":"hello","args":"the text after /hello"}
 {"type":"panel_action","id":"hello","row":1,"value":"pick"}
+{"type":"prompt_answer","id":"name","text":"Scout"}
+{"type":"agents","id":"list","agents":[{"name":"Scout","pubkey":"<hex>","npub":"npub1…","harness":"claude-agent-acp","model":"opus","effort":"high","workspace":"/…/agents/scout","created_at":1700000000}]}
+{"type":"harness_offer","id":"offer","offer":{"models":[{"value":"sonnet","label":"Sonnet"}],"model":"sonnet","efforts":[{"value":"low","label":"low"}],"effort":"low"}}
+{"type":"harness_offer","id":"offer","error":"claude-agent-acp is not installed, or is not on PATH"}
+{"type":"created","id":"new","agent":{"name":"Scout","pubkey":"<hex>","npub":"npub1…"}}
 {"type":"bye"}
 ```
 
@@ -103,6 +114,11 @@ Only the rows on screen are included. The private key, the relay address, filter
 {"type":"flash","text":"done"}
 {"type":"draft","text":"text to put in the input box"}
 {"type":"send","channel":"<channel id, optional>","text":"a message"}
+{"type":"prompt","id":"name","title":"new agent · name","hint":"Type a name, then Enter","multiline":false}
+{"type":"list_agents","id":"list"}
+{"type":"probe_harness","id":"offer","harness":"claude-agent-acp"}
+{"type":"probe_harness","id":"levels","harness":"claude-agent-acp","model":"opus"}
+{"type":"create_agent","id":"new","name":"Scout","instructions":"watch the repo","harness":"claude-agent-acp","model":"opus","effort":"high"}
 {"type":"log","level":"error","text":"something went wrong"}
 ```
 
@@ -113,7 +129,7 @@ Only the rows on screen are included. The private key, the relay address, filter
 | Field | Meaning |
 |---|---|
 | `name` | The name `/plugins` and the plugin's own rows show. Control characters are stripped; empty or absent means "call it by the folder name". |
-| `permissions` | What the plugin asks to be allowed to do, as a list. **Unknown names are dropped** (and the drop is logged), and the granted set is what `/plugins` shows, so a plugin never appears to hold more than buzzr enforces. In this build: `read:visible` (get the screen projection) and `messages:write` (send messages). |
+| `permissions` | What the plugin asks to be allowed to do, as a list. **Unknown names are dropped** (and the drop is logged), and the granted set is what `/plugins` shows, so a plugin never appears to hold more than buzzr enforces. In this build: `read:visible` (get the screen projection), `messages:write` (send messages), `agents:read` (see the local agents) and `agents:write` (start a harness, and make and publish an agent). |
 | `tickMs` | An **opt-in heartbeat**, in milliseconds: buzzr then sends this plugin a `tick` on that interval, so time-based output (a clock, a build) can redraw without running a timer of its own. Absent or `0` means never — most plugins only react to commands and snapshots and are never woken. A value is clamped to `250`–`60000`. |
 | `contributions` | What the plugin puts on screen to begin with — see below. Absent means it adds nothing until asked. |
 
@@ -166,8 +182,8 @@ definePlugin({
 ```
 
 `definePlugin` takes `name`, `permissions` and `tickMs` (the `ready` fields), plus `ready`, `onSnapshot`, `onCommand`,
-`onPanelAction` and `onTick`. Its handle has `status`, `pane`, `panel`, `flash`, `draft`, `send` and `log`; the types are in the file
-and are shorter to read than this paragraph.
+`onPanelAction`, `onTick`, `onPrompt`, `onAgents`, `onHarnessOffer` and `onCreated`. Its handle has `status`, `pane`, `panel`, `flash`, `draft`, `send`,
+`prompt`, `listAgents`, `probeHarness`, `createAgent` and `log`; the types are in the file and are shorter to read than this paragraph.
 
 The clock example carries its own copy of the SDK so that `cp -r examples/plugins/clock ~/.config/buzzr/plugins/` is enough — a test
 keeps that copy byte-for-byte identical to `sdk/typescript/buzzr.ts`.
@@ -185,11 +201,29 @@ keeps that copy byte-for-byte identical to `sdk/typescript/buzzr.ts`.
   no key and no click, and its rows are clipped to the column. The `ready` pane and a `pane` message are the same object;
   `{"type":"pane"}` (no title, no rows) clears it, and the space goes back to the channel list. It is how a clock, a build or a counter
   stays visible between keypresses — with `tickMs` in `ready`, buzzr wakes the plugin on that interval so it can redraw.
+- **`prompt`** asks buzzr to put a question in the composer — one line, or (`multiline: true`) a block of text — so a plugin can collect
+  something from the user without drawing. buzzr owns the box: the `title` names the prompt in its border, the `hint` is the placeholder
+  while it is empty, and Enter accepts (Esc cancels). The answer comes back as `prompt_answer` with the same `id`, and `text` is left out
+  when the user cancelled. A prompt is refused while a prompt is already up, and typing in the box is not a write, so a prompt is allowed
+  under `--read-only`. One prompt at a time is the rule: a second request is dropped with a flash rather than clobbering the first.
+- **`list_agents`** (needs `agents:read`) asks for the local agents this copy made. The answer is an `agents` message with the same `id`
+  and one entry each: `name`, `pubkey`, `npub`, `harness`, the chosen `model` and `effort` (both absent when the harness's own choice is
+  in force), `workspace` and `created_at`. There is **no key** in it — the key stays in `agents.json`, which only buzzr reads.
+- **`probe_harness`** (needs `agents:write`) asks buzzr to start a harness and read what it offers for a new agent — its models, and the
+  thinking levels of the model it starts on. A `model` puts the session on that model first, so the levels that come back are its. The
+  harness is buzzr's to run: **a plugin never starts a process.** The answer is a `harness_offer` with the same `id` — the `offer`, or an
+  `error` (the harness is not installed, or it did not answer ACP). It is refused under `--read-only`, and one probe runs at a time.
+- **`create_agent`** (needs `agents:write`) asks buzzr to make a local agent — a key, a folder and a record of its own — on `harness` and
+  its `model`/`effort` (either may be empty, for the harness's own choice), and publish it. It is refused under `--read-only`, and the
+  answer is a `created` message with the same `id`: the `agent` it made, or an `error`. The relay is asked first, so an agent the relay
+  refuses is not made at all, and the `error` says why. buzzr owns the key, the folder and the relay; the plugin never sees them. buzzr runs
+  the agent it made, too: the **runner** answers the messages that mention it (see `ARCHITECTURE.md`), so a plugin that asks for an agent gets
+  one that answers on its own, and never starts a process itself.
 - The process runs with a **clean environment** (only `PATH`, `HOME`, `LANG`, `LC_ALL`, `TZ`, `TMPDIR` and the `BUZZR_PLUGIN_*`
   variables are passed on), so no key or relay credential in buzzr's environment can leak into a plugin. Its stderr is captured to
   `<config dir>/plugin-logs/<id>.log`; `log` with `level:"error"` also flashes.
 
-Not in this build (kept off the fixed surface on purpose): `open`/`copy`, a `store` API, `exec`, and an `agents` view.
+Not in this build (kept off the fixed surface on purpose): `open`/`copy`, a `store` API, and `exec`.
 
 ## On the command line
 
