@@ -2427,6 +2427,140 @@ fn the_palette_names_every_command_that_is_handled() {
     }
 }
 
+// ---- local agents -------------------------------------------------------------------------------------------------------------
+
+/// One local agent as `agents.json` would read it; the secret key never reaches `App` (see `agents.rs`).
+fn agent(name: &str) -> crate::agents::Agent {
+    crate::agents::Agent {
+        name: name.into(),
+        pubkey: format!("{:0>64}", name.len()),
+        harness: crate::agents::HARNESS.into(),
+        workspace: format!("/tmp/{name}"),
+        instructions: String::new(),
+        created_at: 1,
+    }
+}
+
+#[test]
+fn the_agents_command_lists_the_local_agents_and_closes_on_esc() {
+    let mut app = at_input(3);
+    app.seed_agents(vec![agent("Scout"), agent("Scribe")]);
+    type_text(&mut app, "/agents");
+    let cmds = press(&mut app, KeyCode::Enter);
+    assert!(cmds.is_empty(), "the list is local: nothing is sent and no relay is told: {cmds:?}");
+    assert_eq!(app.overlay, Overlay::Agents);
+    press(&mut app, KeyCode::Esc);
+    assert_eq!(app.overlay, Overlay::None, "Esc closes the list");
+}
+
+#[test]
+fn an_unknown_agents_argument_flashes_the_usage() {
+    let mut app = at_input(3);
+    type_text(&mut app, "/agents bogus");
+    assert!(press(&mut app, KeyCode::Enter).is_empty());
+    assert_eq!(app.overlay, Overlay::None, "nothing opens");
+    assert!(app.flash_text().unwrap().contains("/agents create"), "the usage names the one argument: {:?}", app.flash_text());
+}
+
+#[test]
+fn the_agents_list_moves_its_cursor_and_starts_a_new_agent_with_n() {
+    let mut app = at_input(3);
+    app.seed_agents(vec![agent("one"), agent("two"), agent("three")]);
+    app.command("agents", "");
+    assert_eq!(app.overlay, Overlay::Agents);
+    press(&mut app, KeyCode::Down);
+    assert_eq!(app.agent_cursor, 1, "Down moves over the list");
+    press(&mut app, KeyCode::End);
+    assert_eq!(app.agent_cursor, 2, "End goes to the last agent");
+    press(&mut app, KeyCode::Down);
+    assert_eq!(app.agent_cursor, 2, "already at the bottom: the cursor stays");
+    press(&mut app, KeyCode::Home);
+    assert_eq!(app.agent_cursor, 0, "Home goes back to the first");
+    // `n` starts the flow, which lives in the composer: the list gets out of the way
+    let cmds = press(&mut app, KeyCode::Char('n'));
+    assert!(cmds.is_empty(), "starting the flow sends nothing");
+    assert_eq!(app.overlay, Overlay::None);
+    assert_eq!(app.agent_draft, Some(AgentStep::Name));
+    assert_eq!(app.focus, Focus::Input);
+}
+
+#[test]
+fn the_agents_create_flow_asks_for_a_name_then_instructions_and_makes_the_agent() {
+    let mut app = at_input(3);
+    type_text(&mut app, "/agents create");
+    assert!(press(&mut app, KeyCode::Enter).is_empty(), "starting the flow sends nothing");
+    assert_eq!(app.agent_draft, Some(AgentStep::Name), "the first step asks for a name");
+    assert_eq!(app.focus, Focus::Input);
+    // the name is tidied, and the second step asks what the agent should do
+    type_text(&mut app, "  Scout  ");
+    assert!(press(&mut app, KeyCode::Enter).is_empty(), "the name alone makes nothing");
+    assert_eq!(app.agent_draft, Some(AgentStep::Instructions { name: "Scout".into() }));
+    assert!(app.editor.is_empty(), "the box is cleared for the instructions");
+    type_text(&mut app, "watch the repo");
+    let cmds = press(&mut app, KeyCode::Enter);
+    assert_eq!(cmds, vec![Cmd::CreateAgent { name: "Scout".into(), instructions: "watch the repo".into() }]);
+    assert_eq!(app.agent_draft, None, "the flow is over once the agent is asked for");
+    assert!(app.editor.is_empty(), "and the box is empty again");
+}
+
+#[test]
+fn a_name_the_agent_cannot_have_is_refused_where_it_is_typed() {
+    let mut app = at_input(3);
+    app.command("agents", "create");
+    assert!(press(&mut app, KeyCode::Enter).is_empty(), "an empty name makes nothing");
+    assert_eq!(app.agent_draft, Some(AgentStep::Name), "the flow stays on the name step");
+    assert!(app.flash_text().unwrap().contains("name"), "and says a name is needed: {:?}", app.flash_text());
+    // a name is what the flow accepts; from here it moves on
+    type_text(&mut app, "Scout");
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(app.agent_draft, Some(AgentStep::Instructions { name: "Scout".into() }));
+}
+
+#[test]
+fn esc_cancels_the_agent_flow_and_puts_the_draft_back_in_the_box() {
+    let mut app = at_input(3);
+    type_text(&mut app, "half written");
+    // the flow takes over the box, the way an edit does: the draft it held is stored
+    let cmds = app.command("agents", "create");
+    assert!(
+        cmds.iter().any(|c| matches!(c, Cmd::SaveDrafts(d) if d.contains_key(&("c1".to_owned(), None)))),
+        "the draft goes to disk when the flow takes the box: {cmds:?}"
+    );
+    assert!(app.editor.is_empty());
+    assert_eq!(app.agent_draft, Some(AgentStep::Name));
+    let cmds = press(&mut app, KeyCode::Esc);
+    assert_eq!(app.agent_draft, None, "Esc ends the flow");
+    assert_eq!(app.editor.text(), "half written", "and the draft is back where it was typed");
+    assert!(!cmds.iter().any(|c| matches!(c, Cmd::CreateAgent { .. })), "cancelling makes nothing: {cmds:?}");
+}
+
+#[test]
+fn the_answer_to_a_creation_lands_in_the_list_and_is_reported() {
+    let mut app = at_input(3);
+    let scout = agent("Scout");
+    app.handle(AppEvent::AgentCreated(Ok(scout.clone())));
+    assert_eq!(app.agents, vec![scout], "the made agent is in the list");
+    assert_eq!(app.agent_cursor, 0);
+    assert_eq!(app.overlay, Overlay::Agents, "the list it lands in comes up");
+    assert!(app.flash_text().unwrap().contains("Scout"), "and the flash names it: {:?}", app.flash_text());
+    // a refusal adds nothing, and is only said
+    app.handle(AppEvent::AgentCreated(Err("an agent called Scout already exists".into())));
+    assert_eq!(app.agents.len(), 1, "nothing was added");
+    assert!(app.flash_text().unwrap().contains("already exists"));
+}
+
+#[test]
+fn read_only_refuses_to_make_an_agent_but_still_lists_them() {
+    let mut app = at_input(3);
+    app.read_only = true;
+    app.seed_agents(vec![agent("Scout")]);
+    assert!(app.command("agents", "create").is_empty());
+    assert_eq!(app.agent_draft, None, "the flow does not start in read-only mode");
+    assert!(app.flash_text().unwrap().contains("read-only"));
+    assert!(app.command("agents", "").is_empty(), "listing writes nothing, so it is allowed");
+    assert_eq!(app.overlay, Overlay::Agents);
+}
+
 // ---- joining and leaving channels -------------------------------------------------------------------------------------------
 
 /// A channel with its own visibility, for the join/leave cases.

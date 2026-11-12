@@ -870,6 +870,58 @@ fn esc_closes_the_command_palette_and_keeps_what_was_typed() {
     s.press("esc");
 }
 
+/// `/agents` and the two-step "new agent" flow, all through the real UI: the list opens from the composer, `n`
+/// turns the composer into the flow's box (a name, then what the agent should do), and accepting it makes a local
+/// agent — a key of its own, a folder of its own, and a record on disk — which the list then shows. The flow reads
+/// and writes only the config directory, so a session with its own temp config is safe to run it in.
+#[test]
+fn agents_are_listed_and_a_new_one_is_created_through_the_composer() {
+    let Some(relay) = relay_or_skip("agents_are_listed_and_a_new_one_...") else { return };
+    let mut s = session(&relay);
+    let config = s.config.clone();
+    s.press_all(&["tab", "tab"]); // channels -> messages -> input
+    s.expect("the input box to take focus", "Send");
+    // nothing made yet: the overlay says so, and names the command that makes one
+    s.type_text("/agents");
+    s.press("enter");
+    s.expect("the local agents overlay", "local agents · Up/Down · n new agent");
+    s.expect("the empty list", "No agents yet.");
+    // `n` turns the composer into the flow's box, asking first for a name
+    s.press("n");
+    s.expect("the composer to ask for a name", "new agent · name");
+    s.expect("the hint for the first step", "New agent: type a name, then Enter");
+    s.expect_gone("the empty-list overlay to close", "No agents yet.");
+    // the name takes the Enter, and the second step asks what the agent should do
+    s.type_text("Scout");
+    s.press("enter");
+    s.expect("the composer to ask what it should do", "new agent · instructions");
+    s.expect("the question, naming the agent", "What should Scout do?");
+    // the second Enter makes it: the list comes up on the new agent, with its harness and its own folder
+    s.type_text("watch the repo");
+    s.press("enter");
+    s.expect("the confirmation", "Scout created");
+    s.expect("the agent in the list", "Scout");
+    s.expect("its harness", "claude-code-acp");
+    s.expect("the folder of its own beside the record", "agents/scout");
+    s.press("esc");
+    s.expect_gone("the overlay to close", "local agents · Up/Down");
+    // it is on disk: a fresh run on the same config lists it again
+    s.press("ctrl+q");
+    s.wait_exit(Duration::from_secs(10)).expect("buzzr should exit on Ctrl+Q");
+    let written = std::fs::read_to_string(config.join("agents.json")).expect("the agent is on disk");
+    assert!(written.contains("Scout") && written.contains("claude-code-acp"), "the record names the agent and its harness: {written}");
+    assert!(written.contains("nsec1"), "the agent keeps its own key in the file: {written}");
+    drop(s); // the session takes its config directory with it
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(config.join("agents.json"), &written).unwrap();
+    let again = session_in(&relay, config);
+    again.press_all(&["tab", "tab"]);
+    again.type_text("/agents");
+    again.press("enter");
+    again.expect("the agent made before the restart", "Scout");
+    again.expect("its harness still named", "claude-code-acp");
+}
+
 #[test]
 fn u_marks_the_selected_message_unread_and_the_sidebar_counts_it() {
     let Some(relay) = relay_or_skip("u_marks_the_selected_message_...") else { return };

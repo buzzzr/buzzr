@@ -60,6 +60,16 @@ pub enum Overlay {
     Whois,
     /// A plugin panel (or the built-in plugin list), drawn from `App::panel`.
     Panel,
+    /// The local agents buzzr created (`/agents`), drawn from `App::agents`.
+    Agents,
+}
+
+/// The step of the "new agent" flow the input box is collecting, if any. A name is asked for first, then the
+/// instructions; the agent is made only when the instructions step is accepted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AgentStep {
+    Name,
+    Instructions { name: String },
 }
 
 /// Somebody's profile card: what `/whois NAME` shows. The name and the about line come back from the relay a moment later, so
@@ -74,7 +84,7 @@ pub struct Whois {
 }
 
 /// `npub1abcd…wxyz` for a pubkey, or its first characters when it is not a hex key we can encode.
-fn short_key(pubkey: &str) -> String {
+pub(crate) fn short_key(pubkey: &str) -> String {
     match relay::npub_of(pubkey) {
         Some(n) if n.len() > 16 => format!("{}…{}", &n[..12], &n[n.len() - 4..]),
         Some(n) => n,
@@ -130,6 +140,7 @@ pub enum Row {
 /// source of truth for what a `/command` does; this table only names them, and `the_palette_names_every_command_that_is_handled`
 /// keeps the two from drifting apart.
 pub const COMMANDS: &[(&str, &str)] = &[
+    ("agents", "your local agents; /agents create makes one"),
     ("archive", "archive this channel (search finds it again)"),
     ("c", "back to the channel"),
     ("copy", "copy message N to the clipboard"),
@@ -240,6 +251,8 @@ pub enum Cmd {
     SaveArchived(HashSet<String>),
     /// Write the messages typed but not sent, per channel and thread, to disk (the loop owns the file).
     SaveDrafts(HashMap<(String, Option<String>), String>),
+    /// Make a local agent: a fresh key, a folder of its own, and a record in `agents.json` (the loop owns the file).
+    CreateAgent { name: String, instructions: String },
     /// Work for the plugin runtime (start, reload, or send a command to a plugin process).
     Plugin(PluginCmd),
 }
@@ -273,6 +286,8 @@ pub enum AppEvent {
     Search { seq: u64, result: Result<Vec<Ev>, String> },
     /// How many unread messages a channel had when we started (see `Cmd::LoadUnread`).
     Unread { channel: String, count: u32 },
+    /// The answer to `Cmd::CreateAgent`: the agent that was made, or why it was not.
+    AgentCreated(Result<crate::agents::Agent, String>),
     /// From the plugin runtime: ready/status/panel/flash/draft/send/gone, and the plugin list.
     Plugin(PluginEvent),
     /// The release feed found a later version than the one running.
@@ -392,6 +407,12 @@ pub struct App {
     pub plugin_meta: Vec<PluginMeta>,
     /// The open panel, if any; `Overlay::Panel` is set while it is up.
     pub panel: Option<PanelState>,
+    /// The local agents buzzr created, from `agents.json`: what `/agents` lists. No key is in here (see `agents.rs`).
+    pub agents: Vec<crate::agents::Agent>,
+    /// The row under the cursor in the `/agents` overlay.
+    pub agent_cursor: usize,
+    /// The step of the "new agent" flow the input box is collecting, if any.
+    pub agent_draft: Option<AgentStep>,
     open_after: Option<String>,
     pending_select: Option<String>,
 }
@@ -488,6 +509,9 @@ impl App {
             latest: None,
             plugin_meta: Vec::new(),
             panel: None,
+            agents: Vec::new(),
+            agent_cursor: 0,
+            agent_draft: None,
             open_after: None,
             pending_select: None,
         }
@@ -1536,6 +1560,21 @@ impl App {
             }
             AppEvent::Search { seq, result } => self.search_results(seq, result),
             AppEvent::Unread { channel, count } => self.unread_loaded(channel, count),
+            AppEvent::AgentCreated(result) => match result {
+                Ok(agent) => {
+                    let (name, key) = (agent.name.clone(), short_key(&agent.pubkey));
+                    self.agents.push(agent);
+                    self.agent_cursor = self.agents.len() - 1;
+                    // The list it lands in is the point of the flow, so it comes up on the new agent.
+                    self.overlay = Overlay::Agents;
+                    self.flash(format!("{name} created ({key}) · /agents lists it, `n` makes another"));
+                    Vec::new()
+                }
+                Err(e) => {
+                    self.flash(format!("could not create the agent: {e}"));
+                    Vec::new()
+                }
+            },
             AppEvent::Plugin(e) => self.plugin_event(e),
             AppEvent::Update(v) => {
                 self.latest = Some(v);
@@ -1881,6 +1920,10 @@ impl App {
         if self.confirm_leave.is_some() {
             return self.answer_leave(k);
         }
+        // The new-agent flow owns the keyboard while it is in the box: the panes must not take what is being typed for it.
+        if self.agent_draft.is_some() {
+            return self.key_agent_draft(k);
+        }
         if self.react.is_some() {
             return self.key_react(k);
         }
@@ -1889,6 +1932,9 @@ impl App {
         }
         if self.overlay == Overlay::Panel {
             return self.key_panel(k);
+        }
+        if self.overlay == Overlay::Agents {
+            return self.key_agents(k);
         }
         if self.overlay != Overlay::None {
             // a panel is open: Esc (or Enter) closes it and nothing else happens
@@ -2127,7 +2173,7 @@ impl App {
                 _ => Vec::new(),
             };
         }
-        let width = self.areas.input.width.saturating_sub(4).max(10) as usize;
+        let width = self.input_width();
         match k.code {
             KeyCode::Enter if shift || alt => self.editor.insert_char('\n'),
             KeyCode::Char('j') if ctrl => self.editor.insert_char('\n'),
@@ -2304,6 +2350,7 @@ impl App {
                 }
             }
             "whois" => self.show_whois(arg),
+            "agents" => self.show_agents(arg),
             "invite" => self.invite(arg),
             "edit" | "delete" => match arg.parse::<usize>().ok().and_then(|n| self.message_number(n)) {
                 Some(m) if cmd == "edit" => self.start_edit(&m),
@@ -2362,7 +2409,7 @@ impl App {
     /// lone `/`. `None` once an argument begins (a space or a newline) or when the input is not a command at all — including
     /// while a message is being edited, where a leading `/` is message text rather than a command.
     pub fn command_query(&self) -> Option<String> {
-        if self.editing.is_some() {
+        if self.editing.is_some() || self.agent_draft.is_some() {
             return None;
         }
         let text = self.editor.text();
@@ -2595,7 +2642,7 @@ impl App {
     /// Tell the others we are typing: at most once every three seconds per channel/thread, never for commands, edits or in
     /// read-only mode.
     fn maybe_typing(&mut self) -> Vec<Cmd> {
-        if !self.send_typing || self.read_only || self.editing.is_some() || self.editor.is_empty() || self.editor.text().starts_with('/') {
+        if !self.send_typing || self.read_only || self.editing.is_some() || self.agent_draft.is_some() || self.editor.is_empty() || self.editor.text().starts_with('/') {
             return Vec::new();
         }
         let Some(c) = self.channel() else { return Vec::new() };
@@ -3167,6 +3214,132 @@ impl App {
         });
         self.overlay = Overlay::Whois;
         vec![Cmd::LoadProfile(pk)]
+    }
+
+    // ---- local agents
+
+    /// `/agents`: the local agents buzzr made (`/agents` alone), or the start of the two-step flow that makes another
+    /// (`/agents create`). Creating is local only — a key of the agent's own, a folder for it and a record in
+    /// `agents.json` — so there is nothing to send and no relay to wait for.
+    fn show_agents(&mut self, arg: &str) -> Vec<Cmd> {
+        match arg.trim() {
+            "" => {
+                self.agent_cursor = self.agent_cursor.min(self.agents.len().saturating_sub(1));
+                self.overlay = Overlay::Agents;
+                Vec::new()
+            }
+            "create" | "new" => self.start_agent_flow(),
+            _ => {
+                self.flash("usage: /agents (list them) or /agents create (make one)");
+                Vec::new()
+            }
+        }
+    }
+
+    /// Start the two-step flow: the box asks for a name, then for what the agent should do, and the agent is made when the
+    /// second step is accepted. The box takes over from whatever was typed in it, the way an edit does, so a half-written
+    /// message is stored and comes back afterwards (`switch_draft`).
+    fn start_agent_flow(&mut self) -> Vec<Cmd> {
+        if self.read_only {
+            self.flash("read-only mode: nothing is written");
+            return Vec::new();
+        }
+        self.overlay = Overlay::None;
+        let cmds = self.stash_draft();
+        self.editor.clear();
+        self.cmd_cursor = 0;
+        self.agent_draft = Some(AgentStep::Name);
+        self.set_focus(Focus::Input);
+        self.flash("new agent: a name, then Enter; Esc cancels");
+        cmds
+    }
+
+    /// The `/agents` overlay: move over the list, `n` starts a new agent, Esc closes.
+    fn key_agents(&mut self, k: KeyEvent) -> Vec<Cmd> {
+        let n = self.agents.len();
+        match k.code {
+            KeyCode::Esc => self.overlay = Overlay::None,
+            KeyCode::Char('n') => return self.start_agent_flow(),
+            KeyCode::Up => self.agent_cursor = self.agent_cursor.saturating_sub(1),
+            KeyCode::Down => self.agent_cursor = (self.agent_cursor + 1).min(n.saturating_sub(1)),
+            KeyCode::PageUp => self.agent_cursor = self.agent_cursor.saturating_sub(8),
+            KeyCode::PageDown => self.agent_cursor = (self.agent_cursor + 8).min(n.saturating_sub(1)),
+            KeyCode::Home => self.agent_cursor = 0,
+            KeyCode::End => self.agent_cursor = n.saturating_sub(1),
+            _ => {}
+        }
+        Vec::new()
+    }
+
+    /// A key while the new-agent flow is collecting: Esc cancels it, Enter accepts the step that is up, and everything else
+    /// edits the box. The flow keeps the keyboard — the panes cannot take what is being typed for it.
+    fn key_agent_draft(&mut self, k: KeyEvent) -> Vec<Cmd> {
+        self.set_focus(Focus::Input);
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = k.modifiers.contains(KeyModifiers::ALT);
+        let shift = k.modifiers.contains(KeyModifiers::SHIFT);
+        match k.code {
+            KeyCode::Esc => {
+                self.agent_draft = None;
+                self.editor.clear();
+                self.cmd_cursor = 0;
+                self.flash("new agent cancelled");
+                self.switch_draft()
+            }
+            // A newline in the instructions is Shift+Enter or Alt+Enter, as anywhere in the composer.
+            KeyCode::Enter if !shift && !alt => self.agent_step_accept(),
+            // Up and Down move the cursor inside the box here, rather than leaving for the message list.
+            KeyCode::Up => {
+                self.editor.up(self.input_width());
+                Vec::new()
+            }
+            KeyCode::Down => {
+                self.editor.down(self.input_width());
+                Vec::new()
+            }
+            _ => self.key_input(k, ctrl, alt, shift),
+        }
+    }
+
+    /// Enter in the new-agent flow. The name is checked where it is typed, so a name that cannot be used is refused before
+    /// the instructions are asked for; the second step is what makes the agent.
+    fn agent_step_accept(&mut self) -> Vec<Cmd> {
+        match self.agent_draft.clone() {
+            Some(AgentStep::Name) => match crate::agents::clean_name(&self.editor.text()) {
+                Ok(name) => {
+                    self.agent_draft = Some(AgentStep::Instructions { name });
+                    self.editor.clear();
+                    self.cmd_cursor = 0;
+                    self.flash("what should it do? Enter makes it (Alt+Enter for a new line), Esc cancels");
+                    Vec::new()
+                }
+                Err(e) => {
+                    self.flash(e);
+                    Vec::new()
+                }
+            },
+            Some(AgentStep::Instructions { name }) => {
+                let instructions = self.editor.text();
+                self.agent_draft = None;
+                self.editor.clear();
+                self.cmd_cursor = 0;
+                self.flash(format!("making {name}…"));
+                let mut cmds = vec![Cmd::CreateAgent { name, instructions }];
+                cmds.extend(self.switch_draft()); // the box belonged to the flow; it goes back to its draft
+                cmds
+            }
+            None => Vec::new(),
+        }
+    }
+
+    /// Take the agents read from disk; the loop fills this in before the first event, tests set it directly.
+    pub fn seed_agents(&mut self, agents: Vec<crate::agents::Agent>) {
+        self.agents = agents;
+    }
+
+    /// The columns the composer's text has, as `ui::draw_input` lays the box out.
+    fn input_width(&self) -> usize {
+        self.areas.input.width.saturating_sub(4).max(10) as usize
     }
 
     // ---- search

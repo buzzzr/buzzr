@@ -1,3 +1,4 @@
+mod agents;
 mod app;
 mod config;
 mod contrib;
@@ -251,6 +252,8 @@ async fn run_tui(relay: Arc<Relay>, read_only: bool, send_typing: bool, mouse: b
     app.seed_archived(config::load_archived(&paths.archived()));
     // What was typed but not sent, per channel and thread: it comes back into the box where it was written.
     app.seed_drafts(config::load_drafts(&paths.drafts()));
+    // The local agents buzzr made: the identity and the folder each one works in, from `agents.json` (see `agents.rs`).
+    app.seed_agents(agents::load(&paths.agents()));
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
     // The release feed: seed the notice from what the last check learned, and ask GitHub again only when that is stale. A failure
     // (offline, no release yet) is silent — see `release.rs`.
@@ -364,6 +367,11 @@ fn run(cmd: Cmd, relay: &Arc<Relay>, tx: &UnboundedSender<AppEvent>, subscriptio
         Cmd::SaveDrafts(drafts) => {
             // Written here too: each save is the whole map, so an older one must not land after a newer one.
             let _ = config::save_drafts(&paths.drafts(), &drafts);
+        }
+        Cmd::CreateAgent { name, instructions } => {
+            // Local and quick — a key of the agent's own, a folder for it and a record in `agents.json` — so it is done
+            // here rather than spawned; the answer is what the overlay shows.
+            let _ = tx.send(AppEvent::AgentCreated(agents::create(paths, &name, &instructions)));
         }
         Cmd::LoadWindow { channel, cursor } => {
             tokio::spawn(async move {
