@@ -414,6 +414,14 @@ pub enum PluginEvent {
     Flash { text: String },
     Draft { plugin: String, text: String },
     Send { plugin: String, channel: Option<String>, text: String },
+    /// A plugin asks buzzr to ask the user for a line or a block of text (see `plugin::PluginOutput::Prompt`).
+    Prompt { plugin: String, id: String, title: String, hint: String, multiline: bool },
+    /// A plugin asks for the local agents (see `plugin::PluginOutput::ListAgents`).
+    ListAgents { plugin: String, id: String },
+    /// A plugin asks buzzr to start a harness and read what it offers (see `plugin::PluginOutput::ProbeHarness`).
+    ProbeHarness { plugin: String, id: String, harness: String, model: Option<String> },
+    /// A plugin asks buzzr to make and publish a local agent (see `plugin::PluginOutput::CreateAgent`).
+    CreateAgent { plugin: String, id: String, name: String, instructions: String, harness: String, model: String, effort: String },
     Gone { id: String, why: String },
     Log { id: String, level: String, text: String },
 }
@@ -594,4 +602,12 @@ pub enum PluginCmd {
     Invoke { plugin: String, command: String, args: String },
     /// Enter on a panel row that has an action.
     PanelAction { plugin: String, id: String, row: usize, value: Option<String> },
+    /// The user answered (or, with `None`, cancelled) a prompt the plugin asked for with `Prompt`.
+    PromptAnswer { plugin: String, id: String, text: Option<String> },
+    /// The local agents, as the answer to the plugin's `ListAgents`.
+    Agents { plugin: String, id: String, agents: Vec<crate::plugin::AgentView> },
+    /// The answer to a plugin's `CreateAgent`: the agent that was made, or why it was not.
+    Created { plugin: String, id: String, result: Result<crate::plugin::CreatedAgent, String> },
+    /// The answer to a plugin's `ProbeHarness`: what the harness offers, or why it could not be asked.
+    HarnessOffer { plugin: String, id: String, result: Result<crate::plugin::HarnessOffer, String> },
 }

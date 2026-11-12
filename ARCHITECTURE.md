@@ -21,7 +21,8 @@ into `AppEvent`s. Because `App` never touches the network or the terminal, its b
 
 | File | Role |
 |---|---|
-| `main.rs` | Arguments, wiring of setup and relay, terminal setup/restore (raw mode, alternate screen, mouse, bracketed paste, kitty keyboard flags), the `select!` loop, `run(Cmd)`. |
+| `main.rs` | Arguments, wiring of setup and relay, terminal setup/restore (raw mode, alternate screen, mouse, bracketed paste, kitty keyboard flags), the `select!` loop, `run(Cmd)`. Everything else lives in the library (`lib.rs`), so a plugin crate can depend on it. |
+| `lib.rs` | The library: the modules below, exposed so a **compiled-in** plugin can live in a crate of its own and register through `register_plugin!`. `main.rs` is a thin shell over it. |
 | `app.rs` | State and behaviour: channels, stores, view (channel or thread), focus, overlays, selection and scroll, input, commands, mentions, unread, typing, clipboard requests. `app/tests.rs` has the tests. |
 | `ui.rs` | Drawing: header, channel list, plugin panes, message list, typing line, status line, input box, footer, key panel, help. |
 | `list.rs` | Geometry of the message list: offsets, hit-testing, anchors that keep the reader's place, selection scrolling. Pure. |
@@ -35,7 +36,10 @@ into `AppEvent`s. Because `App` never touches the network or the terminal, its b
 | `keyfile.rs` | The password-protected key file format (scrypt + AES-256-GCM): `encrypt` and `decrypt`, no I/O. |
 | `selftest.rs` | `--selftest`: a read-only check against a real relay. |
 | `contrib.rs` | What a plugin is allowed to put on the screen (segments, panes, panels, marks) and the `Registry` the app holds; also the bounded `Projection` sent to plugins and the `PluginCmd`/`PluginEvent` that cross between `App` and the plugin runtime. |
-| `plugins/` | The out-of-process plugin host: `proto.rs` is the newline-delimited-JSON wire, `discover.rs` finds plugin folders, their entry file and their hot-reload stamps, `host.rs` is the one task that supervises every child process. See `PLUGIN.md`. |
+| `plugin.rs` | The plugin API: the one `Plugin` trait and the `PluginInput`/`PluginOutput` vocabulary both kinds speak, the `register_plugin!` macro and the `inventory` registry behind it, the permissions, and the compiled-in runtime. `plugins/agents/` is the worked example. |
+| `plugins/` | The runtime-loaded provider: `proto.rs` is the newline-delimited-JSON wire, `discover.rs` finds plugin folders, their entry file and their hot-reload stamps, `host.rs` is the one task that supervises every child process, and `agents/mod.rs` is the compiled-in plugin that backs `/agents`. See `PLUGIN.md`. |
+| `harness/` | The programs that run an agent, spoken to over ACP. `mod.rs` is the table of harnesses — id, program, the listing `runtime`, the "not installed" message — and `offer()` asks one what it offers for a new agent; `acp.rs` is the minimal ACP client that starts it in a throwaway folder, opens a session and reads its models and thinking levels. What `/agents create` shows before it makes anything; the host runs it, never a plugin. |
+| `runner.rs` | The local agents, running. It watches `agents.json` and gives every agent a watch of its own: the messages that carry it in a `p` tag, read from the relay with the agent's own key, each run as one turn of its harness (`harness/`) in the agent's folder, with the answer published back to the channel the mention named as the agent's own message. One session is kept per agent between mentions, so it stays in the conversation; every turn's outcome reaches the app as `AppEvent::AgentTurn`. Started with the app — a plugin asks for an agent, it never runs one — and not at all when buzzr may not send (`--read-only`, `BUZZR_SAFE_MODE=1`). |
 | `update.rs` | How the running copy was installed (Homebrew's Cellar, `~/.cargo/bin`, a checkout build, anything else) and the shell command that upgrades it, for `/update`. Path inspection only, no network. |
 | `release.rs` | The release feed: one throttled GET of the repository's latest release (at most once a day; `BUZZR_NO_UPDATE_CHECK` skips it), the `State` remembered between runs, and the notice printed after the UI closes. Failures are silent. |
 
@@ -45,6 +49,13 @@ A plugin is a separate process that speaks newline-delimited JSON on stdio, in a
 terminal. This keeps the core's shape: a plugin is a **third edge** next to `relay.rs` and `live.rs`. There is no manifest: a plugin
 is a folder whose name is its id, buzzr runs the executable entry file in it through that file's own `#!` line, and the plugin
 declares its name, permissions and heartbeat in its `ready` message.
+
+There are **two kinds of plugin and one contract**. A **runtime-loaded** plugin is the separate process above — added later, in any
+language, hot-reloaded. A **compiled-in** plugin is a Rust type in buzzr's own tree — or in a crate of its own that depends on the
+`buzzr` library (`lib.rs`) — that registers itself with `register_plugin!` and is driven in this process. Both are handed the same
+`PluginInput`, answer with the same `PluginOutput`, declare the same `ready`, and pass the same permission and screen gates — the
+transport is the only difference, so a compiled-in plugin gets no door a runtime-loaded one lacks. `plugin.rs` is the contract and the
+compiled-in runtime; `plugins/agents/` (`/agents`) is the worked example.
 
 ```
                        ┌─────────────────────────┐

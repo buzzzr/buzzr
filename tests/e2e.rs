@@ -15,7 +15,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -79,6 +79,44 @@ impl Drop for Relay {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+/// `POST /query` to the relay, returning the raw JSON body — a plain HTTP request, so the test reads what the relay
+/// actually holds rather than what buzzr's own client thinks it holds.
+fn relay_query(relay: &Relay, filters: &str) -> String {
+    let addr = relay.url.trim_start_matches("http://");
+    let mut stream = std::net::TcpStream::connect(addr).expect("could not reach the relay");
+    stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    let request = format!(
+        "POST /query HTTP/1.1\r\nhost: {addr}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{filters}",
+        filters.len()
+    );
+    stream.write_all(request.as_bytes()).expect("could not write to the relay");
+    let mut response = String::new();
+    stream.read_to_string(&mut response).expect("could not read the relay's answer");
+    response.split_once("\r\n\r\n").map(|(_, body)| body.to_owned()).unwrap_or(response)
+}
+
+/// The agent's pubkey out of its record file, as a `kind:0` filter needs it.
+fn agent_pubkey(record: &str) -> String {
+    const KEY: &str = "\"pubkey\": \"";
+    let start = record.find(KEY).expect("the record names the agent's key") + KEY.len();
+    record[start..start + 64].to_owned()
+}
+
+/// A channel id for the traffic a test has to publish itself: buzzr builds a message from a channel **uuid**, and the
+/// fake relay's ids (`c-design`) are not uuids — the wall the invite and join cases meet — so a channel of the test's
+/// own is the only channel a message can be built for here.
+const TEST_CHANNEL: &str = "0b6c4b1e-7a0a-4f4f-9d4f-2a6f0f1c5a11";
+
+/// Publish one message to the relay as the person, through buzzr's own client: a real signed event over `POST /events`,
+/// with the mentions as `p` tags — exactly what a composer sends. For a test that needs relay traffic the UI cannot
+/// send (see the agent case).
+fn publish_message(relay: &Relay, channel: &str, text: &str, mentions: &[String]) {
+    let keys = nostr::Keys::parse(KEY).expect("the test key");
+    let client = buzzr::relay::Relay::new(&relay.url, keys, None).expect("a client for the relay");
+    let message = buzzr::relay::message_builder(channel, text, None, mentions).expect("a message for that channel");
+    tokio::runtime::Runtime::new().expect("a runtime").block_on(client.submit(message)).expect("the relay took the message");
 }
 
 fn free_port() -> u16 {
@@ -172,6 +210,11 @@ impl Session {
             .stdin(Stdio::from(inp.try_clone().unwrap()))
             .stdout(Stdio::from(inp.try_clone().unwrap()))
             .stderr(Stdio::from(inp));
+        // The harness the agents flow starts is not installed in a test environment: put the fake first on `PATH`.
+        let mut harness_path = fake_acp_dir().as_os_str().to_owned();
+        harness_path.push(":");
+        harness_path.push(std::env::var_os("PATH").unwrap_or_default());
+        cmd.env("PATH", harness_path);
         if keyboard_enhanced {
             // Make the pty the child's controlling terminal, the way a terminal emulator does: the app asks for the
             // keyboard protocol on /dev/tty, and a test runner started from a terminal has a /dev/tty of its own.
@@ -408,6 +451,48 @@ fn session(relay: &Relay) -> Session {
 /// A session started on an existing config directory (see `Session::start_in`).
 fn session_in(relay: &Relay, config: PathBuf) -> Session {
     let s = Session::start_in(relay, config, false);
+    settle(&s);
+    s
+}
+
+/// A plugins folder with nothing in it: plugins are on, so the compiled-in ones start, but no runtime-loaded plugin
+/// is there to draw. (`session` starts with `--no-plugins` for isolation; a test of anything a plugin owns needs this.)
+fn empty_plugins_dir() -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("buzzr-e2e-no-plugins-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+/// The fake `claude-agent-acp` on a directory of its own, made once and put first on every session's `PATH`.
+///
+/// `/agents create` starts the harness and reads what it offers over ACP before it makes anything, and no real harness
+/// is installed in a test environment. The fake is the script committed at `tests/fixtures/claude-agent-acp` (the same
+/// one the unit tests in `src/harness/acp.rs` drive); it is copied out, and made executable, so every session can find
+/// it by name on `PATH`. Only the agents flow ever starts a harness, so nothing else notices it.
+fn fake_acp_dir() -> &'static PathBuf {
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    DIR.get_or_init(|| {
+        let dir = std::env::temp_dir().join(format!("buzzr-e2e-harness-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("could not make the fake harness directory");
+        let path = dir.join("claude-agent-acp");
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/claude-agent-acp");
+        std::fs::copy(fixture, &path).expect("could not copy the fake harness");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("could not make the fake harness executable");
+        dir
+    })
+}
+
+/// Like `session`, but with plugins on and an empty plugins folder, so a compiled-in plugin is there and no
+/// runtime-loaded one is.
+fn session_with_plugins(relay: &Relay) -> Session {
+    let s = Session::start_full(relay, fresh_config_dir(), false, ROWS, Some(empty_plugins_dir()));
+    settle(&s);
+    s
+}
+
+/// Like `session_in`, but with plugins on (see `session_with_plugins`).
+fn session_in_with_plugins(relay: &Relay, config: PathBuf) -> Session {
+    let s = Session::start_full(relay, config, false, ROWS, Some(empty_plugins_dir()));
     settle(&s);
     s
 }
@@ -868,6 +953,136 @@ fn esc_closes_the_command_palette_and_keeps_what_was_typed() {
     s.press("enter");
     s.expect("the command left in the input to run", "/r N text");
     s.press("esc");
+}
+
+/// `/agents` and the "new agent" flow, all through the real UI: the list opens from the composer, Enter on its
+/// "new agent…" row turns the composer into the flow's box (a name, then what the agent should do), the harness is
+/// asked what it offers (its models on a panel, a model's thinking levels on another), and the pick makes a local
+/// agent — a key of its own, a folder of its own, and a record on disk — which the list then shows. The flow reads and
+/// writes only the config directory, so a session with its own temp config is safe to run it in. The harness is the
+/// fake on `PATH` (see `fake_acp_dir`), since no real one is installed here.
+#[test]
+fn agents_are_listed_and_a_new_one_is_created_through_the_composer() {
+    let Some(relay) = relay_or_skip("agents_are_listed_and_a_new_one_...") else { return };
+    // `/agents` is a compiled-in plugin, and `session` starts with `--no-plugins`, so this one starts with plugins on.
+    let mut s = session_with_plugins(&relay);
+    let config = s.config.clone();
+    s.press_all(&["tab", "tab"]); // channels -> messages -> input
+    s.expect("the input box to take focus", "Send");
+    // nothing made yet: the panel says so, and its last row makes one
+    s.type_text("/agents");
+    s.press("enter");
+    s.expect("the local agents panel", "local agents");
+    s.expect("the empty list", "No agents yet.");
+    s.expect("the row that starts one", "new agent…");
+    // Enter on that row turns the composer into the flow's box, asking first for a name
+    s.press("end");
+    s.press("enter");
+    s.expect("the composer to ask for a name", "new agent · name");
+    s.expect("the hint for the first step", "New agent: type a name, then Enter");
+    s.expect_gone("the panel to give the composer back", "No agents yet.");
+    // the name takes the Enter, and the second step asks what the agent should do
+    s.type_text("Scout");
+    s.press("enter");
+    s.expect("the composer to ask what it should do", "new agent · instructions");
+    s.expect("the question, naming the agent", "What should Scout do?");
+    // the instructions ask the harness what it offers, and its models come up on a panel, the one it is on marked
+    s.type_text("watch the repo");
+    s.press("enter");
+    s.expect("the models panel", "new agent · model");
+    s.expect("a model the harness listed", "Opus");
+    // pick another model: the harness is asked again, for that model's own thinking levels
+    s.press("down");
+    s.press("enter");
+    s.expect("the levels panel", "new agent · level");
+    // the level makes it: the list comes up on the new agent, with its harness and its own folder
+    s.press("enter");
+    s.expect("the confirmation", "Scout created");
+    s.expect("the agent in the list", "Scout");
+    s.expect("its harness", "claude-agent-acp");
+    s.expect("the folder of its own beside the record", "agents/scout");
+    s.press("esc");
+    s.expect_gone("the panel to close", "local agents");
+    // it is on disk, with the harness and the picks the flow took, so a fresh run on the same config lists it again
+    s.press("ctrl+q");
+    s.wait_exit(Duration::from_secs(10)).expect("buzzr should exit on Ctrl+Q");
+    let written = std::fs::read_to_string(config.join("agents.json")).expect("the agent is on disk");
+    assert!(written.contains("Scout") && written.contains("claude-agent-acp"), "the record names the agent and its harness: {written}");
+    assert!(written.contains("\"model\": \"opus\""), "the record keeps the model the flow picked: {written}");
+    assert!(written.contains("\"effort\": \"low\""), "and the thinking level it picked: {written}");
+    assert!(written.contains("nsec1"), "the agent keeps its own key in the file: {written}");
+    // The relay kept what buzzr published: the agent's own kind-0 profile (carrying the owner's attestation) and the
+    // owner's kind:30177 listing of it both come back out of a query. This needs a relay that keeps writes.
+    let agent = agent_pubkey(&written);
+    let profile = relay_query(&relay, &format!(r##"[{{"kinds":[0],"authors":["{agent}"]}}]"##));
+    assert!(profile.contains("Scout"), "the agent's own profile came back out of the relay: {profile}");
+    assert!(profile.contains("\"auth\""), "and it carries the owner's attestation tag: {profile}");
+    let listing = relay_query(&relay, &format!(r##"[{{"kinds":[30177],"#d":["{agent}"]}}]"##));
+    assert!(listing.contains("Scout"), "the owner's listing came back out of the relay: {listing}");
+    assert!(listing.contains("buzz.claude-code/claude-code"), "naming the agent type it runs: {listing}");
+    drop(s); // the session takes its config directory with it
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(config.join("agents.json"), &written).unwrap();
+    let again = session_in_with_plugins(&relay, config);
+    again.press_all(&["tab", "tab"]);
+    again.type_text("/agents");
+    again.press("enter");
+    again.expect("the agent made before the restart", "Scout");
+    again.expect("its harness still named", "claude-agent-acp");
+}
+
+/// A message that names a local agent is answered by it. The agent an `/agents create` makes is only an identity and a
+/// folder until something runs it: the **runner** (`src/runner.rs`, started with the app) watches `agents.json` and, for
+/// every message that carries the agent in a `p` tag, runs its harness over ACP and publishes what the harness answered
+/// back to the channel the mention named, as the agent's own message. This case drives that whole loop on the real
+/// binary: the agent is made through the composer, the mention reaches the relay, the answer comes back on it, and the
+/// status line says the agent replied.
+///
+/// The mention is published by the test rather than typed into the composer, for the reason the invite case gives: a
+/// message is built from a channel *uuid* and the relay's ids are not uuids, so a message for a channel of the relay
+/// cannot be built at all here (and a composer cannot mention someone who is not in the channel anyway). From the relay
+/// in, every step is the real one — the runner reads the mention over HTTP with the agent's own key, starts the harness
+/// in the agent's folder, and publishes the answer signed as the agent.
+#[test]
+fn a_message_that_names_a_local_agent_is_answered_by_it() {
+    let Some(relay) = relay_or_skip("a_message_that_names_a_local_agent_...") else { return };
+    // The runner is part of the app and `/agents` is a compiled-in plugin, so this session starts with plugins on.
+    let s = session_with_plugins(&relay);
+    let config = s.config.clone();
+    s.press_all(&["tab", "tab"]); // channels -> messages -> input
+    s.expect("the input box to take focus", "Send");
+    // make an agent, the way the case above does: a name, then what it should do, then a model and a level
+    s.type_text("/agents create");
+    s.press("enter");
+    s.expect("the composer to ask for a name", "new agent · name");
+    s.type_text("Scout");
+    s.press("enter");
+    s.expect("the composer to ask what it should do", "new agent · instructions");
+    s.type_text("watch the repo");
+    s.press("enter");
+    s.expect("the models panel", "new agent · model");
+    s.press("enter");
+    s.expect("the levels panel", "new agent · level");
+    s.press("enter");
+    s.expect("the agent to be made", "Scout created");
+    s.press("esc");
+    let written = std::fs::read_to_string(config.join("agents.json")).expect("the agent is on disk");
+    let agent = agent_pubkey(&written);
+    // The runner re-reads agents.json every couple of seconds and a watch answers only what arrives after it starts, so
+    // give it the beat it needs before anything is sent: the mention below must land after the watch began.
+    std::thread::sleep(Duration::from_secs(3));
+    let asker = nostr::Keys::parse(KEY).expect("the test key").public_key().to_hex();
+    publish_message(&relay, TEST_CHANNEL, "@Scout what is new?", std::slice::from_ref(&agent));
+    // The turn blocks on the harness off the event loop, so the status line is what says it happened.
+    s.until("the agent to have replied", |sc| sc.contains("Scout replied"));
+    // And the answer is on the relay: it is the harness's own text, signed as the agent, in the channel the mention
+    // named, naming the person who asked so they are told about it. A relay that keeps what it is sent is needed here.
+    let replies = relay_query(&relay, &format!(r#"[{{"kinds":[9],"authors":["{agent}"]}}]"#));
+    assert!(replies.contains("heard:"), "the answer is what the harness streamed back: {replies}");
+    assert!(replies.contains("@Scout what is new?"), "and it is the answer to that mention: {replies}");
+    assert!(replies.contains("(permission: yes)"), "the turn ran to its end — the fake asks permission and the client allows it: {replies}");
+    assert!(replies.contains(TEST_CHANNEL), "the answer is in the channel the mention came from: {replies}");
+    assert!(replies.contains(&asker), "and it names the person who asked: {replies}");
 }
 
 #[test]
