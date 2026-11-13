@@ -5,6 +5,12 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
 
 ## [Unreleased]
 
+### Changed
+
+- A relay **notice** is shown as a message (`relay: …`) and no longer marks the connection as offline; reconnect delays have jitter.
+- Internal: `app.rs` split by feature, tag lookups go through `Ev`, one clock, a `request` helper for commands, agent publish/delete live in
+  `agents.rs` with a typed `agents::Error`, and the state files are written in order off the loop. `docs/DESIGN_RULES.md` lists the antipatterns to avoid.
+
 ### Added
 
 - An agent can be **deleted** from the `agents` list: a `delete <name>…` row asks to confirm, then takes the agent off the relay — its own

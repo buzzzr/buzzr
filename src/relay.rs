@@ -145,12 +145,12 @@ impl Relay {
     /// requests, an agent's key for the agent's own events.
     fn nip98(keys: &Keys, method: &str, url: &str, body: Option<&[u8]>) -> Result<String> {
         let mut tags = vec![
-            Tag::parse(["u", url]).map_err(|e| anyhow!("{e}"))?,
-            Tag::parse(["method", method]).map_err(|e| anyhow!("{e}"))?,
-            Tag::parse(["nonce", &uuid::Uuid::new_v4().to_string()]).map_err(|e| anyhow!("{e}"))?,
+            Tag::parse(["u", url]).map_err(sdk_err)?,
+            Tag::parse(["method", method]).map_err(sdk_err)?,
+            Tag::parse(["nonce", &uuid::Uuid::new_v4().to_string()]).map_err(sdk_err)?,
         ];
         if let Some(b) = body {
-            tags.push(Tag::parse(["payload", &hex::encode(Sha256::digest(b))]).map_err(|e| anyhow!("{e}"))?);
+            tags.push(Tag::parse(["payload", &hex::encode(Sha256::digest(b))]).map_err(sdk_err)?);
         }
         let event = EventBuilder::new(Kind::Custom(27235), "").tags(tags).sign_with_keys(keys).map_err(|e| anyhow!("NIP-98 signing failed: {e}"))?;
         Ok(format!("Nostr {}", B64.encode(event.as_json().as_bytes())))
@@ -238,7 +238,7 @@ impl Relay {
     /// deletes as its owner's agent, so the event carries the same auth tag (and `x-auth-tag` request header) its other
     /// events do.
     pub async fn delete_coordinate(&self, coordinate: &str) -> Result<String> {
-        let tag = Tag::parse(["a", coordinate]).map_err(|e| anyhow!("{e}"))?;
+        let tag = Tag::parse(["a", coordinate]).map_err(sdk_err)?;
         let mut builder = EventBuilder::new(Kind::Custom(5), "").tags([tag]);
         if let Some(auth) = &self.auth_tag {
             builder = builder.tags([auth.clone()]);
@@ -265,9 +265,7 @@ impl Relay {
         Ok(evs
             .first()
             .map(|e| {
-                e.tags
-                    .iter()
-                    .filter(|t| t.first().map(String::as_str) == Some("p"))
+                e.tags_named("p")
                     .filter_map(|t| {
                         let role = t.get(3).filter(|r| !r.is_empty()).cloned().unwrap_or_else(|| "member".into());
                         t.get(1).map(|p| (p.clone(), role))
@@ -423,57 +421,72 @@ impl Relay {
     }
 }
 
+/// The channel id every builder starts from: the relay's channels are UUIDs, so a name or a typo fails here, before anything is signed.
+fn channel_uuid(channel: &str) -> Result<uuid::Uuid> {
+    uuid::Uuid::parse_str(channel).context("not a channel id")
+}
+
+/// An event id (hex) a builder points at; `what` names it in the error ("message", "reaction").
+fn event_id(id: &str, what: &str) -> Result<nostr::EventId> {
+    nostr::EventId::from_hex(id).with_context(|| format!("not a {what} id"))
+}
+
+/// A `buzz_sdk` builder error as an `anyhow` one.
+fn sdk_err(e: impl std::fmt::Display) -> anyhow::Error {
+    anyhow!("{e}")
+}
+
 /// A chat message for a channel; `root` makes it a reply in that thread (a direct reply to the root, which is how the Buzz app
 /// threads), `mentions` are pubkeys to notify.
 pub fn message_builder(channel: &str, text: &str, root: Option<&str>, mentions: &[String]) -> Result<EventBuilder> {
-    let channel_id = uuid::Uuid::parse_str(channel).context("not a channel id")?;
+    let channel_id = channel_uuid(channel)?;
     let thread = match root {
         Some(r) => {
-            let id = nostr::EventId::from_hex(r).context("not a message id")?;
+            let id = event_id(r, "message")?;
             Some(buzz_sdk::ThreadRef { root_event_id: id, parent_event_id: id })
         }
         None => None,
     };
     let mention_refs: Vec<&str> = mentions.iter().map(String::as_str).collect();
-    buzz_sdk::build_message(channel_id, text, thread.as_ref(), &mention_refs, false, &[], &[]).map_err(|e| anyhow!("{e}"))
+    buzz_sdk::build_message(channel_id, text, thread.as_ref(), &mention_refs, false, &[], &[]).map_err(sdk_err)
 }
 
 /// A typing indicator (`kind:20002`, ephemeral: delivered to subscribers, never stored). In a thread it names the thread root the way
 /// the Buzz agents do, so that other clients can show it under the right thread.
 pub fn typing_builder(channel: &str, thread_root: Option<&str>) -> Result<EventBuilder> {
-    let mut tags = vec![Tag::parse(["h", channel]).map_err(|e| anyhow!("{e}"))?];
+    let mut tags = vec![Tag::parse(["h", channel]).map_err(sdk_err)?];
     if let Some(root) = thread_root {
-        tags.push(Tag::parse(["e", root, "", "reply"]).map_err(|e| anyhow!("{e}"))?);
+        tags.push(Tag::parse(["e", root, "", "reply"]).map_err(sdk_err)?);
     }
     Ok(EventBuilder::new(Kind::Custom(20002), "").tags(tags))
 }
 
 /// Replace the text of one of your messages (`kind:40003`).
 pub fn edit_builder(channel: &str, target: &str, text: &str) -> Result<EventBuilder> {
-    let channel_id = uuid::Uuid::parse_str(channel).context("not a channel id")?;
-    let target = nostr::EventId::from_hex(target).context("not a message id")?;
-    buzz_sdk::build_edit(channel_id, target, text).map_err(|e| anyhow!("{e}"))
+    let channel_id = channel_uuid(channel)?;
+    let target = event_id(target, "message")?;
+    buzz_sdk::build_edit(channel_id, target, text).map_err(sdk_err)
 }
 
 /// Delete a message (`kind:9005`, what `buzz messages delete` sends).
 pub fn delete_builder(channel: &str, target: &str) -> Result<EventBuilder> {
-    let channel_id = uuid::Uuid::parse_str(channel).context("not a channel id")?;
-    let target = nostr::EventId::from_hex(target).context("not a message id")?;
-    buzz_sdk::build_delete_message(channel_id, target).map_err(|e| anyhow!("{e}"))
+    let channel_id = channel_uuid(channel)?;
+    let target = event_id(target, "message")?;
+    buzz_sdk::build_delete_message(channel_id, target).map_err(sdk_err)
 }
 
 /// A NIP-25 reaction (`kind:7`): the emoji, and the message it names. It carries no `h` tag — the message it points at says
 /// which channel the reaction belongs to, which is how it finds its way back to that timeline.
 pub fn reaction_builder(target: &str, emoji: &str) -> Result<EventBuilder> {
-    let target = nostr::EventId::from_hex(target).context("not a message id")?;
-    buzz_sdk::build_reaction(target, emoji).map_err(|e| anyhow!("{e}"))
+    let target = event_id(target, "message")?;
+    buzz_sdk::build_reaction(target, emoji).map_err(sdk_err)
 }
 
 /// Undo one of your reactions (`kind:5`, NIP-09 naming the reaction event). Changing a reaction removes the old one this way
 /// first, so a message keeps one reaction from you.
 pub fn remove_reaction_builder(reaction: &str) -> Result<EventBuilder> {
-    let reaction = nostr::EventId::from_hex(reaction).context("not a reaction id")?;
-    buzz_sdk::build_remove_reaction(reaction).map_err(|e| anyhow!("{e}"))
+    let reaction = event_id(reaction, "reaction")?;
+    buzz_sdk::build_remove_reaction(reaction).map_err(sdk_err)
 }
 
 /// The `channel -> members` map from the `kind:39002` events of a roster query: the `d` tag is the channel, and each `p` tag is a
@@ -482,7 +495,7 @@ fn roster_from(evs: &[Ev]) -> HashMap<String, Vec<String>> {
     evs.iter()
         .filter_map(|e| {
             let id = e.tag("d")?;
-            let members = e.tags.iter().filter(|t| t.first().map(String::as_str) == Some("p")).filter_map(|t| t.get(1).cloned()).collect();
+            let members = e.tag_values("p").map(str::to_owned).collect();
             Some((id.to_owned(), members))
         })
         .collect()
@@ -491,35 +504,35 @@ fn roster_from(evs: &[Ev]) -> HashMap<String, Vec<String>> {
 /// Join an open channel (`kind:9021`, what `buzz channels join` sends). The relay adds us as a member, or refuses — a private
 /// channel cannot be joined, it needs an invitation.
 pub fn join_builder(channel: &str) -> Result<EventBuilder> {
-    let channel_id = uuid::Uuid::parse_str(channel).context("not a channel id")?;
-    buzz_sdk::build_join(channel_id).map_err(|e| anyhow!("{e}"))
+    let channel_id = channel_uuid(channel)?;
+    buzz_sdk::build_join(channel_id).map_err(sdk_err)
 }
 
 /// Leave a channel (`kind:9022`, what `buzz channels leave` sends). The relay refuses when we are the last owner.
 pub fn leave_builder(channel: &str) -> Result<EventBuilder> {
-    let channel_id = uuid::Uuid::parse_str(channel).context("not a channel id")?;
-    buzz_sdk::build_leave(channel_id).map_err(|e| anyhow!("{e}"))
+    let channel_id = channel_uuid(channel)?;
+    buzz_sdk::build_leave(channel_id).map_err(sdk_err)
 }
 
 /// A new stream channel (`kind:9007`, what `buzz channels create` sends). Returns the builder and the new channel's id.
 pub fn create_channel_builder(name: &str, private: bool, about: Option<&str>) -> Result<(EventBuilder, String)> {
     let id = uuid::Uuid::new_v4();
     let visibility = if private { buzz_sdk::Visibility::Private } else { buzz_sdk::Visibility::Open };
-    let builder = buzz_sdk::build_create_channel(id, name, Some(visibility), Some(buzz_sdk::ChannelKind::Stream), about, None, false).map_err(|e| anyhow!("{e}"))?;
+    let builder = buzz_sdk::build_create_channel(id, name, Some(visibility), Some(buzz_sdk::ChannelKind::Stream), about, None, false).map_err(sdk_err)?;
     Ok((builder, id.to_string()))
 }
 
 /// Delete a whole channel (`kind:9008`); used by the write probe to clean up its test channel.
 pub fn delete_channel_builder(channel: &str) -> Result<EventBuilder> {
-    let channel_id = uuid::Uuid::parse_str(channel).context("not a channel id")?;
-    buzz_sdk::build_delete_channel(channel_id).map_err(|e| anyhow!("{e}"))
+    let channel_id = channel_uuid(channel)?;
+    buzz_sdk::build_delete_channel(channel_id).map_err(sdk_err)
 }
 
 /// Open a direct message with `peer` (`kind:41010`, what the `dm` command sends). The relay creates the conversation if it does not exist
 /// and reuses it if it does, so this is safe to send for someone you already have a DM with; it answers with no channel id, so
 /// the client finds the conversation in the channel list afterwards.
 pub fn dm_open_builder(peer: &str) -> Result<EventBuilder> {
-    buzz_sdk::build_dm_open(&[peer]).map_err(|e| anyhow!("{e}"))
+    buzz_sdk::build_dm_open(&[peer]).map_err(sdk_err)
 }
 
 /// Add someone to a channel (`kind:9000`, what `buzz channels add-member` sends) or to a group DM (`kind:41011`, what
@@ -527,11 +540,11 @@ pub fn dm_open_builder(peer: &str) -> Result<EventBuilder> {
 /// different event for each and `dm` picks which. No role is asked for, so the person joins as a plain member — the same
 /// as `add-member` with no `--role`.
 pub fn invite_builder(channel: &str, pubkey: &str, dm: bool) -> Result<EventBuilder> {
-    let channel_id = uuid::Uuid::parse_str(channel).context("not a channel id")?;
+    let channel_id = channel_uuid(channel)?;
     if dm {
-        buzz_sdk::build_dm_add_member(channel_id, pubkey).map_err(|e| anyhow!("{e}"))
+        buzz_sdk::build_dm_add_member(channel_id, pubkey).map_err(sdk_err)
     } else {
-        buzz_sdk::build_add_member(channel_id, pubkey, None).map_err(|e| anyhow!("{e}"))
+        buzz_sdk::build_add_member(channel_id, pubkey, None).map_err(sdk_err)
     }
 }
 
@@ -570,8 +583,8 @@ fn agent_profile_event(agent: &Keys, name: &str, attestation: &str) -> Result<Ev
 fn agent_listing_event(owner: &Keys, agent_pubkey: &str, name: &str, runtime: &str) -> Result<Event> {
     let content = json!({ "name": name, "parallelism": 1, "respond_to": "owner-only" }).to_string();
     let tags = vec![
-        Tag::parse(["d", agent_pubkey]).map_err(|e| anyhow!("{e}"))?,
-        Tag::parse(["runtime", runtime]).map_err(|e| anyhow!("{e}"))?,
+        Tag::parse(["d", agent_pubkey]).map_err(sdk_err)?,
+        Tag::parse(["runtime", runtime]).map_err(sdk_err)?,
     ];
     EventBuilder::new(Kind::Custom(30177), content).tags(tags).sign_with_keys(owner).map_err(|e| anyhow!("signing the agent listing failed: {e}"))
 }
@@ -789,7 +802,7 @@ mod tests {
     fn an_agents_profile_is_signed_by_the_agent_and_carries_its_owners_attestation() {
         let owner = Keys::generate();
         let agent = Keys::generate();
-        let attestation = crate::agents::attestation(&owner, &agent.public_key().to_hex()).unwrap();
+        let attestation = crate::agents::attestation(&owner, &agent.public_key().to_hex());
         let event = agent_profile_event(&agent, "clara", &attestation).unwrap();
         assert_eq!(event.kind, Kind::Metadata, "a kind-0 profile");
         assert_eq!(event.pubkey, agent.public_key(), "the agent's own key signs it, not the person's");
@@ -899,7 +912,7 @@ mod tests {
         let owner = Keys::generate();
         let agent = Keys::generate();
         let relay = Relay::new(&url, owner.clone(), None).unwrap();
-        let attestation = crate::agents::attestation(&owner, &agent.public_key().to_hex()).unwrap();
+        let attestation = crate::agents::attestation(&owner, &agent.public_key().to_hex());
         relay.publish_agent_profile(&agent, "clara", &attestation).await.unwrap();
         relay.publish_agent_listing(&agent.public_key().to_hex(), "clara", crate::harness::DEFAULT.runtime).await.unwrap();
         server.await.unwrap();

@@ -16,7 +16,10 @@ use tokio_tungstenite::tungstenite::Message;
 pub enum Live {
     /// Connected, authenticated and subscribed. Whatever happened while we were away is missing: refetch.
     Up,
+    /// The connection is gone (or could not be made); a retry follows.
     Down(String),
+    /// The relay said something in a NOTICE frame. The connection is fine, so this is not `Down`.
+    Notice(String),
     Event(Ev),
 }
 
@@ -43,7 +46,8 @@ pub fn spawn(relay: Arc<Relay>, channels: Vec<String>) -> LiveHandle {
             if started.elapsed() > Duration::from_secs(30) {
                 wait = 1; // it was a healthy connection that dropped: retry quickly
             }
-            tokio::time::sleep(Duration::from_secs(wait)).await;
+            // Jitter, so a relay that restarts is not met by every client in the same second.
+            tokio::time::sleep(Duration::from_secs(wait).mul_f64(1.0 + 0.25 * rand::random::<f64>())).await;
             wait = (wait * 2).min(20);
         }
     });
@@ -56,9 +60,6 @@ fn req(channels: &[String], since: u64) -> Value {
     json!(["REQ", "live", {"kinds": kinds, "#h": channels, "since": since}])
 }
 
-fn now() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
-}
 
 async fn session(relay: &Relay, tx: &mpsc::UnboundedSender<Live>, mut chan_rx: watch::Receiver<Vec<String>>) -> Result<()> {
     let (ws, _) = tokio::time::timeout(Duration::from_secs(15), tokio_tungstenite::connect_async(relay.ws_url()))
@@ -102,7 +103,7 @@ async fn session(relay: &Relay, tx: &mpsc::UnboundedSender<Live>, mut chan_rx: w
         }
     }
 
-    let since = now().saturating_sub(2);
+    let since = crate::clock::now_secs().saturating_sub(2);
     let channels = chan_rx.borrow_and_update().clone();
     if !channels.is_empty() {
         sink.send(Message::Text(req(&channels, since).to_string().into())).await?;
@@ -123,7 +124,7 @@ async fn session(relay: &Relay, tx: &mpsc::UnboundedSender<Live>, mut chan_rx: w
                         }
                     }
                     Ok(RelayMessage::Closed { message, .. }) => bail!("subscription closed by the relay: {message}"),
-                    Ok(RelayMessage::Notice { message }) => { let _ = tx.send(Live::Down(format!("relay notice: {message}"))); }
+                    Ok(RelayMessage::Notice { message }) => { let _ = tx.send(Live::Notice(message)); }
                     _ => {}
                 },
                 Some(Ok(Message::Ping(p))) => sink.send(Message::Pong(p)).await?,
@@ -136,7 +137,7 @@ async fn session(relay: &Relay, tx: &mpsc::UnboundedSender<Live>, mut chan_rx: w
                 let channels = chan_rx.borrow_and_update().clone();
                 sink.send(Message::Text(json!(["CLOSE", "live"]).to_string().into())).await?;
                 if !channels.is_empty() {
-                    sink.send(Message::Text(req(&channels, now().saturating_sub(2)).to_string().into())).await?;
+                    sink.send(Message::Text(req(&channels, crate::clock::now_secs().saturating_sub(2)).to_string().into())).await?;
                 }
             }
             _ = ping.tick() => sink.send(Message::Ping(Vec::new().into())).await?,

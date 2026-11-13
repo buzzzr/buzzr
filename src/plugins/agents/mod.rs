@@ -126,7 +126,7 @@ impl Agents {
                     }]
                 }
                 // A name that cannot be used is refused where it is typed, before the instructions are asked for.
-                Err(e) => vec![PluginOutput::Flash(e), self.prompt_name()],
+                Err(e) => vec![PluginOutput::Flash(e.to_string()), self.prompt_name()],
             },
             ("instructions", Some(text)) => {
                 if self.step != Some(Step::Instructions) {

@@ -21,9 +21,10 @@ into `AppEvent`s. Because `App` never touches the network or the terminal, its b
 
 | File | Role |
 |---|---|
-| `main.rs` | Arguments, wiring of setup and relay, terminal setup/restore (raw mode, alternate screen, mouse, bracketed paste, kitty keyboard flags), the `select!` loop, `run(Cmd)`. Everything else lives in the library (`lib.rs`), so a plugin crate can depend on it. |
+| `main.rs` | Arguments, wiring of setup and relay, terminal setup/restore (raw mode, alternate screen, mouse, bracketed paste, kitty keyboard flags), the `select!` loop, `run(Cmd)` (each relay call is one `request(...)`), and `Disk`, the ordered writer for the small state files. Everything else lives in the library (`lib.rs`), so a plugin crate can depend on it. |
+| `clock.rs` | `now_secs()`, the one place the wall clock is read as Unix seconds. |
 | `lib.rs` | The library: the modules below, exposed so a **compiled-in** plugin can live in a crate of its own and register through `register_plugin!`. `main.rs` is a thin shell over it. |
-| `app.rs` | State and behaviour: channels, stores, view (channel or thread), focus, overlays, selection and scroll, input, commands, mentions, unread, typing, clipboard requests. `app/tests.rs` has the tests. |
+| `app.rs` | State and behaviour: channels, stores, view (channel or thread), focus, overlays, selection and scroll, input, commands, mentions, unread, typing, clipboard requests. The behaviour is split by feature into further `impl App` blocks: `app/palette.rs` (the command line and palette), `app/people.rs` (membership, DMs, invitations, directory), `app/plugins.rs` (plugin events, prompts, panels, the projection), `app/reactions.rs` (react, edit, delete) and `app/search.rs`. `app/tests.rs` has the tests. |
 | `ui.rs` | Drawing: header, channel list, plugin panes, message list, typing line, status line, input box, footer, key panel, help. |
 | `list.rs` | Geometry of the message list: offsets, hit-testing, anchors that keep the reader's place, selection scrolling. Pure. |
 | `markdown.rs` | Message text -> wrapped styled lines + link positions. Strips control characters first. |

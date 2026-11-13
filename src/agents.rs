@@ -10,6 +10,7 @@
 //! creation is accepted.
 
 use crate::config::{self, Paths};
+use crate::relay::Relay;
 use nostr::nips::nip19::ToBech32;
 use nostr::Keys;
 use sha2::{Digest, Sha256};
@@ -24,6 +25,45 @@ const INSTRUCTIONS_MAX: usize = 4096;
 
 /// The longest model id or thinking level kept (they are short ids, not prose).
 const CHOICE_MAX: usize = 64;
+
+/// Why an agent could not be made, read, written or deleted. Callers that only show the problem turn it into text (`Display`, or
+/// `String::from`, which `?` uses); the variants let the ones that must react (a duplicate name, an agent that is not here) match
+/// on the cause rather than on its message.
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("an agent needs a name")]
+    NameEmpty,
+    #[error("a name can be at most {NAME_MAX} characters")]
+    NameTooLong,
+    #[error("a name cannot contain control characters")]
+    NameControl,
+    #[error("{0} is not a harness buzzr knows")]
+    UnknownHarness(String),
+    #[error("an agent called {0} already exists")]
+    Duplicate(String),
+    #[error("{0} is not an agent on this device")]
+    NotHere(String),
+    #[error("{pubkey} is not in {path}")]
+    NotInFile { pubkey: String, path: String },
+    #[error("could not read {path}: {source}")]
+    Read { path: String, source: std::io::Error },
+    #[error("{0} is not readable JSON; move it aside to start again")]
+    Unreadable(String),
+    #[error("could not write {path}: {source}")]
+    Write { path: String, source: std::io::Error },
+    #[error("could not make {path}: {source}")]
+    MakeDir { path: String, source: std::io::Error },
+    #[error("could not protect {path}: {source}")]
+    Protect { path: String, source: std::io::Error },
+    #[error("the saved key for {name} is not usable: {reason}")]
+    BadKey { name: String, reason: String },
+}
+
+impl From<Error> for String {
+    fn from(e: Error) -> String {
+        e.to_string()
+    }
+}
 
 /// One local agent: everything the panel shows. The private key it speaks with is not here.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -105,11 +145,11 @@ pub fn load_with_keys(path: &Path) -> Vec<(Agent, Keys)> {
         .unwrap_or_default()
 }
 
-fn read(path: &Path) -> Result<File, String> {
+fn read(path: &Path) -> Result<File, Error> {
     match std::fs::read_to_string(path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(File::default()),
-        Err(e) => Err(format!("could not read {}: {e}", path.display())),
-        Ok(text) => serde_json::from_str(&text).map_err(|_| format!("{} is not readable JSON; move it aside to start again", path.display())),
+        Err(source) => Err(Error::Read { path: path.display().to_string(), source }),
+        Ok(text) => serde_json::from_str(&text).map_err(|_| Error::Unreadable(path.display().to_string())),
     }
 }
 
@@ -142,13 +182,13 @@ impl Pending {
 ///
 /// `harness` is an id from the harness table (`harness.rs`); `model` and `effort` are what the harness offered and the
 /// user picked, either of which may be empty for the harness's own choice.
-pub fn prepare(paths: &Paths, name: &str, instructions: &str, harness: &str, model: &str, effort: &str) -> Result<Pending, String> {
+pub fn prepare(paths: &Paths, name: &str, instructions: &str, harness: &str, model: &str, effort: &str) -> Result<Pending, Error> {
     let name = clean_name(name)?;
     let instructions = clean_instructions(instructions);
-    let harness = crate::harness::get(harness).ok_or_else(|| format!("{harness} is not a harness buzzr knows"))?;
+    let harness = crate::harness::get(harness).ok_or_else(|| Error::UnknownHarness(harness.to_owned()))?;
     let file = read(&paths.agents())?;
     if file.agents.iter().any(|r| r.name.eq_ignore_ascii_case(&name)) {
-        return Err(format!("an agent called {name} already exists"));
+        return Err(Error::Duplicate(name));
     }
     let workspace = workspace_for(paths, &name, &file.agents);
     let keys = Keys::generate();
@@ -160,23 +200,23 @@ pub fn prepare(paths: &Paths, name: &str, instructions: &str, harness: &str, mod
         effort: clean_choice(effort),
         workspace: workspace.display().to_string(),
         instructions,
-        created_at: now(),
+        created_at: crate::clock::now_secs(),
     };
     Ok(Pending { agent, keys })
 }
 
 /// Write a prepared agent down: a folder of its own, and its record (with its key) appended to `agents.json`. Returns
 /// what the panel shows; the key goes to that file and nowhere else.
-pub fn commit(paths: &Paths, pending: &Pending) -> Result<Agent, String> {
+pub fn commit(paths: &Paths, pending: &Pending) -> Result<Agent, Error> {
     let agent = &pending.agent;
     let mut file = read(&paths.agents())?;
     if file.agents.iter().any(|r| r.name.eq_ignore_ascii_case(&agent.name)) {
-        return Err(format!("an agent called {} already exists", agent.name));
+        return Err(Error::Duplicate(agent.name.clone()));
     }
     let record = Record {
         name: agent.name.clone(),
         pubkey: agent.pubkey.clone(),
-        nsec: pending.keys.secret_key().to_bech32().map_err(|e| e.to_string())?,
+        nsec: pending.keys.secret_key().to_bech32().unwrap_or_else(|never| match never {}),
         harness: agent.harness.clone(),
         model: agent.model.clone(),
         effort: agent.effort.clone(),
@@ -188,7 +228,7 @@ pub fn commit(paths: &Paths, pending: &Pending) -> Result<Agent, String> {
     make_private_dir(Path::new(&agent.workspace))?;
     file.agents.push(record);
     let doc = Zeroizing::new(serde_json::to_string_pretty(&file).expect("a json value serialises") + "\n");
-    config::write_private(&paths.agents(), &doc).map_err(|e| format!("could not write {}: {e}", paths.agents().display()))?;
+    write_file(paths, &doc)?;
     Ok(agent.clone())
 }
 
@@ -196,7 +236,7 @@ pub fn commit(paths: &Paths, pending: &Pending) -> Result<Agent, String> {
 /// and a record appended to `agents.json`. Returns what the panel shows; the key goes to that file and nowhere else. A
 /// caller that publishes the agent uses [`prepare`] and [`commit`] instead, so a relay that refuses it leaves nothing
 /// behind; the flow that picks a harness, model and effort uses those too.
-pub fn create(paths: &Paths, name: &str, instructions: &str) -> Result<Agent, String> {
+pub fn create(paths: &Paths, name: &str, instructions: &str) -> Result<Agent, Error> {
     let pending = prepare(paths, name, instructions, crate::harness::DEFAULT.id, "", "")?;
     commit(paths, &pending)
 }
@@ -206,23 +246,23 @@ pub fn create(paths: &Paths, name: &str, instructions: &str) -> Result<Agent, St
 /// The folder the agent worked in is left alone: deleting an agent in Buzz deletes its key from the device and leaves
 /// its working directory (it may hold the agent's own work). A pubkey that is not in the file is refused, and a file
 /// that cannot be read is not written over, so nothing else in it is lost.
-pub fn remove(paths: &Paths, pubkey: &str) -> Result<Agent, String> {
+pub fn remove(paths: &Paths, pubkey: &str) -> Result<Agent, Error> {
     let mut file = read(&paths.agents())?;
     let Some(at) = file.agents.iter().position(|r| r.pubkey == pubkey) else {
-        return Err(format!("{pubkey} is not an agent on this device"));
+        return Err(Error::NotHere(pubkey.to_owned()));
     };
     let gone = file.agents.remove(at).agent();
     let doc = Zeroizing::new(serde_json::to_string_pretty(&file).expect("a json value serialises") + "\n");
-    config::write_private(&paths.agents(), &doc).map_err(|e| format!("could not write {}: {e}", paths.agents().display()))?;
+    write_file(paths, &doc)?;
     Ok(gone)
 }
 
 /// The agent's own key, read back from the record file — the only place it is kept. Used to sign the agent's own
 /// events (its kind-0 profile), which are the agent's, not the person's.
-pub fn keys_of(path: &Path, pubkey: &str) -> Result<Keys, String> {
+pub fn keys_of(path: &Path, pubkey: &str) -> Result<Keys, Error> {
     let file = read(path)?;
-    let record = file.agents.iter().find(|r| r.pubkey == pubkey).ok_or_else(|| format!("{pubkey} is not in {}", path.display()))?;
-    Keys::parse(&record.nsec).map_err(|e| format!("the saved key for {} is not usable: {e}", record.name))
+    let record = file.agents.iter().find(|r| r.pubkey == pubkey).ok_or_else(|| Error::NotInFile { pubkey: pubkey.to_owned(), path: path.display().to_string() })?;
+    Keys::parse(&record.nsec).map_err(|e| Error::BadKey { name: record.name.clone(), reason: e.to_string() })
 }
 
 /// The owner's attestation for one agent, as the JSON an `auth` tag holds: `["auth", <owner>, <conditions>, <sig>]`.
@@ -230,25 +270,25 @@ pub fn keys_of(path: &Path, pubkey: &str) -> Result<Keys, String> {
 /// The owner signs the SHA-256 of `nostr:agent-auth:<agent>:<conditions>`; empty conditions (the only kind made here)
 /// mean no limit. A Buzz client reads this tag from the agent's own newest kind-0 profile to tell whose agent it is, so
 /// it is what makes the agent's identity provably the owner's rather than a bare local record.
-pub fn attestation(owner: &Keys, agent_pubkey: &str) -> Result<String, String> {
+pub fn attestation(owner: &Keys, agent_pubkey: &str) -> String {
     let digest: [u8; 32] = Sha256::digest(format!("nostr:agent-auth:{agent_pubkey}:").as_bytes()).into();
     let message = nostr::secp256k1::Message::from_digest(digest);
     let signature = owner.sign_schnorr(&message);
-    Ok(serde_json::to_string(&["auth", &owner.public_key().to_hex(), "", &signature.to_string()]).expect("a JSON array serialises"))
+    serde_json::to_string(&["auth", &owner.public_key().to_hex(), "", &signature.to_string()]).expect("a JSON array serialises")
 }
 
 /// A name with its whitespace tidied: what is shown and what the agent is called. Public so the two-step flow can
 /// refuse a name the moment it is typed, rather than after the instructions as well.
-pub fn clean_name(name: &str) -> Result<String, String> {
+pub fn clean_name(name: &str) -> Result<String, Error> {
     let name = name.split_whitespace().collect::<Vec<_>>().join(" ");
     if name.is_empty() {
-        return Err("an agent needs a name".into());
+        return Err(Error::NameEmpty);
     }
     if name.chars().count() > NAME_MAX {
-        return Err(format!("a name can be at most {NAME_MAX} characters"));
+        return Err(Error::NameTooLong);
     }
     if name.chars().any(char::is_control) {
-        return Err("a name cannot contain control characters".into());
+        return Err(Error::NameControl);
     }
     Ok(name)
 }
@@ -306,15 +346,57 @@ fn slug_of(name: &str) -> String {
 }
 
 /// A folder only the owner can look into.
-fn make_private_dir(dir: &Path) -> Result<(), String> {
+fn make_private_dir(dir: &Path) -> Result<(), Error> {
     use std::os::unix::fs::PermissionsExt;
-    std::fs::create_dir_all(dir).map_err(|e| format!("could not make {}: {e}", dir.display()))?;
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).map_err(|e| format!("could not protect {}: {e}", dir.display()))
+    let path = || dir.display().to_string();
+    std::fs::create_dir_all(dir).map_err(|source| Error::MakeDir { path: path(), source })?;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).map_err(|source| Error::Protect { path: path(), source })
 }
 
-fn now() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+/// `agents.json` replaced with `doc` (mode 600; it holds keys).
+fn write_file(paths: &Paths, doc: &str) -> Result<(), Error> {
+    config::write_private(&paths.agents(), doc).map_err(|e| Error::Write { path: paths.agents().display().to_string(), source: e })
 }
+
+/// The relay half of creating an agent, then the disk half. The relay comes first: the agent is checked and its key made in
+/// memory, published, and only written down (its folder and its record) once the relay has taken it — so an agent the
+/// relay refuses is not created at all. The harness, model and thinking level the flow picked are named here; the
+/// harness is one buzzr knows (or `prepare` refuses it), and the picks may be empty for the harness's own choice.
+pub async fn create_and_publish(relay: &Relay, paths: &Paths, name: &str, instructions: &str, harness: &str, model: &str, effort: &str) -> anyhow::Result<Agent> {
+    let pending = prepare(paths, name, instructions, harness, model, effort)?;
+    publish(relay, &pending).await?;
+    Ok(commit(paths, &pending)?)
+}
+
+/// The relay half of `/agents create`: the agent's own kind-0 profile — signed by the agent's key and sent as the agent,
+/// carrying this identity's attestation — and then this identity's listing of it. Either failing is reported, and nothing
+/// is written locally, so the agent is not created.
+async fn publish(relay: &Relay, pending: &Pending) -> anyhow::Result<()> {
+    let agent = pending.agent();
+    // The listing names the agent type the harness runs (`pluginId/typeId`), so an owner's client can resolve it.
+    let runtime = crate::harness::get(&agent.harness).map(|h| h.runtime).unwrap_or(crate::harness::DEFAULT.runtime);
+    let attestation = attestation(relay.keys(), &agent.pubkey);
+    relay.publish_agent_profile(pending.keys(), &agent.name, &attestation).await?;
+    relay.publish_agent_listing(&agent.pubkey, &agent.name, runtime).await?;
+    Ok(())
+}
+
+/// Delete a local agent and take it off the relay: the agent's own kind-0 profile — signed by its own key, and sent as the
+/// agent, carrying the owner's attestation, exactly as its profile and its answers are — and then this identity's kind-30177
+/// listing of it. Only once the relay has taken both is the record (with the only copy of its key) deleted from
+/// `agents.json`, so a relay that refuses it leaves the agent in place, listed and running. The folder the agent worked in
+/// is left alone, as deleting an agent in Buzz leaves its working directory.
+pub async fn delete_and_unpublish(relay: &Relay, paths: &Paths, pubkey: &str) -> anyhow::Result<Agent> {
+    let Some((agent, keys)) = load_with_keys(&paths.agents()).into_iter().find(|(a, _)| a.pubkey == pubkey) else {
+        return Err(Error::NotHere(pubkey.to_owned()).into());
+    };
+    let owner = relay.keys().public_key().to_hex();
+    let own = Relay::new(relay.base_url(), keys, Some(attestation(relay.keys(), &agent.pubkey)))?;
+    own.delete_coordinate(&format!("0:{}:", agent.pubkey)).await?;
+    relay.delete_coordinate(&format!("30177:{owner}:{}", agent.pubkey)).await?;
+    Ok(remove(paths, &agent.pubkey)?)
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -376,7 +458,7 @@ mod tests {
     fn an_agent_is_made_on_a_harness_buzzr_knows_and_keeps_the_choices_tidied() {
         let paths = temp_paths();
         // a harness this build does not know is refused before anything is made
-        let err = prepare(&paths, "Scout", "", "not-a-harness", "", "").unwrap_err();
+        let err = prepare(&paths, "Scout", "", "not-a-harness", "", "").unwrap_err().to_string();
         assert!(err.contains("not a harness"), "{err}");
         assert!(!paths.agents().exists(), "nothing was written");
         // model and effort are trimmed, and an empty one is the harness's own choice, not an empty string
@@ -410,7 +492,7 @@ mod tests {
         let b = create(&paths, "Scout!", "").unwrap(); // a different name that wants the same folder
         assert_ne!(a.pubkey, b.pubkey);
         assert_eq!(b.workspace, a.workspace.replace("scout", "scout-2"), "a taken folder gets a suffix");
-        assert!(create(&paths, "Scout", "").unwrap_err().contains("already exists"));
+        assert!(create(&paths, "Scout", "").unwrap_err().to_string().contains("already exists"));
         assert_eq!(load(&paths.agents()).len(), 2);
         std::fs::remove_dir_all(paths.dir()).unwrap();
     }
@@ -428,7 +510,7 @@ mod tests {
         // the folder is left alone: it may hold the agent's own work
         assert!(Path::new(&gone.workspace).is_dir(), "its working directory is kept");
         // a pubkey that is not an agent here is refused, and the file is not touched
-        let err = remove(&paths, &"00".repeat(32)).unwrap_err();
+        let err = remove(&paths, &"00".repeat(32)).unwrap_err().to_string();
         assert!(err.contains("not an agent"), "{err}");
         assert_eq!(load(&paths.agents()), vec![b], "nothing else was dropped");
         std::fs::remove_dir_all(paths.dir()).unwrap();
@@ -439,7 +521,7 @@ mod tests {
         let paths = temp_paths();
         std::fs::create_dir_all(paths.dir()).unwrap();
         std::fs::write(paths.agents(), "not json").unwrap();
-        let err = remove(&paths, &"aa".repeat(32)).unwrap_err();
+        let err = remove(&paths, &"aa".repeat(32)).unwrap_err().to_string();
         assert!(err.contains("not readable JSON"), "{err}");
         assert_eq!(std::fs::read_to_string(paths.agents()).unwrap(), "not json", "the file is left alone");
         std::fs::remove_dir_all(paths.dir()).unwrap();
@@ -449,7 +531,7 @@ mod tests {
     fn a_name_that_cannot_be_shown_is_refused() {
         let paths = temp_paths();
         for bad in ["", "   ", "\u{1b}[31mred", &"x".repeat(NAME_MAX + 1)] {
-            let err = create(&paths, bad, "").unwrap_err();
+            let err = create(&paths, bad, "").unwrap_err().to_string();
             assert!(!err.is_empty(), "{bad:?} must be refused");
         }
         assert!(!paths.agents().exists(), "nothing was written");
@@ -462,7 +544,7 @@ mod tests {
         std::fs::create_dir_all(paths.dir()).unwrap();
         std::fs::write(paths.agents(), "not json").unwrap();
         assert!(load(&paths.agents()).is_empty(), "a damaged file is no agents, not a panic");
-        let err = create(&paths, "Scout", "").unwrap_err();
+        let err = create(&paths, "Scout", "").unwrap_err().to_string();
         assert!(err.contains("not readable JSON"), "{err}");
         assert_eq!(std::fs::read_to_string(paths.agents()).unwrap(), "not json", "the file is left alone");
         std::fs::remove_dir_all(paths.dir()).unwrap();
@@ -474,7 +556,7 @@ mod tests {
         use std::str::FromStr;
         let owner = Keys::parse(&"11".repeat(32)).unwrap();
         let agent = Keys::generate();
-        let tag: Vec<String> = serde_json::from_str(&attestation(&owner, &agent.public_key().to_hex()).unwrap()).unwrap();
+        let tag: Vec<String> = serde_json::from_str(&attestation(&owner, &agent.public_key().to_hex())).unwrap();
         assert_eq!(tag.len(), 4, "an auth tag is exactly [auth, owner, conditions, sig]");
         assert_eq!(tag[0], "auth");
         assert_eq!(tag[1], owner.public_key().to_hex());

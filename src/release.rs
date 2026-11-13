@@ -9,7 +9,7 @@
 
 use crate::update::InstallSource;
 use std::path::Path;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 /// How long a check stays good. A day, as `gh` uses: releases are not urgent, one request is plenty.
 pub const INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
@@ -32,10 +32,6 @@ pub fn enabled() -> bool {
     crate::config::env("NO_UPDATE_CHECK").is_none()
 }
 
-/// Unix seconds.
-pub fn now_secs() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
-}
 
 /// What the last check learned, kept between runs.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -91,7 +87,7 @@ pub async fn fetch() -> Result<String, String> {
 /// One throttled check: ask, remember that we asked, and return the newer version when there is one.
 pub async fn check_and_store(state_path: &Path) -> Option<String> {
     let mut state = State::load(state_path);
-    state.checked_at = now_secs();
+    state.checked_at = crate::clock::now_secs();
     let newer = match fetch().await {
         Ok(version) if is_newer(&version, CURRENT) => {
             state.latest = Some(version.clone());
