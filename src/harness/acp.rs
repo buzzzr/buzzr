@@ -8,8 +8,8 @@
 //! * [`probe`] reads that much and stops: it is what `/agents create` shows before it makes an agent, and the "does
 //!   this harness work?" check. The process is killed as soon as the answer is read.
 //! * [`Session`] keeps the process and runs one turn over it: `session/prompt` answers with the reply the harness
-//!   streams as `agent_message_chunk` updates, and `session/request_permission` is answered as the harness asks (with
-//!   the option that allows the call). That is how a local agent answers a mention (see `runner.rs`).
+//!   streams as `agent_message_chunk` updates, and `session/request_permission` is answered by a fixed policy (read-only tools allowed,
+//!   everything else refused unless `BUZZR_AGENT_ALLOW_TOOLS=1`). That is how a local agent answers a mention (see `runner.rs`).
 //!
 //! (The Buzz app's ACP client reads the same fields, under `session/new`, `session/set_config_option`,
 //! `session/prompt` and `session/update`.)
@@ -206,7 +206,7 @@ impl Session {
     }
 
     /// Run one turn: send `text` as the prompt and return the reply the harness streamed back. A harness that asks
-    /// permission to use a tool is answered with the option that allows the call, so a turn never stalls on a prompt
+    /// permission to use a tool is answered by [`allow`]'s policy (a read-only tool is allowed, the rest refused), so a turn never stalls on a prompt
     /// nobody is there to answer. `Err` is the harness refusing the prompt, going quiet, or stopping.
     pub fn prompt(&mut self, text: &str) -> Result<String, String> {
         let lead = std::mem::take(&mut self.preamble);
@@ -273,9 +273,23 @@ fn chunk(params: &Value) -> Option<&str> {
     update.get("content")?.get("text")?.as_str()
 }
 
-/// The outcome for a `session/request_permission`: the option that allows the call, preferring one that keeps
-/// allowing, and `cancelled` when the harness offered no such option.
+/// Set to `1` to let an agent run every tool without asking (`BUZZR_AGENT_ALLOW_TOOLS=1`). Off by default: see [`allow`].
+const ALLOW_ALL_ENV: &str = "BUZZR_AGENT_ALLOW_TOOLS";
+
+/// The tool kinds that only look: they change nothing and send nothing out.
+const READ_ONLY_KINDS: [&str; 3] = ["read", "search", "think"];
+
+/// The outcome for a `session/request_permission`. A turn has nobody to ask, so the policy is fixed: by default only a
+/// read-only tool (`read`, `search`, `think`) is allowed and anything else (shell, edits, network) is refused, so text
+/// a stranger got into the prompt cannot run code as the owner. `BUZZR_AGENT_ALLOW_TOOLS=1` allows everything. The
+/// outcome is `cancelled` when the harness offered no option of the kind wanted.
 fn allow(params: &Value) -> Value {
+    decide(params, std::env::var(ALLOW_ALL_ENV).is_ok_and(|v| v == "1"))
+}
+
+fn decide(params: &Value, all: bool) -> Value {
+    let kind = params.get("toolCall").and_then(|t| t.get("kind")).and_then(Value::as_str).unwrap_or("");
+    let permitted = all || READ_ONLY_KINDS.contains(&kind);
     let options = params.get("options").and_then(Value::as_array).cloned().unwrap_or_default();
     let option = |kind: &str| {
         options
@@ -284,7 +298,12 @@ fn allow(params: &Value) -> Value {
             .and_then(|o| o.get("optionId"))
             .and_then(Value::as_str)
     };
-    match option("allow_always").or_else(|| option("allow_once")) {
+    let chosen = if permitted {
+        option("allow_always").or_else(|| option("allow_once"))
+    } else {
+        option("reject_once").or_else(|| option("reject_always"))
+    };
+    match chosen {
         Some(id) => json!({ "outcome": "selected", "optionId": id }),
         None => json!({ "outcome": "cancelled" }),
     }
@@ -488,14 +507,18 @@ mod tests {
     }
 
     #[test]
-    fn the_permission_outcome_allows_the_call_and_prefers_the_one_that_keeps_allowing() {
-        let params = json!({"options":[{"optionId":"once","kind":"allow_once"},{"optionId":"always","kind":"allow_always"}]});
-        assert_eq!(allow(&params), json!({"outcome":"selected","optionId":"always"}));
-        let only_once = json!({"options":[{"optionId":"once","kind":"allow_once"},{"optionId":"no","kind":"reject_once"}]});
-        assert_eq!(allow(&only_once), json!({"outcome":"selected","optionId":"once"}));
-        assert_eq!(allow(&json!({"options":[]})), json!({"outcome":"cancelled"}), "no allowing option is no permission");
-        assert_eq!(allow(&json!({})), json!({"outcome":"cancelled"}));
+    fn a_permission_is_granted_to_a_read_only_tool_and_refused_to_any_other_unless_all_are_allowed() {
+        let opts = json!([{"optionId":"once","kind":"allow_once"},{"optionId":"always","kind":"allow_always"},{"optionId":"no","kind":"reject_once"}]);
+        let call = |kind: &str| json!({"toolCall":{"kind":kind},"options":opts});
+        assert_eq!(decide(&call("read"), false), json!({"outcome":"selected","optionId":"always"}));
+        assert_eq!(decide(&call("execute"), false), json!({"outcome":"selected","optionId":"no"}), "a shell is refused");
+        assert_eq!(decide(&call("edit"), false), json!({"outcome":"selected","optionId":"no"}));
+        assert_eq!(decide(&json!({"options":opts}), false), json!({"outcome":"selected","optionId":"no"}), "an unknown kind is refused");
+        assert_eq!(decide(&call("execute"), true), json!({"outcome":"selected","optionId":"always"}), "opted in, everything runs");
+        assert_eq!(decide(&json!({"toolCall":{"kind":"read"},"options":[]}), false), json!({"outcome":"cancelled"}));
+        assert_eq!(decide(&json!({}), true), json!({"outcome":"cancelled"}));
     }
+
 
     #[test]
     fn a_session_capability_is_read_from_the_initialize_answer() {
