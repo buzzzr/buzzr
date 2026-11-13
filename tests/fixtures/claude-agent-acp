@@ -30,7 +30,7 @@ while IFS= read -r line; do
     *'"session/set_config_option"'*) say "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"configOptions\":[{\"id\":\"model\",\"category\":\"model\",\"currentValue\":\"opus\",\"options\":[{\"value\":\"sonnet\"},{\"value\":\"opus\"}]},{\"id\":\"thought_level\",\"category\":\"thought_level\",\"currentValue\":\"high\",\"options\":[{\"value\":\"low\"},{\"value\":\"high\"}]}]}}" ;;
     *'"session/prompt"'*)
       # A turn asks permission for its tool call, and waits for the client to answer before it goes on.
-      say '{"jsonrpc":"2.0","id":424242,"method":"session/request_permission","params":{"sessionId":"s1","toolCall":{"toolCallId":"t1","kind":"read"},"options":[{"optionId":"no","name":"No","kind":"reject_once"},{"optionId":"yes","name":"Yes","kind":"allow_always"}]}}'
+      say '{"jsonrpc":"2.0","id":424242,"method":"session/request_permission","params":{"sessionId":"s1","toolCall":{"toolCallId":"t1"},"options":[{"optionId":"no","name":"No","kind":"reject_once"},{"optionId":"yes","name":"Yes","kind":"allow_always"}]}}'
       answer=""
       while IFS= read -r reply; do
         case "$reply" in

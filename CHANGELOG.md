@@ -7,8 +7,7 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
 
 ### Security
 
-- A local agent answers **only its owner**: a mention from anyone else is ignored. Its tool calls are no longer auto-allowed: only read-only tools
-  (`read`, `search`, `think`) run; set `BUZZR_AGENT_ALLOW_TOOLS=1` to allow everything. Earlier thread messages are marked as untrusted in the prompt.
+- A local agent answers **only its owner**: a mention from anyone else is ignored. Earlier thread messages are marked as untrusted in the prompt.
 - Every event is checked for a valid id and signature when it comes in; a forged or altered event is dropped.
 
 ### Changed
@@ -104,8 +103,7 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
 
 ### Security
 
-- A local agent answers **only its owner**: a mention from anyone else is ignored. Its tool calls are no longer auto-allowed: only read-only tools
-  (`read`, `search`, `think`) run; set `BUZZR_AGENT_ALLOW_TOOLS=1` to allow everything. Earlier thread messages are marked as untrusted in the prompt.
+- A local agent answers **only its owner**: a mention from anyone else is ignored. Earlier thread messages are marked as untrusted in the prompt.
 - Every event is checked for a valid id and signature when it comes in; a forged or altered event is dropped.
 
 ### Changed
@@ -149,8 +147,7 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
 
 ### Security
 
-- A local agent answers **only its owner**: a mention from anyone else is ignored. Its tool calls are no longer auto-allowed: only read-only tools
-  (`read`, `search`, `think`) run; set `BUZZR_AGENT_ALLOW_TOOLS=1` to allow everything. Earlier thread messages are marked as untrusted in the prompt.
+- A local agent answers **only its owner**: a mention from anyone else is ignored. Earlier thread messages are marked as untrusted in the prompt.
 - Every event is checked for a valid id and signature when it comes in; a forged or altered event is dropped.
 
 ### Changed
@@ -176,8 +173,7 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
 
 ### Security
 
-- A local agent answers **only its owner**: a mention from anyone else is ignored. Its tool calls are no longer auto-allowed: only read-only tools
-  (`read`, `search`, `think`) run; set `BUZZR_AGENT_ALLOW_TOOLS=1` to allow everything. Earlier thread messages are marked as untrusted in the prompt.
+- A local agent answers **only its owner**: a mention from anyone else is ignored. Earlier thread messages are marked as untrusted in the prompt.
 - Every event is checked for a valid id and signature when it comes in; a forged or altered event is dropped.
 
 ### Changed
@@ -208,8 +204,7 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
 
 ### Security
 
-- A local agent answers **only its owner**: a mention from anyone else is ignored. Its tool calls are no longer auto-allowed: only read-only tools
-  (`read`, `search`, `think`) run; set `BUZZR_AGENT_ALLOW_TOOLS=1` to allow everything. Earlier thread messages are marked as untrusted in the prompt.
+- A local agent answers **only its owner**: a mention from anyone else is ignored. Earlier thread messages are marked as untrusted in the prompt.
 - Every event is checked for a valid id and signature when it comes in; a forged or altered event is dropped.
 
 ### Changed
