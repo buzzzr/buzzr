@@ -257,6 +257,27 @@ pub fn remove(paths: &Paths, pubkey: &str) -> Result<Agent, Error> {
     Ok(gone)
 }
 
+/// Change an agent's name and instructions in `agents.json`, returning it as it now is. Its key, harness, model and folder
+/// stay as they were. A name another agent has is refused, and so is a pubkey that is not in the file; a file that cannot
+/// be read is left alone.
+pub fn update(paths: &Paths, pubkey: &str, name: &str, instructions: &str) -> Result<Agent, Error> {
+    let name = clean_name(name)?;
+    let instructions = clean_instructions(instructions);
+    let mut file = read(&paths.agents())?;
+    if file.agents.iter().any(|r| r.pubkey != pubkey && r.name.eq_ignore_ascii_case(&name)) {
+        return Err(Error::Duplicate(name));
+    }
+    let Some(record) = file.agents.iter_mut().find(|r| r.pubkey == pubkey) else {
+        return Err(Error::NotHere(pubkey.to_owned()));
+    };
+    record.name = name;
+    record.instructions = instructions;
+    let agent = record.agent();
+    let doc = Zeroizing::new(serde_json::to_string_pretty(&file).expect("a json value serialises") + "\n");
+    write_file(paths, &doc)?;
+    Ok(agent)
+}
+
 /// The agent's own key, read back from the record file — the only place it is kept. Used to sign the agent's own
 /// events (its kind-0 profile), which are the agent's, not the person's.
 pub fn keys_of(path: &Path, pubkey: &str) -> Result<Keys, Error> {
@@ -379,6 +400,27 @@ async fn publish(relay: &Relay, pending: &Pending) -> anyhow::Result<()> {
     relay.publish_agent_profile(pending.keys(), &agent.name, &attestation).await?;
     relay.publish_agent_listing(&agent.pubkey, &agent.name, runtime).await?;
     Ok(())
+}
+
+/// Edit a local agent and tell the relay. Both of the agent's relay events are replaceable, so a new name is published by
+/// sending them again: the agent's own kind-0 profile (signed by its key, with the owner's attestation) and then this
+/// identity's kind-30177 listing. Only once the relay has taken them is the record changed, so a relay that refuses
+/// leaves the agent as it was. Instructions never leave this device, so an edit of those alone writes nothing to the relay.
+pub async fn update_and_publish(relay: &Relay, paths: &Paths, pubkey: &str, name: &str, instructions: &str) -> anyhow::Result<Agent> {
+    let name = clean_name(name)?;
+    let Some((agent, keys)) = load_with_keys(&paths.agents()).into_iter().find(|(a, _)| a.pubkey == pubkey) else {
+        return Err(Error::NotHere(pubkey.to_owned()).into());
+    };
+    if load(&paths.agents()).iter().any(|a| a.pubkey != pubkey && a.name.eq_ignore_ascii_case(&name)) {
+        return Err(Error::Duplicate(name).into());
+    }
+    if name != agent.name {
+        let runtime = crate::harness::get(&agent.harness).map(|h| h.runtime).unwrap_or(crate::harness::DEFAULT.runtime);
+        let attestation = attestation(relay.keys(), &agent.pubkey);
+        relay.publish_agent_profile(&keys, &name, &attestation).await?;
+        relay.publish_agent_listing(&agent.pubkey, &name, runtime).await?;
+    }
+    Ok(update(paths, pubkey, &name, instructions)?)
 }
 
 /// Delete a local agent and take it off the relay: the agent's own kind-0 profile — signed by its own key, and sent as the
@@ -513,6 +555,26 @@ mod tests {
         let err = remove(&paths, &"00".repeat(32)).unwrap_err().to_string();
         assert!(err.contains("not an agent"), "{err}");
         assert_eq!(load(&paths.agents()), vec![b], "nothing else was dropped");
+        std::fs::remove_dir_all(paths.dir()).unwrap();
+    }
+
+    #[test]
+    fn updating_an_agent_changes_its_name_and_instructions_only() {
+        let paths = temp_paths();
+        let a = create(&paths, "Scout", "watch the repo").unwrap();
+        let b = create(&paths, "Ranger", "").unwrap();
+        let got = update(&paths, &a.pubkey, "  Pathfinder ", "watch the other repo").unwrap();
+        assert_eq!(got.name, "Pathfinder");
+        assert_eq!(got.instructions, "watch the other repo");
+        assert_eq!((&got.pubkey, &got.workspace, &got.harness), (&a.pubkey, &a.workspace, &a.harness));
+        assert_eq!(load(&paths.agents()), vec![got, b], "the other agent is untouched");
+        assert_eq!(keys_of(&paths.agents(), &a.pubkey).unwrap().public_key().to_hex(), a.pubkey, "the key survives");
+        assert_eq!(mode(&paths.agents()), 0o600);
+        // keeping its own name (in another case) is not a duplicate; another agent's name is
+        assert!(update(&paths, &a.pubkey, "pathfinder", "x").is_ok());
+        assert!(update(&paths, &a.pubkey, "RANGER", "x").unwrap_err().to_string().contains("already exists"));
+        assert!(update(&paths, &a.pubkey, "", "x").is_err());
+        assert!(update(&paths, &"00".repeat(32), "Nobody", "").unwrap_err().to_string().contains("not an agent"));
         std::fs::remove_dir_all(paths.dir()).unwrap();
     }
 

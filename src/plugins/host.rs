@@ -448,6 +448,9 @@ impl Runtime {
                         self.emit(PluginEvent::CreateAgent { plugin: plugin.to_owned(), id, name, instructions, harness, model, effort })
                     }
                     FromPlugin::DeleteAgent { id, pubkey } => self.emit(PluginEvent::DeleteAgent { plugin: plugin.to_owned(), id, pubkey }),
+                    FromPlugin::UpdateAgent { id, pubkey, name, instructions } => {
+                        self.emit(PluginEvent::UpdateAgent { plugin: plugin.to_owned(), id, pubkey, name, instructions })
+                    }
                     FromPlugin::Log { level, text } => {
                         self.log(plugin, &format!("{level}: {text}"));
                         if level == "error" {
@@ -608,6 +611,15 @@ impl Runtime {
                         Err(e) => (None, Some(e.as_str())),
                     };
                     let _ = proc.stdin.send(ToPlugin::Deleted { id: &id, name, error }.line());
+                }
+            }
+            PluginCmd::Updated { plugin, id, result } => {
+                if let Some(proc) = self.running.get(&plugin) {
+                    let (name, error) = match &result {
+                        Ok(n) => (Some(n.as_str()), None),
+                        Err(e) => (None, Some(e.as_str())),
+                    };
+                    let _ = proc.stdin.send(ToPlugin::Updated { id: &id, name, error }.line());
                 }
             }
             PluginCmd::HarnessOffer { plugin, id, result } => {

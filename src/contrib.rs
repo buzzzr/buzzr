@@ -424,6 +424,8 @@ pub enum PluginEvent {
     CreateAgent { plugin: String, id: String, name: String, instructions: String, harness: String, model: String, effort: String },
     /// A plugin asks buzzr to delete a local agent (see `plugin::PluginOutput::DeleteAgent`).
     DeleteAgent { plugin: String, id: String, pubkey: String },
+    /// A plugin asks buzzr to change a local agent's name and instructions (see `plugin::PluginOutput::UpdateAgent`).
+    UpdateAgent { plugin: String, id: String, pubkey: String, name: String, instructions: String },
     Gone { id: String, why: String },
     Log { id: String, level: String, text: String },
 }
@@ -612,6 +614,8 @@ pub enum PluginCmd {
     Created { plugin: String, id: String, result: Result<crate::plugin::CreatedAgent, String> },
     /// The answer to a plugin's `DeleteAgent`: the name of the agent that was deleted, or why it was not.
     Deleted { plugin: String, id: String, result: Result<String, String> },
+    /// The answer to a plugin's `UpdateAgent`: the agent's name now, or why it was not changed.
+    Updated { plugin: String, id: String, result: Result<String, String> },
     /// The answer to a plugin's `ProbeHarness`: what the harness offers, or why it could not be asked.
     HarnessOffer { plugin: String, id: String, result: Result<crate::plugin::HarnessOffer, String> },
 }

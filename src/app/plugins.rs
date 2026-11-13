@@ -198,6 +198,7 @@ impl App {
                 model: a.model.clone(),
                 effort: a.effort.clone(),
                 workspace: a.workspace.clone(),
+                instructions: a.instructions.clone(),
                 created_at: a.created_at,
             })
             .collect()
@@ -345,6 +346,23 @@ impl App {
                 // The result comes back as `AppEvent::AgentDeleted`; the plugin that asked is answered with it.
                 self.pending_delete = Some((plugin, id));
                 vec![Cmd::DeleteAgent { pubkey }]
+            }
+            PluginEvent::UpdateAgent { plugin, id, pubkey, name, instructions } => {
+                if self.read_only {
+                    self.flash("read-only mode: nothing is written");
+                    return Vec::new();
+                }
+                if !self.plugin_may(&plugin, plugin::AGENTS_WRITE) {
+                    self.flash(format!("{} is not allowed to change agents", self.plugin_name(&plugin)));
+                    return Vec::new();
+                }
+                if self.pending_update.is_some() {
+                    self.flash(format!("{} asked to change an agent, but one is already being changed", self.plugin_name(&plugin)));
+                    return Vec::new();
+                }
+                // The result comes back as `AppEvent::AgentUpdated`; the plugin that asked is answered with it.
+                self.pending_update = Some((plugin, id));
+                vec![Cmd::UpdateAgent { pubkey, name, instructions }]
             }
             PluginEvent::Gone { id, why } => {
                 self.plugins.remove(&id);
