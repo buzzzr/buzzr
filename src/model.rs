@@ -38,9 +38,25 @@ impl Ev {
         serde_json::from_value(v.clone()).ok()
     }
 
+    /// Every tag called `name`, whole (`["p", pubkey, relay, role]`). The one place that reads a tag's name: callers do not
+    /// compare `t.first()` themselves.
+    pub fn tags_named<'a, 'n>(&'a self, name: &'n str) -> impl Iterator<Item = &'a [String]> + use<'a, 'n> {
+        self.tags.iter().filter(move |t| t.first().map(String::as_str) == Some(name)).map(Vec::as_slice)
+    }
+
     /// First value of the first tag called `name`.
     pub fn tag(&self, name: &str) -> Option<&str> {
-        self.tags.iter().find(|t| t.first().map(String::as_str) == Some(name)).and_then(|t| t.get(1)).map(String::as_str)
+        self.tags_named(name).next().and_then(|t| t.get(1)).map(String::as_str)
+    }
+
+    /// The first value of every tag called `name`, in order (the pubkeys of the `p` tags, the ids of the `e` tags).
+    pub fn tag_values<'a, 'n>(&'a self, name: &'n str) -> impl Iterator<Item = &'a str> + use<'a, 'n> {
+        self.tags_named(name).filter_map(|t| t.get(1)).map(String::as_str)
+    }
+
+    /// Whether a tag called `name` has exactly this first value.
+    pub fn has_tag(&self, name: &str, value: &str) -> bool {
+        self.tag_values(name).any(|v| v == value)
     }
 
     pub fn root_tag(&self) -> Option<&str> {
@@ -53,11 +69,7 @@ impl Ev {
 
     /// The `e` tag with a given marker (`root` or `reply`).
     fn e_marked(&self, marker: &str) -> Option<&str> {
-        self.tags
-            .iter()
-            .find(|t| t.first().map(String::as_str) == Some("e") && t.get(3).map(String::as_str) == Some(marker))
-            .and_then(|t| t.get(1))
-            .map(String::as_str)
+        self.tags_named("e").find(|t| t.get(3).map(String::as_str) == Some(marker)).and_then(|t| t.get(1)).map(String::as_str)
     }
 
     /// The message this one replies to directly.
@@ -77,7 +89,7 @@ impl Ev {
 
     /// A reply that its author also sent to the channel (`["broadcast","1"]`) is listed on the timeline.
     pub fn is_broadcast(&self) -> bool {
-        self.tags.iter().any(|t| t.first().map(String::as_str) == Some("broadcast") && t.get(1).map(String::as_str) == Some("1"))
+        self.has_tag("broadcast", "1")
     }
 
     /// Whether the channel timeline lists this message itself, rather than inside a thread.
@@ -162,10 +174,9 @@ impl Channel {
         let id = e.tag("d")?.to_owned();
         let name = e.tag("name").unwrap_or("").to_owned();
         // Direct messages all come with the generic name "DM"; they are labelled with the other participants instead.
-        let has = |tag: &str, value: Option<&str>| e.tags.iter().any(|t| t.first().map(String::as_str) == Some(tag) && value.is_none_or(|v| t.get(1).map(String::as_str) == Some(v)));
         let section = if name == "DM" {
             Section::Dms
-        } else if has("t", Some(SOLO_LABEL)) {
+        } else if e.has_tag("t", SOLO_LABEL) {
             Section::Solo
         } else {
             Section::Channels
@@ -175,7 +186,7 @@ impl Channel {
             label: name.clone(),
             about: e.tag("about").unwrap_or("").to_owned(),
             created_at: e.created_at,
-            is_private: has("private", None),
+            is_private: e.tags_named("private").next().is_some(),
             id,
             name,
         })
@@ -247,7 +258,7 @@ impl Store {
             }
             KIND_DELETION | KIND_DELETE_MESSAGE => {
                 let mut changed = false;
-                for t in e.tags.iter().filter(|t| t.first().map(String::as_str) == Some("e")) {
+                for t in e.tags_named("e") {
                     let Some(target) = t.get(1) else { continue };
                     // A deletion naming a reaction event undoes that reaction (NIP-09 over a kind:7); the target is a reaction,
                     // not a message, so it is not in `msgs` and must be pruned from `reactions` instead.
@@ -367,6 +378,17 @@ pub mod tests {
 
     fn nested(id: &str, at: u64, root: &str, parent: &str) -> Ev {
         ev(id, at, "nested", &[&["e", root, "", "root"], &["e", parent, "", "reply"]])
+    }
+
+    #[test]
+    fn tag_accessors_read_names_and_first_values() {
+        let e = ev("a", 1, "x", &[&["h", "chan"], &["p", "alice"], &["p", "bob", "", "admin"], &["broadcast", "1"]]);
+        assert_eq!(e.tag("h"), Some("chan"));
+        assert_eq!(e.tag("nope"), None);
+        assert_eq!(e.tag_values("p").collect::<Vec<_>>(), ["alice", "bob"]);
+        assert!(e.has_tag("p", "bob") && !e.has_tag("p", "chan"), "the value must be on a tag of that name");
+        assert_eq!(e.tags_named("p").nth(1).and_then(|t| t.get(3)).map(String::as_str), Some("admin"), "the whole tag is available");
+        assert!(e.is_broadcast());
     }
 
     #[test]

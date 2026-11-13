@@ -8,6 +8,7 @@
 //! Nothing here is a second copy of the program. `plugin::builtins` reads one registry, whoever registered into it.
 
 pub mod agents;
+pub mod clock;
 pub mod app;
 pub mod config;
 pub mod contrib;

@@ -1132,6 +1132,15 @@ fn reconnecting_reloads_the_open_view() {
 }
 
 #[test]
+fn a_relay_notice_is_shown_without_marking_the_connection_down() {
+    let mut app = app_with(2);
+    app.handle(AppEvent::Live(Live::Up));
+    app.handle(AppEvent::Live(Live::Notice("rate-limited".into())));
+    assert_eq!(app.conn, Conn::Live, "a notice is not an outage");
+    assert_eq!(app.flash_text(), Some("relay: rate-limited"));
+}
+
+#[test]
 fn edits_and_deletes_arrive_live() {
     let mut app = app_with(3);
     let mut edit = msg("e1", 5000, BOB, "fixed text", &[&["h", "c1"], &["e", "m001"]]);

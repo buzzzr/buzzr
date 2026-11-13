@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Context, Result};
-use buzzr::{agents, config, harness, keyfile, live, plugin, plugins, relay, release, runner, selftest, setup, ui, update};
+use buzzr::{agents, clock, config, harness, keyfile, live, plugin, plugins, relay, release, runner, selftest, setup, ui, update};
 use buzzr::app::{App, AppEvent, Cmd};
 use buzzr::relay::Relay;
 use clap::Parser;
@@ -249,7 +249,7 @@ async fn run_tui(relay: Arc<Relay>, read_only: bool, send_typing: bool, mouse: b
         if let Some(v) = state.newer_than(release::CURRENT) {
             app.latest = Some(v.to_owned());
         }
-        if state.is_due(release::now_secs()) {
+        if state.is_due(clock::now_secs()) {
             let (tx, path) = (tx.clone(), paths.release_state());
             tokio::spawn(async move {
                 if let Some(v) = release::check_and_store(&path).await {
@@ -263,13 +263,20 @@ async fn run_tui(relay: Arc<Relay>, read_only: bool, send_typing: bool, mouse: b
         None => plugins::Host::none(),
     };
     let mut live = live::spawn(relay.clone(), Vec::new());
+    let disk = Disk::start();
+    // What a command needs, made where it is used (it borrows the live handle's sender while the loop also reads its receiver).
+    macro_rules! ctx {
+        () => {
+            Ctx { relay: &relay, tx: &tx, subscription: &live.channels, host: &host, paths, disk: &disk }
+        };
+    }
     // The local agents: a mention of one is answered by its harness (see `runner.rs`). An answer is a message, so a
     // read-only run, and safe mode, start no watcher at all — an agent that could not send would only report failures.
     if !read_only && config::env("SAFE_MODE").as_deref() != Some("1") {
         runner::spawn(relay.clone(), paths.clone(), tx.clone());
     }
     for cmd in app.start() {
-        run(cmd, &relay, &tx, &live.channels, &host, paths);
+        run(cmd, &ctx!());
     }
     let mut input = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(250));
@@ -283,9 +290,10 @@ async fn run_tui(relay: Arc<Relay>, read_only: bool, send_typing: bool, mouse: b
         if app.quit {
             // What is still in the box goes to disk before we go: quitting is not a reason to lose a half-written message.
             for cmd in app.stash_draft() {
-                run(cmd, &relay, &tx, &live.channels, &host, paths);
+                run(cmd, &ctx!());
             }
             host.shutdown();
+            disk.flush().await;
             return Ok(exit_notice(&app));
         }
         let event = tokio::select! {
@@ -300,9 +308,10 @@ async fn run_tui(relay: Arc<Relay>, read_only: bool, send_typing: bool, mouse: b
                 }
                 None => {
                     for cmd in app.stash_draft() {
-                        run(cmd, &relay, &tx, &live.channels, &host, paths);
+                        run(cmd, &ctx!());
                     }
                     host.shutdown();
+                    disk.flush().await;
                     return Ok(exit_notice(&app));
                 }
             },
@@ -313,19 +322,19 @@ async fn run_tui(relay: Arc<Relay>, read_only: bool, send_typing: bool, mouse: b
         if let Some(ev) = event {
             let ticked = matches!(ev, AppEvent::Tick);
             for cmd in app.handle(ev) {
-                run(cmd, &relay, &tx, &live.channels, &host, paths);
+                run(cmd, &ctx!());
             }
             // A compiled-in plugin's heartbeat, on the same tick the host drives an external one's.
             if ticked {
                 for cmd in app.plugin_tick() {
-                    run(cmd, &relay, &tx, &live.channels, &host, paths);
+                    run(cmd, &ctx!());
                 }
             }
         }
         // Only what changed is sent, and only to plugins that are ready; a stalled plugin never slows the loop. The
         // compiled-in plugins are shown the same projection, on the same "only what changed" rule.
         for cmd in app.plugin_snapshot(app.projection()) {
-            run(cmd, &relay, &tx, &live.channels, &host, paths);
+            run(cmd, &ctx!());
         }
         host.snapshot(app.projection());
     }
@@ -336,251 +345,195 @@ fn exit_notice(app: &App) -> Option<String> {
     app.latest.as_ref().map(|v| release::notice(release::CURRENT, v, app.update_source))
 }
 
-/// Make a local agent and publish it to the relay. The relay comes first: the agent is checked and its key made in
-/// memory, published, and only written down (its folder and its record) once the relay has taken it — so an agent the
-/// relay refuses is not created at all. The harness, model and thinking level the flow picked are named here; the
-/// harness is one buzzr knows (or `prepare` refuses it), and the picks may be empty for the harness's own choice.
-async fn create_and_publish(
-    relay: &Relay,
-    paths: &config::Paths,
-    name: String,
-    instructions: String,
-    harness: String,
-    model: String,
-    effort: String,
-) -> Result<agents::Agent, String> {
-    let pending = agents::prepare(paths, &name, &instructions, &harness, &model, &effort)?;
-    publish_agent(relay, &pending).await?;
-    agents::commit(paths, &pending)
+/// What a command needs to run: the relay, the way back into the loop, and the disk writer. Built once, so `run` and the loop do
+/// not pass six arguments around.
+struct Ctx<'a> {
+    relay: &'a Arc<Relay>,
+    tx: &'a UnboundedSender<AppEvent>,
+    subscription: &'a tokio::sync::watch::Sender<Vec<String>>,
+    host: &'a plugins::Host,
+    paths: &'a config::Paths,
+    disk: &'a Disk,
 }
 
-/// The relay half of `/agents create`: the agent's own kind-0 profile — signed by the agent's key and sent as the
-/// agent, carrying this identity's attestation — and then this identity's listing of it. Either failing is reported,
-/// and nothing is written locally, so the agent is not created.
-async fn publish_agent(relay: &Relay, pending: &agents::Pending) -> Result<(), String> {
-    let agent = pending.agent();
-    // The listing names the agent type the harness runs (`pluginId/typeId`), so an owner's client can resolve it.
-    let runtime = harness::get(&agent.harness).map(|h| h.runtime).unwrap_or(harness::DEFAULT.runtime);
-    let attestation = agents::attestation(relay.keys(), &agent.pubkey)?;
-    relay.publish_agent_profile(pending.keys(), &agent.name, &attestation).await.map_err(|e| format!("{e:#}"))?;
-    relay.publish_agent_listing(&agent.pubkey, &agent.name, runtime).await.map_err(|e| format!("{e:#}"))?;
-    Ok(())
+type DiskJob = Box<dyn FnOnce() + Send>;
+
+/// Writes the small state files (read positions, archived channels, drafts) one after the other, off the loop. Each save is the
+/// whole map, so the writes must land in the order they were asked for: one task takes them from a queue, which a spawn per write
+/// would not guarantee. `flush` waits for the queue to empty and must be awaited before the process ends, or a draft stashed on
+/// quit would be lost.
+struct Disk(UnboundedSender<DiskJob>);
+
+impl Disk {
+    fn start() -> Disk {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DiskJob>();
+        tokio::spawn(async move {
+            while let Some(job) = rx.recv().await {
+                let _ = tokio::task::spawn_blocking(job).await;
+            }
+        });
+        Disk(tx)
+    }
+
+    /// Queue a write. A failed write is dropped, as these files are a convenience (the next save writes the whole state again).
+    fn write(&self, job: impl FnOnce() -> std::io::Result<()> + Send + 'static) {
+        let _ = self.0.send(Box::new(move || {
+            let _ = job();
+        }));
+    }
+
+    async fn flush(&self) {
+        let (done, wait) = tokio::sync::oneshot::channel();
+        if self.0.send(Box::new(move || {
+            let _ = done.send(());
+        })).is_ok() {
+            let _ = wait.await;
+        }
+    }
 }
 
-/// Delete a local agent and take it off the relay: the agent's own kind-0 profile — signed by its own key, and sent as
-/// the agent, carrying the owner's attestation, exactly as its profile and its answers are — and then this identity's
-/// kind-30177 listing of it. Only once the relay has taken both is the record (with the only copy of its key) deleted
-/// from `agents.json`, so a relay that refuses it leaves the agent in place, listed and running. The folder the agent
-/// worked in is left alone, as deleting an agent in Buzz leaves its working directory.
-async fn delete_and_unpublish(relay: &Relay, paths: &config::Paths, pubkey: &str) -> Result<agents::Agent, String> {
-    let Some((agent, keys)) = agents::load_with_keys(&paths.agents()).into_iter().find(|(a, _)| a.pubkey == pubkey) else {
-        return Err(format!("{pubkey} is not an agent on this device"));
-    };
-    let owner = relay.keys().public_key().to_hex();
-    let attestation = agents::attestation(relay.keys(), &agent.pubkey)?;
-    let own = Relay::new(relay.base_url(), keys, Some(attestation)).map_err(|e| format!("{e:#}"))?;
-    own.delete_coordinate(&format!("0:{}:", agent.pubkey)).await.map_err(|e| format!("{e:#}"))?;
-    relay.delete_coordinate(&format!("30177:{owner}:{}", agent.pubkey)).await.map_err(|e| format!("{e:#}"))?;
-    agents::remove(paths, &agent.pubkey)
+/// Run `work` off the loop and send what it came to back as the event `done` makes. An error becomes the text the UI shows
+/// (`{err:#}`, the whole chain). Every relay call a command makes goes through this, so an arm of `run` only says which call
+/// and which event.
+fn request<T: Send + 'static>(
+    tx: &UnboundedSender<AppEvent>,
+    work: impl std::future::Future<Output = Result<T>> + Send + 'static,
+    done: impl FnOnce(Result<T, String>) -> AppEvent + Send + 'static,
+) {
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        let _ = tx.send(done(work.await.map_err(|e| format!("{e:#}"))));
+    });
 }
 
-/// Start the work a command asks for; the result comes back as an `AppEvent`.
-fn run(cmd: Cmd, relay: &Arc<Relay>, tx: &UnboundedSender<AppEvent>, subscription: &tokio::sync::watch::Sender<Vec<String>>, host: &plugins::Host, paths: &config::Paths) {
-    let (relay, tx) = (relay.clone(), tx.clone());
-    let e = |err: anyhow::Error| format!("{err:#}");
+/// Sign and send the event a builder makes (a builder that refuses its input is an error here, before anything is sent).
+async fn submit(relay: Arc<Relay>, builder: Result<nostr::EventBuilder>) -> Result<String> {
+    relay.submit(builder?).await
+}
+
+/// Start the work a command asks for; the result comes back as an `AppEvent`. Each arm only names the call and the event it
+/// answers with: protocol knowledge belongs in `relay.rs`, and what a result means in `App::handle`.
+fn run(cmd: Cmd, ctx: &Ctx) {
+    let (relay, tx, paths) = (ctx.relay.clone(), ctx.tx, ctx.paths.clone());
     match cmd {
         Cmd::Plugin(c) => {
-            host.command(c);
+            ctx.host.command(c);
         }
-        Cmd::LoadChannels => {
-            tokio::spawn(async move {
-                let _ = tx.send(AppEvent::Channels(relay.channels().await.map_err(e)));
-            });
-        }
+        Cmd::LoadChannels => request(tx, async move { relay.channels().await }, AppEvent::Channels),
         Cmd::LoadUnread { channel, since } => {
             // A count that fails (offline, a relay that will not answer) is silent: the badge simply stays empty.
+            let tx = tx.clone();
             tokio::spawn(async move {
                 if let Ok(count) = relay.unread(&channel, since).await {
                     let _ = tx.send(AppEvent::Unread { channel, count });
                 }
             });
         }
-        Cmd::SaveRead(state) => {
-            // Written here rather than spawned: each save is the whole map, and two writes racing in the runtime could land in
-            // the order they were spawned, letting an older position overwrite a newer one. A small file is cheap to write.
-            let _ = config::save_read_state(&paths.read_state(), &state);
-        }
-        Cmd::SaveArchived(ids) => {
-            // Written here for the same reason as the read positions: the whole set goes out each time, and a spawned write
-            // could race an older one.
-            let _ = config::save_archived(&paths.archived(), &ids);
-        }
-        Cmd::SaveDrafts(drafts) => {
-            // Written here too: each save is the whole map, so an older one must not land after a newer one.
-            let _ = config::save_drafts(&paths.drafts(), &drafts);
-        }
-        Cmd::CreateAgent { name, instructions, harness, model, effort } => {
-            // The relay first, the disk second: the agent is published (its own kind-0 profile carrying this
-            // identity's attestation, and this identity's listing of it) and only then written down. A relay that
-            // refuses it means no agent — no key, no folder, no record — and the error is what the overlay shows.
-            let paths = paths.clone();
-            tokio::spawn(async move {
-                let _ = tx.send(AppEvent::AgentCreated(create_and_publish(&relay, &paths, name, instructions, harness, model, effort).await));
-            });
-        }
-        Cmd::DeleteAgent { pubkey } => {
-            // The relay first, the disk second, as creation does: the agent is taken off the relay (its own profile,
-            // signed by its key, and this identity's listing of it) and only then deleted here. A relay that refuses
-            // it means no deletion, so the agent stays listed and running.
-            let paths = paths.clone();
-            tokio::spawn(async move {
-                let _ = tx.send(AppEvent::AgentDeleted(delete_and_unpublish(&relay, &paths, &pubkey).await));
-            });
-        }
+        // The whole map goes out each time, so the writes are queued in order (see `Disk`).
+        Cmd::SaveRead(state) => ctx.disk.write(move || config::save_read_state(&paths.read_state(), &state)),
+        Cmd::SaveArchived(ids) => ctx.disk.write(move || config::save_archived(&paths.archived(), &ids)),
+        Cmd::SaveDrafts(drafts) => ctx.disk.write(move || config::save_drafts(&paths.drafts(), &drafts)),
+        // The relay first, the disk second: the agent is published and only then written down, and deleted the same way round. A
+        // relay that refuses it means no agent (or no deletion), and the error is what the overlay shows.
+        Cmd::CreateAgent { name, instructions, harness, model, effort } => request(
+            tx,
+            async move { agents::create_and_publish(&relay, &paths, &name, &instructions, &harness, &model, &effort).await },
+            AppEvent::AgentCreated,
+        ),
+        Cmd::DeleteAgent { pubkey } => request(tx, async move { agents::delete_and_unpublish(&relay, &paths, &pubkey).await }, AppEvent::AgentDeleted),
         Cmd::ProbeHarness { harness: id, model } => {
             // A harness that will not start, or will not answer ACP, is reported rather than hung on: the probe blocks
             // (it waits on the harness), so it runs on the blocking pool, off the loop and off the async workers.
-            tokio::spawn(async move {
-                let result = tokio::task::spawn_blocking(move || match harness::get(&id) {
-                    Some(h) => harness::offer(h, model.as_deref()),
-                    None => Err(format!("{id} is not a harness buzzr knows")),
-                })
-                .await
-                .unwrap_or_else(|e| Err(format!("the harness check failed: {e}")));
-                let _ = tx.send(AppEvent::HarnessOffer(result));
-            });
-        }
-        Cmd::LoadWindow { channel, cursor } => {
-            tokio::spawn(async move {
-                let result = relay.window(&channel, cursor.as_ref().map(|(at, id)| (*at, id.as_str())), relay::PAGE).await.map_err(e);
-                let _ = tx.send(AppEvent::Window { channel, cursor, result });
-            });
+            request(
+                tx,
+                async move {
+                    tokio::task::spawn_blocking(move || match harness::get(&id) {
+                        Some(h) => harness::offer(h, model.as_deref()),
+                        None => Err(format!("{id} is not a harness buzzr knows")),
+                    })
+                    .await
+                    .map_err(|e| anyhow!("the harness check failed: {e}"))?
+                    .map_err(anyhow::Error::msg)
+                },
+                AppEvent::HarnessOffer,
+            )
+        }        Cmd::LoadWindow { channel, cursor } => {
+            let (c, k) = (channel.clone(), cursor.clone());
+            request(
+                tx,
+                async move { relay.window(&c, k.as_ref().map(|(at, id)| (*at, id.as_str())), relay::PAGE).await },
+                move |result| AppEvent::Window { channel, cursor, result },
+            )
         }
         Cmd::LoadThread { channel, root } => {
-            tokio::spawn(async move {
-                let result = relay.thread(&channel, &root, relay::THREAD_LIMIT).await.map_err(e);
-                let _ = tx.send(AppEvent::Thread { channel, root, result });
-            });
+            let (c, r) = (channel.clone(), root.clone());
+            request(tx, async move { relay.thread(&c, &r, relay::THREAD_LIMIT).await }, move |result| AppEvent::Thread { channel, root, result })
         }
         Cmd::LoadMembers { channel } => {
-            tokio::spawn(async move {
-                let result = relay.members(&channel).await.map_err(e);
-                let _ = tx.send(AppEvent::Members { channel, result });
-            });
+            let c = channel.clone();
+            request(tx, async move { relay.members(&c).await }, move |result| AppEvent::Members { channel, result })
         }
-        Cmd::LoadNames(pubkeys) => {
-            tokio::spawn(async move {
-                let _ = tx.send(AppEvent::Names(relay.names(&pubkeys).await.map_err(e)));
-            });
-        }
+        Cmd::LoadNames(pubkeys) => request(tx, async move { relay.names(&pubkeys).await }, AppEvent::Names),
         Cmd::Send { channel, text, root, mentions } => {
-            tokio::spawn(async move {
-                let result = async { relay.submit(relay::message_builder(&channel, &text, root.as_deref(), &mentions)?).await }.await.map_err(e);
-                let _ = tx.send(AppEvent::Sent(result));
-            });
+            request(tx, submit(relay, relay::message_builder(&channel, &text, root.as_deref(), &mentions)), AppEvent::Sent)
         }
         Cmd::Typing { channel, root } => {
+            // best effort: a lost typing indicator is not worth a message
             tokio::spawn(async move {
-                // best effort: a lost typing indicator is not worth a message
-                if let Ok(b) = relay::typing_builder(&channel, root.as_deref()) {
-                    let _ = relay.submit(b).await;
-                }
+                let _ = submit(relay, relay::typing_builder(&channel, root.as_deref())).await;
             });
         }
-        Cmd::Edit { channel, id, text } => {
-            tokio::spawn(async move {
-                let result = async { relay.submit(relay::edit_builder(&channel, &id, &text)?).await }.await.map_err(e);
-                let _ = tx.send(AppEvent::Sent(result));
-            });
-        }
-        Cmd::Delete { channel, id } => {
-            tokio::spawn(async move {
-                let result = async { relay.submit(relay::delete_builder(&channel, &id)?).await }.await.map_err(e);
-                let _ = tx.send(AppEvent::Sent(result));
-            });
-        }
-        Cmd::React { target, emoji, remove } => {
-            tokio::spawn(async move {
+        Cmd::Edit { channel, id, text } => request(tx, submit(relay, relay::edit_builder(&channel, &id, &text)), AppEvent::Sent),
+        Cmd::Delete { channel, id } => request(tx, submit(relay, relay::delete_builder(&channel, &id)), AppEvent::Sent),
+        Cmd::React { target, emoji, remove } => request(
+            tx,
+            async move {
                 // Undo the reaction this one replaces first, so a change never leaves two emoji from the same person.
-                let result = async {
-                    let mut sent = String::new();
-                    if let Some(reaction) = remove.as_deref() {
-                        sent = relay.submit(relay::remove_reaction_builder(reaction)?).await?;
-                    }
-                    if !emoji.is_empty() {
-                        sent = relay.submit(relay::reaction_builder(&target, &emoji)?).await?;
-                    }
-                    Ok::<String, anyhow::Error>(sent)
+                let mut sent = String::new();
+                if let Some(reaction) = remove.as_deref() {
+                    sent = submit(relay.clone(), relay::remove_reaction_builder(reaction)).await?;
                 }
-                .await
-                .map_err(e);
-                let _ = tx.send(AppEvent::Sent(result));
-            });
-        }
-        Cmd::CreateChannel { name, private, about } => {
-            tokio::spawn(async move {
-                let result = async {
-                    let (builder, id) = relay::create_channel_builder(&name, private, about.as_deref())?;
-                    relay.submit(builder).await?;
-                    Ok::<String, anyhow::Error>(id)
+                if !emoji.is_empty() {
+                    sent = submit(relay, relay::reaction_builder(&target, &emoji)).await?;
                 }
-                .await
-                .map_err(e);
-                let _ = tx.send(AppEvent::Created(result));
-            });
-        }
+                Ok(sent)
+            },
+            AppEvent::Sent,
+        ),
+        Cmd::CreateChannel { name, private, about } => request(
+            tx,
+            async move {
+                let (builder, id) = relay::create_channel_builder(&name, private, about.as_deref())?;
+                relay.submit(builder).await?;
+                Ok(id)
+            },
+            AppEvent::Created,
+        ),
         Cmd::JoinChannel { channel } => {
-            tokio::spawn(async move {
-                let result = async { relay.submit(relay::join_builder(&channel)?).await }.await.map_err(e);
-                let _ = tx.send(AppEvent::Joined { channel, result });
-            });
+            let work = submit(relay, relay::join_builder(&channel));
+            request(tx, work, move |result| AppEvent::Joined { channel, result })
         }
         Cmd::LeaveChannel { channel } => {
-            tokio::spawn(async move {
-                let result = async { relay.submit(relay::leave_builder(&channel)?).await }.await.map_err(e);
-                let _ = tx.send(AppEvent::Left { channel, result });
-            });
+            let work = submit(relay, relay::leave_builder(&channel));
+            request(tx, work, move |result| AppEvent::Left { channel, result })
         }
-        Cmd::LoadRoster { channels } => {
-            tokio::spawn(async move {
-                let _ = tx.send(AppEvent::Roster(relay.roster(&channels).await.map_err(e)));
-            });
-        }
-        Cmd::OpenDm { peer } => {
-            tokio::spawn(async move {
-                let result = async { relay.submit(relay::dm_open_builder(&peer)?).await.map(|_| ()) }.await.map_err(e);
-                let _ = tx.send(AppEvent::DmOpened(result));
-            });
-        }
+        Cmd::LoadRoster { channels } => request(tx, async move { relay.roster(&channels).await }, AppEvent::Roster),
+        Cmd::OpenDm { peer } => request(tx, async move { submit(relay, relay::dm_open_builder(&peer)).await.map(|_| ()) }, AppEvent::DmOpened),
         Cmd::Invite { channel, pubkey, dm } => {
-            tokio::spawn(async move {
-                let result = match relay::invite_builder(&channel, &pubkey, dm) {
-                    Ok(builder) => relay.submit(builder).await.map(|_| ()).map_err(e),
-                    Err(err) => Err(e(err)),
-                };
-                let _ = tx.send(AppEvent::Invited { channel, pubkey, result });
-            });
+            let work = submit(relay, relay::invite_builder(&channel, &pubkey, dm));
+            request(tx, async move { work.await.map(|_| ()) }, move |result| AppEvent::Invited { channel, pubkey, result })
         }
         Cmd::LoadProfile(pubkey) => {
-            tokio::spawn(async move {
-                let result = relay.profile(&pubkey).await.map_err(e);
-                let _ = tx.send(AppEvent::Profile { pubkey, result });
-            });
+            let p = pubkey.clone();
+            request(tx, async move { relay.profile(&p).await }, move |result| AppEvent::Profile { pubkey, result })
         }
         Cmd::FindPeople { query } => {
-            tokio::spawn(async move {
-                let result = relay.find_people(&query).await.map_err(e);
-                let _ = tx.send(AppEvent::People { query, result });
-            });
+            let q = query.clone();
+            request(tx, async move { relay.find_people(&q).await }, move |result| AppEvent::People { query, result })
         }
-        Cmd::Search { query, seq } => {
-            tokio::spawn(async move {
-                let result = relay.search(&query, 25).await.map_err(e);
-                let _ = tx.send(AppEvent::Search { seq, result });
-            });
-        }
+        Cmd::Search { query, seq } => request(tx, async move { relay.search(&query, 25).await }, move |result| AppEvent::Search { seq, result }),
         Cmd::Subscribe(ids) => {
-            let _ = subscription.send(ids);
+            let _ = ctx.subscription.send(ids);
         }
         Cmd::OpenUrl(url) => {
             let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };

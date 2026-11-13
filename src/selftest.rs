@@ -123,6 +123,7 @@ pub async fn run(relay: Arc<Relay>, listen_secs: u64, probe_typing: Option<Strin
                 println!("live: connected and subscribed");
             }
             Ok(Some(Live::Down(why))) => println!("live: down ({why})"),
+            Ok(Some(Live::Notice(message))) => println!("live: relay notice ({message})"),
             Ok(Some(Live::Event(e))) => {
                 *kinds.entry(e.kind).or_default() += 1;
                 if e.kind == KIND_TYPING {

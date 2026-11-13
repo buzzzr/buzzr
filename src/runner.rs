@@ -111,7 +111,7 @@ async fn watch(relay: Arc<Relay>, agent: agents::Agent, keys: Keys, tx: Unbounde
     };
     // Where this watch starts. Mentions older than this are left alone: they are the ones that arrived while nobody
     // was running the agent, and answering a backlog of them is not what a mention asks for.
-    let mut cursor = now();
+    let mut cursor = crate::clock::now_secs();
     // The ids already answered, with the time they carried. The relay's `since` includes its own second, so the
     // events at the cursor come back on the next ask and must not be answered twice.
     let mut answered: HashMap<String, u64> = HashMap::new();
@@ -180,7 +180,7 @@ async fn answer(relay: &Relay, harness: &'static Harness, agent: &agents::Agent,
 /// the `x-auth-tag` its events carry (and on them) — the same attestation the agent's profile goes out with, which is
 /// what tells the relay the agent is acting for its owner.
 fn own_relay(relay: &Relay, agent: &agents::Agent, keys: Keys) -> Result<Relay, String> {
-    let attestation = agents::attestation(relay.keys(), &agent.pubkey)?;
+    let attestation = agents::attestation(relay.keys(), &agent.pubkey);
     Relay::new(relay.base_url(), keys, Some(attestation)).map_err(|e| format!("{e:#}"))
 }
 
@@ -196,7 +196,7 @@ fn answerable(e: &Ev, pubkey: &str) -> bool {
     MESSAGE_KINDS.contains(&e.kind)
         && e.pubkey != pubkey
         && e.channel().is_some()
-        && e.tags.iter().any(|t| t.first().map(String::as_str) == Some("p") && t.get(1).map(String::as_str) == Some(pubkey))
+        && e.has_tag("p", pubkey)
 }
 
 /// The earlier messages of a mention's thread, oldest first, as they go into the prompt: empty for a mention that is not
@@ -265,9 +265,6 @@ fn report(tx: &UnboundedSender<AppEvent>, agent: &str, result: Result<(), String
     let _ = tx.send(AppEvent::AgentTurn { agent: agent.to_owned(), result });
 }
 
-fn now() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
-}
 
 #[cfg(test)]
 mod tests {

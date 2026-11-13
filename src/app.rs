@@ -3,6 +3,7 @@
 //! `App::handle` takes an event and returns the requests (`Cmd`) the caller should run; it never touches the network or the
 //! terminal itself, so the whole behaviour is unit tested with synthetic events.
 
+use crate::clock::now_secs;
 use crate::config::ReadState;
 use crate::contrib::{self, PanelRow, PluginCmd, PluginEvent, PluginMeta, PluginState, Projection, Registry};
 use crate::editor::Editor;
@@ -515,9 +516,6 @@ pub struct App {
     pending_select: Option<String>,
 }
 
-fn now_secs() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
-}
 
 /// How far a thread's replies are pushed over from its root, so the list reads as a thread rather than a flat feed.
 const THREAD_INDENT: usize = 2;
@@ -1995,6 +1993,10 @@ impl App {
             }
             Live::Down(why) => {
                 self.conn = Conn::Down(why);
+                Vec::new()
+            }
+            Live::Notice(message) => {
+                self.flash(format!("relay: {}", markdown::strip_controls(&message)));
                 Vec::new()
             }
             Live::Event(e) => {
