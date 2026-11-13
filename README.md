@@ -40,7 +40,8 @@
 - **Unread that survives a restart.** The last-read position is saved per channel and per thread, so the badges are right again
   next time and a `new messages` line shows where you left off. `u` marks a message unread until you run the `read` command.
 - **Threads.** A channel shows top-level messages only, as the Buzz app does, each with its reply count and the time of the last reply;
-  a thread with replies since you last opened it shows `● 2 new`. Enter opens a thread (and reads it), Esc returns to the same place.
+  a thread with replies since you last opened it shows `● 2 new`. Enter opens a thread (and reads it), Esc returns to the same place,
+  and `r` opens the thread of the selected message with the cursor in its composer, ready to write the reply into it.
   The channel list keeps the two kinds of unread apart as well: unseen messages count as `(2)`, unseen replies inside a thread show as
   `●`, and a channel with both shows `(2) ●`.
 - **Live.** New messages, edits, deletions, reactions, reply counts and `Bob is typing…` arrive as they happen. If the connection
@@ -189,7 +190,8 @@ The full behaviour, for when the feature list above is not enough.
   as one header line — its number, time and author, then the first line of what it says, cut with `…` when there is more — so it
   stays on screen while the replies scroll under it, indented two columns, and the pane reads as a thread rather than a flat
   list. Opening a thread reads its replies, so a thread with replies since you last looked at it shows `● 2 new` after its reply
-  count. `r` replies in the thread of the selected message; `←` leaves the thread for the timeline it came from, putting the
+  count. `r` replies in the thread of the selected message, opening it and putting the cursor in its composer (in a thread it
+  just takes the composer, the same place Enter reaches); `←` leaves the thread for the timeline it came from, putting the
   cursor back on the message the thread hangs off.
 - **Live:** new messages, edits, deletions, reactions, reply counts and typing indicators arrive over a WebSocket as they happen
   (`Bob is typing…`), and the header shows the connection state. If the connection drops it reconnects and reloads.

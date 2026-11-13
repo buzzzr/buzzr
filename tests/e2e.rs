@@ -624,6 +624,28 @@ fn enter_on_a_message_opens_its_thread_and_esc_goes_back_to_the_channel() {
 }
 
 #[test]
+fn r_opens_the_thread_of_the_selected_message_and_takes_its_composer() {
+    let Some(relay) = relay_or_skip("r_opens_the_thread_...") else { return };
+    let s = session(&relay);
+    // Open #general: design, dev, general is the third row.
+    s.press_all(&["down", "down", "enter"]);
+    s.expect("the general channel", "hello from c-general");
+    s.expect("its thread summary", "2 replies");
+    s.press("r"); // reply to the selected message, from the channel timeline
+    let screen = s.until("the thread view", |sc| header(sc).contains("› thread"));
+    assert!(header(&screen).contains("#general"), "the thread still names its channel: {:?}", header(&screen));
+    // The thread's first message is the pane's first line, its replies under it, and the composer writes into
+    // the thread rather than into the channel timeline the key was pressed on.
+    let screen = s.until("the root on the first line of the pane", |sc| {
+        messages_pane(sc).first().is_some_and(|l| l.contains("hello from c-general"))
+    });
+    let pane = messages_pane(&screen);
+    assert!(pane[0].contains("#1") && pane[0].contains("hello from c-general"), "the thread's first message is on top: {:?}", pane[0]);
+    s.expect("a reply under the root", "the sidebar keeps a fixed order");
+    s.expect("the composer writing into the thread", "reply in thread");
+}
+
+#[test]
 fn a_thread_reads_as_a_root_header_line_with_the_replies_indented_under_it() {
     let Some(relay) = relay_or_skip("a_thread_reads_as_a_root_header_line_...") else { return };
     let s = session(&relay);

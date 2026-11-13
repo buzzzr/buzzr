@@ -5,6 +5,13 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
 
 ## [Unreleased]
 
+### Changed
+
+- `r` on a message opens its thread — the first message pinned at the top of the pane — and puts the cursor in the
+  composer, so the reply is written with the thread on screen; the box already belongs to the thread, so there is no
+  separate reply to aim and cancel. Inside a thread `r` just takes the composer. Esc from the composer steps back to the
+  thread's rows, and Esc again leaves the thread.
+
 ## [0.2.0-rc.4] - 2026-11-13
 
 ### Security
