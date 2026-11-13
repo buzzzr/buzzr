@@ -119,7 +119,7 @@ pub fn line_width(segments: &[Segment]) -> usize {
     segments.iter().map(Segment::width).sum()
 }
 
-/// One command a plugin adds to the input box: `/todo`, `/prs`, ...
+/// One command a plugin adds to the Ctrl+K palette: `todo`, `prs`, ...
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub struct PluginCommand {
     pub id: String,
@@ -251,7 +251,7 @@ fn clean_segments(segments: Vec<Segment>) -> Vec<Segment> {
     out
 }
 
-/// Ids end up in JSON and in `/commands`, never in a path: keep them to a boring alphabet.
+/// Ids end up in JSON and in the palette, never in a path: keep them to a boring alphabet.
 pub fn valid_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 64
@@ -308,7 +308,7 @@ impl Registry {
         self.plugins.get(id).map(|e| e.name.as_str())
     }
 
-    /// The plugin that owns a `/command`. Built-in buzzr commands are checked first by `App::command`.
+    /// The plugin that owns a command. Built-in buzzr commands are checked first by `App::command`.
     pub fn command(&self, id: &str) -> Option<(&str, &PluginCommand)> {
         self.plugins
             .iter()
@@ -367,7 +367,7 @@ impl Registry {
     }
 }
 
-/// Where a discovered plugin is in its life. Shown by `/plugins`.
+/// Where a discovered plugin is in its life. Shown by the `plugins` command.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PluginState {
     #[default]
@@ -390,7 +390,7 @@ impl PluginState {
     }
 }
 
-/// What `/plugins` shows about one plugin on disk.
+/// What the `plugins` command shows about one plugin on disk.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PluginMeta {
     pub id: String,
@@ -414,6 +414,16 @@ pub enum PluginEvent {
     Flash { text: String },
     Draft { plugin: String, text: String },
     Send { plugin: String, channel: Option<String>, text: String },
+    /// A plugin asks buzzr to ask the user for a line or a block of text (see `plugin::PluginOutput::Prompt`).
+    Prompt { plugin: String, id: String, title: String, hint: String, multiline: bool },
+    /// A plugin asks for the local agents (see `plugin::PluginOutput::ListAgents`).
+    ListAgents { plugin: String, id: String },
+    /// A plugin asks buzzr to start a harness and read what it offers (see `plugin::PluginOutput::ProbeHarness`).
+    ProbeHarness { plugin: String, id: String, harness: String, model: Option<String> },
+    /// A plugin asks buzzr to make and publish a local agent (see `plugin::PluginOutput::CreateAgent`).
+    CreateAgent { plugin: String, id: String, name: String, instructions: String, harness: String, model: String, effort: String },
+    /// A plugin asks buzzr to delete a local agent (see `plugin::PluginOutput::DeleteAgent`).
+    DeleteAgent { plugin: String, id: String, pubkey: String },
     Gone { id: String, why: String },
     Log { id: String, level: String, text: String },
 }
@@ -590,8 +600,18 @@ pub struct MessageView {
 /// Work for the plugin runtime, like `Cmd` is work for the relay.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PluginCmd {
-    /// `/command args` from the input box.
+    /// A command run from the palette, with its argument.
     Invoke { plugin: String, command: String, args: String },
     /// Enter on a panel row that has an action.
     PanelAction { plugin: String, id: String, row: usize, value: Option<String> },
+    /// The user answered (or, with `None`, cancelled) a prompt the plugin asked for with `Prompt`.
+    PromptAnswer { plugin: String, id: String, text: Option<String> },
+    /// The local agents, as the answer to the plugin's `ListAgents`.
+    Agents { plugin: String, id: String, agents: Vec<crate::plugin::AgentView> },
+    /// The answer to a plugin's `CreateAgent`: the agent that was made, or why it was not.
+    Created { plugin: String, id: String, result: Result<crate::plugin::CreatedAgent, String> },
+    /// The answer to a plugin's `DeleteAgent`: the name of the agent that was deleted, or why it was not.
+    Deleted { plugin: String, id: String, result: Result<String, String> },
+    /// The answer to a plugin's `ProbeHarness`: what the harness offers, or why it could not be asked.
+    HarnessOffer { plugin: String, id: String, result: Result<crate::plugin::HarnessOffer, String> },
 }

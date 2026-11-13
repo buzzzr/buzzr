@@ -22,7 +22,7 @@ export interface Segment {
   tone?: Tone;
 }
 
-/** One command a plugin adds to the input box, run as `/id`. */
+/** One command a plugin adds to the Ctrl+K palette: `id` is the name typed to find it and `usage` its argument hint. */
 export interface Command {
   id: string;
   title?: string;
@@ -94,6 +94,41 @@ export interface View {
   unread: number;
 }
 
+/** One local agent this copy made, as the answer to `listAgents`. There is no key in it — that stays in `agents.json`. */
+export interface AgentView {
+  name: string;
+  pubkey: string;
+  npub: string;
+  harness: string;
+  /** The model the harness was asked to run, when one was chosen; absent is the harness's own choice. */
+  model?: string;
+  /** The thinking level it was asked to run at, when one was chosen; absent is the harness's own choice. */
+  effort?: string;
+  workspace: string;
+  created_at: number;
+}
+
+/** The answer to `createAgent`: the agent it made. Getting one back means the relay took it — a refusal is the `error`. */
+export interface CreatedAgent {
+  name: string;
+  pubkey: string;
+  npub: string;
+}
+
+/** One value a harness offers for a setting — a model, a thinking level — and what to call it. */
+export interface Choice {
+  value: string;
+  label: string;
+}
+
+/** What a harness offers for a new agent, as the answer to `probeHarness`: its models, the one it is on, and that model's levels. */
+export interface HarnessOffer {
+  models: Choice[];
+  model: string;
+  efforts: Choice[];
+  effort: string;
+}
+
 /** The handle a plugin uses to send things back. Every call is fire-and-forget. */
 export interface Buzzr {
   /** Replace the plugin's status item on the status line; a string is one plain segment. */
@@ -108,15 +143,25 @@ export interface Buzzr {
   draft(text: string): void;
   /** Send a message in the open channel; needs the `messages:write` permission. */
   send(text: string): void;
+  /** Ask the user a question in the composer; the answer comes back to `onPrompt` with the same `id`. */
+  prompt(id: string, title: string, hint: string, multiline?: boolean): void;
+  /** Ask for the local agents; needs the `agents:read` permission. The answer comes back to `onAgents`. */
+  listAgents(id: string): void;
+  /** Ask buzzr to start a harness and read what it offers; needs the `agents:write` permission. The answer comes back to `onHarnessOffer`. */
+  probeHarness(id: string, harness: string, model?: string): void;
+  /** Ask buzzr to make and publish an agent; needs the `agents:write` permission. The answer comes back to `onCreated`. */
+  createAgent(id: string, name: string, instructions: string, harness: string, model?: string, effort?: string): void;
+  /** Ask buzzr to delete a local agent and take it off the relay; needs the `agents:write` permission. The answer comes back to `onDeleted`. */
+  deleteAgent(id: string, pubkey: string): void;
   /** Write a line to the plugin's log; `error` also flashes. */
   log(text: string, level?: "info" | "error"): void;
 }
 
 /** What a plugin declares about itself, in code. This is what a manifest used to hold. */
 export interface PluginSpec {
-  /** The name shown by `/plugins`; the folder name is always the id. */
+  /** The name shown by the `plugins` command; the folder name is always the id. */
   name?: string;
-  /** What the plugin asks to do: `read:visible` and/or `messages:write`. buzzr grants only what it implements. */
+  /** What the plugin asks to do: `read:visible`, `messages:write`, `agents:read` and/or `agents:write`. buzzr grants only what it implements. */
   permissions?: string[];
   /** Ask buzzr for a heartbeat this many milliseconds apart (clamped to 250–60000) so time-based output can redraw. */
   tickMs?: number;
@@ -124,12 +169,22 @@ export interface PluginSpec {
   ready?(buzzr: Buzzr): Contributions | void;
   /** The screen changed; `view` holds only what is on screen. */
   onSnapshot?(buzzr: Buzzr, view: View): void;
-  /** `/command args` was run. */
+  /** A command was run from the palette; `args` is what was typed for it. */
   onCommand?(buzzr: Buzzr, command: string, args: string): void;
   /** Enter was pressed on a panel row that had an action. */
   onPanelAction?(buzzr: Buzzr, panel: string, row: number, value: string | undefined): void;
   /** The heartbeat this plugin asked for with `tickMs`. */
   onTick?(buzzr: Buzzr): void;
+  /** The user answered a prompt this plugin asked for with `prompt`; `text` is `undefined` on Esc. */
+  onPrompt?(buzzr: Buzzr, id: string, text: string | undefined): void;
+  /** The local agents this plugin asked for with `listAgents`. */
+  onAgents?(buzzr: Buzzr, id: string, agents: AgentView[]): void;
+  /** The answer to a `probeHarness`: what the harness offers, or `error` when it could not be asked. */
+  onHarnessOffer?(buzzr: Buzzr, id: string, offer: HarnessOffer | undefined, error: string | undefined): void;
+  /** The answer to a `createAgent`: the agent it made, or `error` when it could not be made. */
+  onCreated?(buzzr: Buzzr, id: string, agent: CreatedAgent | undefined, error: string | undefined): void;
+  /** The answer to a `deleteAgent`: the name of the agent that was deleted, or `error` when it was not. */
+  onDeleted?(buzzr: Buzzr, id: string, name: string | undefined, error: string | undefined): void;
 }
 
 // `process` is the one host object every runtime a plugin can be written for provides (Node, Bun, and Deno's Node
@@ -158,6 +213,11 @@ const buzzr: Buzzr = {
   flash: (text) => send({ type: "flash", text }),
   draft: (text) => send({ type: "draft", text }),
   send: (text) => send({ type: "send", text }),
+  prompt: (id, title, hint, multiline = false) => send({ type: "prompt", id, title, hint, multiline }),
+  listAgents: (id) => send({ type: "list_agents", id }),
+  probeHarness: (id, harness, model) => send({ type: "probe_harness", id, harness, ...(model === undefined ? {} : { model }) }),
+  createAgent: (id, name, instructions, harness, model = "", effort = "") => send({ type: "create_agent", id, name, instructions, harness, model, effort }),
+  deleteAgent: (id, pubkey) => send({ type: "delete_agent", id, pubkey }),
   log: (text, level = "info") => send({ type: "log", level, text }),
 };
 
@@ -176,7 +236,7 @@ const buzzr: Buzzr = {
 export function definePlugin(spec: PluginSpec): Buzzr {
   let buffer = "";
   const handle = (line: string): void => {
-    let message: { type?: string; apiVersion?: number; projection?: View; command?: string; args?: string; id?: string; row?: number; value?: string };
+    let message: { type?: string; apiVersion?: number; projection?: View; command?: string; args?: string; id?: string; row?: number; value?: string; text?: string; agents?: AgentView[]; offer?: HarnessOffer; agent?: CreatedAgent; name?: string; error?: string };
     try {
       message = JSON.parse(line);
     } catch {
@@ -210,6 +270,21 @@ export function definePlugin(spec: PluginSpec): Buzzr {
         break;
       case "panel_action":
         spec.onPanelAction?.(buzzr, message.id ?? "", message.row ?? 0, message.value);
+        break;
+      case "prompt_answer":
+        spec.onPrompt?.(buzzr, message.id ?? "", message.text);
+        break;
+      case "agents":
+        spec.onAgents?.(buzzr, message.id ?? "", message.agents ?? []);
+        break;
+      case "harness_offer":
+        spec.onHarnessOffer?.(buzzr, message.id ?? "", message.offer, message.error);
+        break;
+      case "created":
+        spec.onCreated?.(buzzr, message.id ?? "", message.agent, message.error);
+        break;
+      case "deleted":
+        spec.onDeleted?.(buzzr, message.id ?? "", message.name, message.error);
         break;
       case "bye":
         io.exit(0);

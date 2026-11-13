@@ -8,7 +8,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
 use ratatui::Frame;
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const CHANNELS_W: u16 = 28;
 
@@ -66,23 +66,30 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let (msgs, typing, status, input) = (rr[0], rr[1], rr[2], rr[3]);
 
     app.areas.channels = chans;
-    app.areas.msgs = msgs;
     app.areas.input = input;
-    app.view_h = msgs.height as usize;
     let content_w = msgs.width.saturating_sub(2).max(10) as usize;
+    // In a thread the root is a one-line header pinned to the top of the pane: it holds its place while the replies scroll
+    // under it, so the scrolling list gets the pane minus that line. A click on the pinned line lands on nothing.
+    let thread_header = app.thread_header(content_w);
+    let list = match &thread_header {
+        Some(_) => Rect { y: msgs.y + 1, height: msgs.height.saturating_sub(1), ..msgs },
+        None => msgs,
+    };
+    app.areas.msgs = list;
+    app.view_h = list.height as usize;
     app.layout(content_w); // (re)build the layout for this width before reading it
 
     draw_header(f, app, header);
     draw_channels(f, app, chans);
     draw_plugin_panes(f, app, panes);
-    draw_messages(f, app, msgs);
+    if let Some(h) = &thread_header {
+        draw_thread_header(f, h, Rect { height: msgs.height.min(1), ..msgs });
+    }
+    draw_messages(f, app, list);
     draw_typing(f, app, typing);
     draw_status(f, app, status);
     draw_input(f, app, input, input_inner_w);
     draw_footer(f, app, footer);
-    if app.palette_up() {
-        draw_command_palette(f, app, input);
-    }
     if app.react.is_some() {
         draw_react(f, app, area);
     }
@@ -90,6 +97,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Overlay::Keys => draw_keys(f, body),
         Overlay::Help => draw_help(f, area),
         Overlay::Search => draw_search(f, app, area),
+        Overlay::Palette => draw_command_palette(f, app, area),
         Overlay::Whois => draw_whois(f, app, area),
         Overlay::Panel => draw_panel(f, app, area),
         Overlay::None => {}
@@ -224,11 +232,28 @@ fn draw_plugin_panes(f: &mut Frame, app: &App, area: Rect) {
     }
 }
 
+/// The thread's root, pinned to the top line of the message pane: it stays put while the replies scroll under it, so the
+/// pane is never without the message the thread is about. It carries the same one-column gutter the message rows do.
+fn draw_thread_header(f: &mut Frame, header: &list::Rendered, area: Rect) {
+    let Some(line) = header.lines.first() else { return };
+    let mut spans = vec![Span::raw(" ")];
+    spans.extend(line.spans.iter().cloned());
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
 fn draw_messages(f: &mut Frame, app: &App, area: Rect) {
     let Some((_, layout)) = app.layout_ref() else { return };
     let view_h = area.height as usize;
     if layout.items.is_empty() {
-        let text = if app.channel().is_none() { "Pick a channel on the left." } else if app.store().map(|s| s.head_loaded).unwrap_or(false) { "No messages yet." } else { "Loading…" };
+        let text = if app.channel().is_none() {
+            "Pick a channel on the left."
+        } else if app.in_thread() {
+            "No replies yet."
+        } else if app.store().map(|s| s.head_loaded).unwrap_or(false) {
+            "No messages yet."
+        } else {
+            "Loading…"
+        };
         f.render_widget(Paragraph::new(Span::styled(text, dim())).alignment(Alignment::Center), Rect::new(area.x, area.y + area.height / 3, area.width, 1));
         return;
     }
@@ -345,7 +370,7 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(Span::styled(text, dim())).alignment(Alignment::Right), parts[1]);
 }
 
-/// A plugin panel (or the built-in `/plugins` list): rows, a cursor and the row actions the host owns.
+/// A plugin panel (or the built-in `plugins` list): rows, a cursor and the row actions the host owns.
 fn draw_panel(f: &mut Frame, app: &App, area: Rect) {
     let Some(panel) = &app.panel else { return };
     let w = 100.min(area.width.saturating_sub(4)).max(24);
@@ -382,53 +407,100 @@ fn spans_of(text: String, tone: crate::contrib::Tone, width: usize) -> Vec<Span<
     spans(&[crate::contrib::Segment { text, tone }], width)
 }
 
-/// The slash-command palette: while the input holds a `/command`, the commands whose name starts with what has been typed,
-/// drawn just above the input box. Enter runs the command on the cursor line, Tab fills its name in, and the arrows move the
-/// highlight. `app.palette_up()` decides when it is shown; here we only draw it.
-fn draw_command_palette(f: &mut Frame, app: &App, input: Rect) {
+/// The `Ctrl+K` command palette: a modal with a query of its own and the commands whose name starts with it (or, once the
+/// query holds a whole line, with the command at the head of that line). Enter runs the command on the cursor row; a command
+/// that takes an argument gets an argument step, where the list gives way to its usage and the query is the argument — or
+/// the whole line can be typed at once and runs in one step. `app.command_rows()` and `app.palette` decide what is shown;
+/// here we only draw it.
+fn draw_command_palette(f: &mut Frame, app: &App, area: Rect) {
     let rows = app.command_rows();
-    let want = if rows.is_empty() { 3 } else { rows.len() as u16 + 2 };
-    let w = input.width;
-    let h = want.min(input.y).min(12);
-    if h < 3 || w < 16 {
-        return;
-    }
-    let r = Rect::new(input.x, input.y - h, w, h);
+    let w = 72.min(area.width.saturating_sub(2)).max(20);
+    let want = rows.len().clamp(1, 8) as u16 + 4;
+    let h = want.min(area.height).max(4);
+    let x = area.x + area.width.saturating_sub(w) / 2;
+    let y = area.y + area.height.saturating_sub(h) / 2;
+    let r = Rect::new(x, y, w, h);
     clear_popup(f, r);
-    let block = Block::default().borders(Borders::ALL).border_style(Style::default().fg(crate::theme::get().accent)).title(" Commands · Enter runs · Tab completes ");
+    let title = match &app.palette.arg {
+        Some(arg) => format!(" {} · Enter runs · Esc goes back ", arg.command),
+        None => " Commands · Enter runs · Esc closes ".to_owned(),
+    };
+    let block = Block::default().borders(Borders::ALL).border_style(Style::default().fg(crate::theme::get().accent)).title(title);
     let inner = block.inner(r);
     f.render_widget(block, r);
-    if inner.height == 0 {
+    if inner.width < 4 || inner.height < 3 {
         return;
     }
-    // Line the descriptions up in a column, measured in cells (a plugin may register a name with wide characters).
-    let name_w = rows.iter().map(|row| row.name.width()).max().unwrap_or(0).min((inner.width as usize).saturating_sub(6));
-    let vis = inner.height as usize;
-    let start = app.cmd_cursor.saturating_sub(vis.saturating_sub(1) / 2).min(rows.len().saturating_sub(vis));
-    let mut lines: Vec<Line> = Vec::new();
-    for (i, row) in rows.iter().enumerate().skip(start).take(vis) {
-        let label = format!("/{:<width$}", row.name, width = name_w);
-        let room = (inner.width as usize).saturating_sub(label.width() + 3); // marker + label + a space, and one to spare
-        let mut desc = row.desc.clone();
-        while desc.width() > room {
-            desc.pop();
+    // The query sits on the first line under a dim rule; the rows (or the argument step's usage) fill what is left.
+    let q = app.palette.query.text();
+    let mut lines: Vec<Line> = vec![
+        Line::from(vec![Span::styled("› ", Style::default().fg(crate::theme::get().accent)), Span::raw(q.clone())]),
+        Line::from(Span::styled("─".repeat(inner.width as usize), dim())),
+    ];
+    let vis = (inner.height as usize).saturating_sub(2).max(1);
+    match &app.palette.arg {
+        // The argument step: the command is picked, so the list gives way to what it is asking for.
+        Some(arg) => {
+            let hint = if arg.usage.is_empty() { "the argument".to_owned() } else { arg.usage.clone() };
+            let desc = rows.iter().find(|row| row.name == arg.command).map(|row| row.desc.clone()).unwrap_or_default();
+            let mut line = Line::from(vec![Span::styled(hint, Style::default().fg(crate::theme::get().accent)), Span::raw(" "), Span::styled(desc, dim())]);
+            line = clip_line(line, inner.width as usize);
+            lines.push(line);
         }
-        let spans = vec![
-            Span::raw(if i == app.cmd_cursor { "▌" } else { " " }),
-            Span::styled(label, Style::default().fg(crate::theme::get().accent)),
-            Span::raw(" "),
-            Span::styled(desc, dim()),
-        ];
-        let mut line = Line::from(spans);
-        if i == app.cmd_cursor {
-            line = line.style(Style::default().bg(crate::theme::get().sel_bg));
+        None if rows.is_empty() => lines.push(Line::from(Span::styled("no matching command", dim()))),
+        None => {
+            // Line the usage and the description up in columns, measured in cells (a plugin may register a wide name).
+            let name_w = rows.iter().map(|row| row.name.width()).max().unwrap_or(0).min((inner.width as usize).saturating_sub(6));
+            let usage_w = rows.iter().map(|row| row.usage.width()).max().unwrap_or(0).min((inner.width as usize).saturating_sub(6));
+            let start = app.palette.cursor.saturating_sub(vis.saturating_sub(1) / 2).min(rows.len().saturating_sub(vis));
+            for (i, row) in rows.iter().enumerate().skip(start).take(vis) {
+                let label = format!("{:<name_w$} {:<usage_w$}", row.name, row.usage);
+                let room = (inner.width as usize).saturating_sub(label.width() + 3); // marker + label + a space, and one to spare
+                let mut desc = row.desc.clone();
+                while desc.width() > room {
+                    desc.pop();
+                }
+                let mut line = Line::from(vec![
+                    Span::raw(if i == app.palette.cursor { "▌" } else { " " }),
+                    Span::styled(label, Style::default().fg(crate::theme::get().accent)),
+                    Span::raw(" "),
+                    Span::styled(desc, dim()),
+                ]);
+                if i == app.palette.cursor {
+                    line = line.style(Style::default().bg(crate::theme::get().sel_bg));
+                }
+                lines.push(line);
+            }
         }
-        lines.push(line);
-    }
-    if rows.is_empty() {
-        lines.push(Line::from(Span::styled(" no matching command", dim())));
     }
     f.render_widget(Paragraph::new(lines), inner);
+    // The query's own cursor, on the first line, after the `› ` prompt.
+    let col = (2 + q.width()).min(inner.width.saturating_sub(1) as usize);
+    f.set_cursor_position(Position::new(inner.x + col as u16, inner.y));
+}
+
+/// A line cut to `width` cells, so a long usage or description cannot run past its popup.
+fn clip_line(line: Line, width: usize) -> Line {
+    let mut used = 0;
+    let mut spans: Vec<Span> = Vec::new();
+    for span in line.spans {
+        if used >= width {
+            break;
+        }
+        let mut text = String::new();
+        for c in span.content.chars() {
+            let w = c.width().unwrap_or(0);
+            if used + w > width {
+                break;
+            }
+            used += w;
+            text.push(c);
+        }
+        if !text.is_empty() {
+            spans.push(Span::styled(text, span.style));
+        }
+    }
+    Line::from(spans)
 }
 
 /// The composer. In a channel we are not in it is not a text field at all: it is a Join button, reached with Tab like the input
@@ -436,14 +508,17 @@ fn draw_command_palette(f: &mut Frame, app: &App, input: Rect) {
 fn draw_input(f: &mut Frame, app: &App, area: Rect, inner_w: usize) {
     let focused = app.focus == Focus::Input;
     let join = app.open_channel_not_joined();
-    let title = if join {
-        " join this channel "
+    // The composer is a plugin's box while a prompt is up: the title names the prompt and the hint asks the question.
+    let title: String = if let Some(p) = &app.prompt {
+        format!(" {} ", p.title)
+    } else if join {
+        " join this channel ".to_owned()
     } else if app.editing.is_some() {
-        " edit message "
+        " edit message ".to_owned()
     } else if app.reply_target.is_some() || app.in_thread() {
-        " reply in thread "
+        " reply in thread ".to_owned()
     } else {
-        " message "
+        " message ".to_owned()
     };
     let block = Block::default().borders(Borders::ALL).border_style(if focused { Style::default().fg(crate::theme::get().accent) } else { faint() }).title(title);
     let inner = block.inner(area);
@@ -458,12 +533,12 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect, inner_w: usize) {
         return;
     }
     if app.editor.is_empty() {
-        let hint = if app.read_only {
-            "read-only: nothing will be sent"
-        } else {
-            "Type a message · /help for commands · F1 for keys"
+        let hint = match &app.prompt {
+            Some(p) => p.hint.clone(),
+            None if app.read_only => "read-only: nothing will be sent".to_owned(),
+            None => "Type a message · Ctrl+K for commands · F1 for keys".to_owned(),
         };
-        f.render_widget(Paragraph::new(Span::styled(hint, dim())), inner);
+        f.render_widget(Paragraph::new(Span::styled(clipped(&hint, inner.width as usize), dim())), inner);
     } else {
         let lines: Vec<Line> = app.editor.rows(inner_w).iter().map(|r| Line::raw(app.editor.row_text(r))).collect();
         let scroll = lines.len().saturating_sub(inner.height as usize) as u16;
@@ -479,11 +554,16 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect, inner_w: usize) {
 
 fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
     let mut spans: Vec<Span> = Vec::new();
-    if app.palette_up() {
-        spans.extend(key_hint("↑↓", "Move"));
-        spans.extend(key_hint("⏎", "Run"));
-        spans.extend(key_hint("tab", "Complete"));
-        spans.extend(key_hint("esc", "Close"));
+    if app.overlay == Overlay::Palette {
+        if app.palette.arg.is_some() {
+            spans.extend(key_hint("type", "Argument"));
+            spans.extend(key_hint("⏎", "Run"));
+            spans.extend(key_hint("esc", "Back"));
+        } else {
+            spans.extend(key_hint("↑↓", "Move"));
+            spans.extend(key_hint("⏎", "Run"));
+            spans.extend(key_hint("esc", "Close"));
+        }
     } else if app.react.is_some() {
         spans.extend(key_hint("type", "Search"));
         spans.extend(key_hint("⏎", "Send"));
@@ -534,9 +614,10 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
 
 pub const KEYS: &[(&str, &str)] = &[
     ("Tab / Shift+Tab", "switch between channels, messages and the input"),
-    ("Esc", "close the palette or a panel, cancel a reply, leave a thread, then step back to the channels"),
+    ("Esc", "close the command palette or a panel, cancel a reply, leave a thread, then step back to the channels"),
     ("F1", "this list of keys"),
     ("F2", "help: commands and how things work"),
+    ("Ctrl+K", "the command palette: find a command by name and run it"),
     ("Ctrl+R", "reload the open channel or thread"),
     ("Ctrl+O", "load older messages"),
     ("Ctrl+Q / Ctrl+C", "quit"),
@@ -552,23 +633,22 @@ pub const KEYS: &[(&str, &str)] = &[
     ("PgUp / PgDn, Home / End", "scroll, first, last"),
     ("Enter", "open the thread and read it (in a thread: reply)"),
     ("Right", "open the thread of the selected message (a message with no replies has none)"),
-    ("Left", "in a thread: to its root, and out of the thread from there"),
+    ("Left", "in a thread: out to the timeline, on the message the thread hangs off"),
     ("r", "reply in the thread of the selected message"),
     ("a", "react to the selected message: pick an emoji, or type to search one (Enter sends, Esc closes)"),
     ("c", "copy the selected message to the clipboard"),
-    ("u", "mark the selected message unread (until /read)"),
+    ("u", "mark the selected message unread (until `read`)"),
     ("e", "edit the selected message (yours only)"),
     ("d", "delete the selected message (yours only; asks first)"),
     ("Ctrl+F", "search channels, people and every message"),
     ("click", "select; open the thread; on a link: copy it"),
     ("mouse wheel", "scroll"),
     ("", ""),
-    ("Command palette (while a `/command` is typed)", ""),
+    ("Command palette (Ctrl+K)", ""),
     ("type", "narrow the commands whose name starts with it"),
     ("Up / Down", "move the highlight"),
-    ("Enter", "run the command on the cursor line"),
-    ("Tab", "complete its name into the input, ready for an argument"),
-    ("Esc", "close the list and keep the command in the input"),
+    ("Enter", "run the command on the cursor row, or ask for its argument"),
+    ("Esc", "back out of the argument step, then close the palette"),
     ("", ""),
     ("Reaction picker (from `a` on a message)", ""),
     ("type", "search the emoji by name, or type an emoji to send it as-is"),
@@ -576,21 +656,31 @@ pub const KEYS: &[(&str, &str)] = &[
     ("Enter", "send the emoji on the cursor line, or remove yours"),
     ("Esc", "close"),
     ("", ""),
-    ("Panel (from /plugins or a plugin)", ""),
+    ("Panel (from the `plugins` command or a plugin)", ""),
     ("Up / Down, PgUp / PgDn, Home / End", "move"),
     ("Enter", "run the selected row"),
     ("Esc", "close"),
     ("", ""),
-    ("Profile card (from /whois)", ""),
+    ("Profile card (from the `whois` command)", ""),
     ("Esc", "close"),
+    ("", ""),
+    ("Local agents (from the `agents` command)", ""),
+    ("Up / Down, PgUp / PgDn, Home / End", "move over the list"),
+    ("Enter", "on the “new agent…” row, start one: a name, then what it should do"),
+    ("Esc", "close"),
+    ("", ""),
+    ("New agent (in the composer, from `agents create` or that row)", ""),
+    ("type", "the agent's name, Enter for the next step"),
+    ("type", "what it should do, Enter makes it"),
+    ("Alt+Enter, Shift+Enter", "a new line in the instructions"),
+    ("Esc", "cancel, and put the draft back in the box"),
     ("", ""),
     ("Writing", ""),
     ("Enter", "send; in a channel you are not in, join it (the composer is a Join button)"),
-    ("/", "start a `/command`: a palette lists the commands and narrows as you type"),
     ("Up, nothing typed", "back to the messages, on the newest one"),
     ("Alt+Enter, Ctrl+J", "new line, in any terminal"),
     ("Shift+Enter", "new line, where the terminal reports it"),
-    ("Ctrl+A / E, Ctrl+W / U / K", "line start / end, kill word / to start / to end"),
+    ("Ctrl+A / E, Ctrl+W / U", "line start / end, kill word / to start"),
     ("Alt+Backspace", "delete the word before the cursor"),
     ("Ctrl+← →, Alt+B / F", "move by word"),
     ("", ""),
@@ -621,45 +711,58 @@ pub const HELP: &[&str] = &[
     "Channels list the top-level messages only; replies live in their thread (Enter or a click opens it, and reads it).",
     "A message with replies shows how many, when the last one was, and `● N new` for replies since you last opened it.",
     "Esc returns you to the same place.",
-    "In a thread, its root is the one-line header at the top (number, time, author, then the first line of it, cut with `…` if there",
-    "is more) and every reply is indented two columns under it, so the pane reads as a thread.",
-    "With a message row selected, Right opens its thread (on a message with no replies there is nothing to open) and Left goes up to",
-    "that thread's root, then out of the thread; Esc does the same, wherever the cursor is.",
+    "In a thread, its root is a one-line header pinned to the top of the pane (the number, time and author, then the first",
+    "line of what it says, cut with `…` if there is more); it stays on screen while the replies scroll under it, indented two",
+    "columns, so the pane reads as a thread.",
+    "With a message row selected, Right opens its thread (on a message with no replies there is nothing to open) and Left leaves",
+    "the thread for the timeline it came from, landing the cursor on that message; Esc leaves the thread too, back where you were.",
     "",
-    "Commands, typed in the input (N is the message number shown as #N):",
-    "  /r N text   reply to message N        /t N   open the thread of message N",
-    "  /c          back to the channel        /copy N   copy message N",
-    "  /more       load older messages        /refresh   reload now",
-    "  /help       this screen                /q   quit",
-    "  /edit N     edit your message N        /delete N   delete your message N (asks first)",
-    "  /whois NAME their profile             /dm NAME   start (or open) a DM",
-    "  /invite NAME   add them to this channel (or the group DM you are in)",
-    "  /search text   search                  /new [private] name [about]   create a channel",
-    "  /join NAME  join (or open) a channel   /leave   leave this channel (asks first, y confirms)",
-    "  /plugins    what is loaded, and the commands plugins added",
-    "  /update     how to upgrade this copy (brew, cargo or the release page)",
+    "Commands run from the Ctrl+K command palette (N is the message number shown as #N):",
+    "  r N text    reply to message N         t N    open the thread of message N",
+    "  c           back to the channel         copy N    copy message N",
+    "  more        load older messages         refresh   reload now",
+    "  help        this screen                 q    quit",
+    "  edit N      edit your message N         delete N   delete your message N (asks first)",
+    "  whois NAME  their profile               dm NAME   start (or open) a DM",
+    "  agents      your local agents           agents create   make a new one",
+    "  invite NAME    add them to this channel (or the group DM you are in)",
+    "  search text    search                   new [private] name [about]   create a channel",
+    "  join NAME   join (or open) a channel    leave   leave this channel (asks first, y confirms)",
+    "  plugins     what is loaded, and the commands plugins added",
+    "  update      how to upgrade this copy (brew, cargo or the release page)",
     "A newer release shows up in the status line (BUZZR_NO_UPDATE_CHECK=1 turns the once-a-day check off).",
-    "  /read       mark this channel read     /read all   mark every channel read",
-    "  /archive    archive this channel (`x` in the list): it leaves the list, and Ctrl+F or /search finds it again",
+    "  read        mark this channel read      read all   mark every channel read",
+    "  archive     archive this channel (`x` in the list): it leaves the list, and Ctrl+F finds it again",
     "An archived channel is still loaded and still counts unread; only the list hides it. Enter on its search result brings it back.",
     "Search (Ctrl+F) finds channel names, people and every message. A channel row says what it is for, how many people",
     "are in it and whether you are one of them, and Enter opens it — a channel you are not in opens read-only, with a",
-    "Join button in place of the composer, and Enter there joins it. `/join NAME` joins (or opens) a channel by name,",
-    "and `/leave` takes you out of the open channel (it asks first; `y` confirms).",
-    "Typing `/` lists the commands above the input: keep typing to narrow them, Enter runs the one on the cursor, and Tab",
-    "fills its name in for a command that takes an argument (the list holds anything plugins added too). Esc closes the list",
-    "and leaves what was typed in the input, so a half-written command can be finished or corrected.",
+    "Join button in place of the composer, and Enter there joins it. The `join` command joins (or opens) a channel by name,",
+    "and `leave` takes you out of the open channel (it asks first; `y` confirms).",
+    "Ctrl+K opens the command palette: type to narrow the commands to the ones whose name starts with what you typed, the",
+    "arrows move the highlight, and Enter runs the one on the cursor. A command that takes an argument asks for it first —",
+    "type it and press Enter (or Enter again, for the ones where the argument is optional). A whole line can be typed at once",
+    "instead — `dm @Alice` runs in one step, no argument step. The list holds the commands",
+    "plugins added too, and Esc goes back out of the argument step and then closes the palette.",
     "Unread survives a restart: it comes from the last-read position per channel and per thread in",
     "~/.config/buzzr/read-state.json, and a \"new messages\" line marks where new messages start.",
-    "A person is found by the name in their profile, or by their npub (hex or npub1…): /dm and /whois take either.",
+    "A person is found by the name in their profile — looked up in the relay's directory when these channels have never shown it —",
+    "or by their npub (hex or npub1…): the `dm` and `whois` commands take either, with or without a leading `@`.",
     "Mentioning `@name` someone who is not in the channel asks first: y invites them and sends, n sends without inviting,",
-    "Esc keeps the message in the input. /invite NAME does the same without a message.",
+    "Esc keeps the message in the input. The `invite` command does the same without a message.",
     "Others see \"typing…\" while you write (start with --no-typing to turn that off).",
     "`a` opens the reaction picker on the selected message: pick an emoji from the list, or type a name to search it (or an",
     "emoji the list does not have). Enter sends the emoji on the cursor line, Esc closes. The picker opens on your own reaction,",
     "and its first row takes it back — so `a` then Enter changes nothing, and Enter on that row removes yours.",
     "Enter sends. Alt+Enter and Ctrl+J add a line in any terminal; the footer names the one that works here.",
     "Shift+Enter adds a line only where the terminal reports it: kitty, foot, WezTerm, Ghostty, iTerm2.",
+    "",
+    "`agents` shows the local agents this copy made, with the identity each one speaks as and the folder it works in.",
+    "`agents create` (or the “new agent…” row in that list) asks for a name and then for what the agent should do, and",
+    "makes it: a key of its own, a folder of its own, and a record in ~/.config/buzzr/agents.json (mode 600 — it holds",
+    "the agent's key, so anyone who can read that file can act as the agent). The harness it is made for is a local Claude",
+    "Code driven over ACP (`claude-agent-acp`). It is published to the relay first — the agent's own profile, signed with the",
+    "agent's key and carrying your attestation, and your listing of it — so other Buzz clients show it as your agent. A relay",
+    "that will not take it means no agent is made at all, and the flow says why.",
     "",
     "New messages, edits, deletions, reactions and typing indicators arrive live; there is no polling.",
     "Links: clicking one copies its URL to your clipboard (your terminal must allow OSC 52; in tmux:",
@@ -829,7 +932,7 @@ fn clipped(text: &str, room: usize) -> String {
     out
 }
 
-/// Somebody's profile card (`/whois NAME`): the name, the npub, and what they wrote about themselves. Everything from the
+/// Somebody's profile card (the `whois` command): the name, the npub, and what they wrote about themselves. Everything from the
 /// relay goes through the Markdown renderer (which strips control characters and wraps), so nothing in a profile can reach the
 /// terminal as anything but text.
 fn draw_whois(f: &mut Frame, app: &App, area: Rect) {
@@ -938,6 +1041,26 @@ mod tests {
         assert!(s.contains("I sail. A lot."), "the about line is rendered as markdown\n{s}");
         assert!(!s.contains("**"), "and not shown raw");
         assert!(s.contains("Esc closes"), "the card says how to close it\n{s}");
+    }
+
+    #[test]
+    fn a_prompt_a_plugin_asked_for_takes_over_the_composer() {
+        let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        let mut app = app();
+        app.focus = Focus::Input;
+        // A plugin's prompt (see `plugin::PluginOutput::Prompt`): buzzr owns the box, and the title and hint are the
+        // plugin's own words. The agents flow is its first user.
+        app.prompt = Some(crate::app::PromptState {
+            plugin: "agents".into(),
+            id: "instructions".into(),
+            title: "new agent · instructions".into(),
+            hint: "What should Scout do? Enter makes it, Esc cancels (Alt+Enter for a new line)".into(),
+            multiline: true,
+        });
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(s.contains("new agent · instructions"), "the composer names the prompt\n{s}");
+        assert!(s.contains("What should Scout do?"), "and its hint asks the question\n{s}");
     }
 
     #[test]
@@ -1147,6 +1270,58 @@ mod tests {
     }
 
     #[test]
+    fn a_thread_pins_its_root_header_while_the_replies_scroll_under_it() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        // A short terminal, so the thread's replies cannot all fit: the pinned header is what keeps the root on screen.
+        let mut term = Terminal::new(TestBackend::new(100, 12)).unwrap();
+        let mut app = App::new("me".into(), false, chrono_tz::UTC);
+        let chan = Channel { id: "c1".into(), name: "general".into(), about: String::new(), created_at: 1, section: crate::model::Section::Channels, label: "general".into(), is_private: false };
+        let _: Vec<Cmd> = app.handle(AppEvent::Channels(Ok(vec![chan])));
+        let mut root = ev("root", 1000, "the root message", &[]);
+        root.pubkey = "bob".into();
+        let replies: Vec<_> = (1..=9)
+            .map(|n| {
+                let mut r = ev(&format!("t{n}"), 1000 + n as u64, &format!("reply number {n}"), &[&["e", "root", "", "reply"]]);
+                r.pubkey = "bob".into();
+                r
+            })
+            .collect();
+        app.handle(AppEvent::Names(Ok([("bob".to_string(), "Bob".to_string())].into())));
+        app.handle(AppEvent::Window { channel: "c1".into(), cursor: None, result: Ok(Window { events: vec![root], has_more: false, next_cursor: None }) });
+        app.handle(AppEvent::Live(Live::Up));
+        app.handle(AppEvent::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))); // the channel list -> the messages
+        term.draw(|f| draw(f, &mut app)).unwrap(); // a first draw, so the app knows the pane it is drawing into
+        app.handle(AppEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))); // open the thread of the only row
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        app.handle(AppEvent::Thread { channel: "c1".into(), root: "root".into(), result: Ok(replies) });
+        term.draw(|f| draw(f, &mut app)).unwrap();
+
+        // What is drawn right of the sidebar divider, row by row; the screen's own header line has no divider, so it is blank.
+        let pane = |rows: &[String]| rows.iter().map(|l| l.split_once('│').map(|(_, r)| r.trim_end().to_string()).unwrap_or_default()).collect::<Vec<_>>();
+        let root_header = |rows: &[String]| rows[1].contains("#1") && rows[1].contains("the root message");
+
+        // A thread opens at its bottom, on the newest reply; the pinned root header stays above it.
+        let bottom = pane(&screen(&term));
+        assert!(root_header(&bottom), "the pinned root header is the first pane row: {:?}", bottom[1]);
+        assert!(bottom.iter().any(|l| l.contains("reply number 9")), "the newest reply is on screen at the bottom:\n{}", bottom.join("\n"));
+
+        // Jump to the top: the replies move, the pinned root header does not.
+        app.handle(AppEvent::Key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE)));
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let top = pane(&screen(&term));
+        assert!(root_header(&top), "the pinned header stays put while the replies scroll: {:?}", top[1]);
+        assert!(top.iter().any(|l| l.contains("reply number 1")), "the earliest reply is on screen at the top:\n{}", top.join("\n"));
+        assert!(!top.join("\n").contains("reply number 9"), "the newest reply has scrolled under the header:\n{}", top.join("\n"));
+
+        // Back to the bottom: the header is still the first pane row, and the newest reply is back on screen.
+        app.handle(AppEvent::Key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE)));
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let bottom = pane(&screen(&term));
+        assert!(root_header(&bottom), "the pinned header is still the first pane row: {:?}", bottom[1]);
+        assert!(bottom.iter().any(|l| l.contains("reply number 9")), "the newest reply is back on screen:\n{}", bottom.join("\n"));
+    }
+
+    #[test]
     fn the_default_scheme_paints_its_background_everywhere_including_popups() {
         let th = crate::theme::get();
         let (bg, popup) = (th.bg.expect("default scheme paints a background"), th.popup_bg.expect("and a popup background"));
@@ -1186,8 +1361,8 @@ mod tests {
         assert!(screen(&term).join("\n").contains("Keys  (Esc closes)"));
         app.overlay = Overlay::Help;
         term.draw(|f| draw(f, &mut app)).unwrap();
-        assert!(screen(&term).join("\n").contains("/r N text"));
-        assert!(screen(&term).join("\n").contains("/update"), "the help screen lists /update");
+        assert!(screen(&term).join("\n").contains("r N text"), "the help screen lists the commands");
+        assert!(screen(&term).join("\n").contains("update"), "the help screen lists update");
         app.overlay = Overlay::None;
         app.typing.insert(("c1".into(), None, "bob".into()), std::time::Instant::now());
         term.draw(|f| draw(f, &mut app)).unwrap();
@@ -1207,7 +1382,9 @@ mod tests {
         let mut app = app();
         app.update_source = crate::update::InstallSource::Homebrew;
         app.focus = Focus::Input;
-        for c in "/update".chars() {
+        // run `update` the way a user does: through the Ctrl+K palette
+        app.handle(AppEvent::Key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL)));
+        for c in "update".chars() {
             app.handle(AppEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)));
         }
         app.handle(AppEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
@@ -1223,7 +1400,7 @@ mod tests {
         app.handle(AppEvent::Update("0.2.0".into()));
         term.draw(|f| draw(f, &mut app)).unwrap();
         let s = screen(&term).join("\n");
-        assert!(s.contains("buzzr 0.2.0 available · /update"), "the update notice is on the status line\n{s}");
+        assert!(s.contains("0.2.0 available · Ctrl+K → update"), "the update notice is on the status line\n{s}");
     }
 
     #[test]
@@ -1463,27 +1640,45 @@ mod tests {
     }
 
     #[test]
-    fn typing_a_slash_command_shows_the_palette_above_the_input() {
+    fn ctrl_k_shows_the_command_palette_and_typing_narrows_it() {
         use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
         let mut app = app();
         app.focus = Focus::Input;
         let key = |c: char| AppEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
-        app.handle(key('/'));
+        app.handle(AppEvent::Key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL)));
         term.draw(|f| draw(f, &mut app)).unwrap();
         let s = screen(&term).join("\n");
-        assert!(s.contains("Commands · Enter runs · Tab completes"), "the palette opens with a title that names the keys\n{s}");
-        assert!(s.contains("/help") && s.contains("the commands and how things work"), "and lists a command with what it does\n{s}");
-        assert!(s.contains("/archive") && s.contains("archive this channel"), "the list is scrolled from the first row\n{s}");
-        assert!(s.contains("Run") && s.contains("Complete"), "the footer follows the palette\n{s}");
+        assert!(s.contains("Commands · Enter runs · Esc closes"), "the palette opens with a title that names the keys\n{s}");
+        assert!(s.contains("help") && s.contains("the commands and how things work"), "and lists a command with what it does\n{s}");
+        assert!(s.contains("archive") && s.contains("archive this channel"), "the list is scrolled from the first row\n{s}");
+        assert!(s.contains("Move") && s.contains("Run") && s.contains("Close"), "the footer follows the palette\n{s}");
 
         // typing narrows the list to the commands that still match
         app.handle(key('h'));
         app.handle(key('e'));
         term.draw(|f| draw(f, &mut app)).unwrap();
         let s = screen(&term).join("\n");
-        assert!(s.contains("/help") && s.contains("the commands and how things work"), "the command that still matches\n{s}");
-        assert!(!s.contains("/search") && !s.contains("load older messages"), "the ones that do not drop out\n{s}");
+        assert!(s.contains("help") && s.contains("the commands and how things work"), "the command that still matches\n{s}");
+        assert!(!s.contains("search") && !s.contains("load older messages"), "the ones that do not drop out\n{s}");
+    }
+
+    #[test]
+    fn the_palette_asks_for_an_argument_in_a_step_of_its_own() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        let mut app = app();
+        app.focus = Focus::Input;
+        let key = |c: char| AppEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        app.handle(AppEvent::Key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL)));
+        app.handle(key('d'));
+        app.handle(key('m'));
+        app.handle(AppEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term).join("\n");
+        assert!(s.contains("dm · Enter runs · Esc goes back"), "the title names the command being asked about\n{s}");
+        assert!(s.contains("NAME") && s.contains("open your DM with NAME"), "and shows the argument it takes\n{s}");
+        assert!(s.contains("Argument") && s.contains("Back"), "the footer follows the argument step\n{s}");
     }
 
     #[test]

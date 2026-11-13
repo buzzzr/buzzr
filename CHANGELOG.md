@@ -5,14 +5,42 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
 
 ## [Unreleased]
 
+### Changed
+
+- A relay **notice** is shown as a message (`relay: …`) and no longer marks the connection as offline; reconnect delays have jitter.
+- Internal: `app.rs` split by feature, tag lookups go through `Ev`, one clock, a `request` helper for commands, agent publish/delete live in
+  `agents.rs` with a typed `agents::Error`, and the state files are written in order off the loop. `docs/DESIGN_RULES.md` lists the antipatterns to avoid.
+
+### Added
+
+- An agent can be **deleted** from the `agents` list: a `delete <name>…` row asks to confirm, then takes the agent off the relay — its own
+  profile (signed with its own key) and your listing of it, both by NIP-09 — and deletes its key and record from `agents.json`, leaving the
+  folder it worked in alone. The relay is asked first, so a relay that refuses it deletes nothing, and the agent stays listed and running.
+  Plugins reach it through the new `delete_agent` binding (needs `agents:write`), answered with `deleted`.
+- A local agent mentioned in a **thread** is answered with the thread in hand: the turn's prompt carries the thread's earlier messages — the
+  root and the replies that came before the mention, oldest first, the newest twelve, each cut to 4000 characters — so the agent reads the
+  conversation it is joining instead of one message out of it, the same window the Buzz app gives its agents.
+- The **command palette** takes a whole line, not just a command name: type `dm @Alice` and Enter runs `dm` with `@Alice` in one step,
+  with no separate argument prompt. The list still narrows to the command at the head of the line, a bare name is still a pick that
+  asks for its argument, and a leading `@` on a name is how somebody is addressed rather than part of the name (`join`, `new` and the
+  other non-person arguments are unchanged).
+
+### Fixed
+
+- A program that buzzr starts right after it was written to disk is no longer refused with `Text file busy`: the start is
+  tried again for a moment. This is what a plugin reloaded straight after an edit ran into, and what a harness being
+  updated underneath `agents create` can run into.
+
+## [0.2.0-rc.3] - 2026-11-12
+
 ### Added
 
 - Ctrl+F finds a channel by name across every channel the relay lists, joined or not, and its row says what the channel is for, how
   many people are in it and whether you are one of them (the membership and the counts come from NIP-29 `kind:39002`). A channel you
   are not in opens read-only: in place of the composer there is a `[ Join ]` button, reached with Tab the way the input is, and Enter
   on it asks the relay to join you (`kind:9021`) — its answer turns the button back into the composer. A private channel is not
-  offered, because a self-join needs an open one. `/join NAME` (a name, `#name` or a channel id) joins or opens one directly, and
-  `/leave` asks first (`y` confirms) before it sends `kind:9022` and drops the channel from the list. The list and the membership are
+  offered, because a self-join needs an open one. `join NAME` (a name, `#name` or a channel id) joins or opens one directly, and
+  `leave` asks first (`y` confirms) before it sends `kind:9022` and drops the channel from the list. The list and the membership are
   read again after a join or a leave.
 - A plugin can keep a **pane** under the channel list: a small block that is always on screen and takes no focus, key or click.
   `examples/plugins/clock` shows the time in large digits there and redraws it from an opt-in heartbeat.
@@ -21,6 +49,17 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
   JavaScript or TypeScript runtime needs nothing added to buzzr), and the plugin sends its display name, its permissions and its
   heartbeat (`tickMs`) in its `ready` message. The contract version is now `apiVersion` 2. A folder that will not load — no entry
   file, no executable bit, an id that is not safe — is listed with the reason instead of failing quietly.
+- **One plugin framework for two kinds of plugin.** A plugin is now either **runtime-loaded** (the separate process above, any
+  language, hot-reloaded) or **compiled-in** (a Rust type in buzzr's own tree, or in a crate of its own that depends on the `buzzr`
+  library, registered with `register_plugin!` and driven in-process). Both speak the same `PluginInput`/`PluginOutput` contract and
+  pass the same permission and screen gates, so the transport never changes what a plugin may do. A new **prompt** binding lets either
+  kind ask buzzr to put a question in the composer — one line, or a block of text — and hand the answer back, and two new bindings and
+  permissions (`agents:read`, `agents:write`) let either kind list the local agents, ask buzzr to start a harness and read what it
+  offers, and ask buzzr to make and publish one.
+- **`/agents` is now the first compiled-in plugin** (`src/plugins/agents/`), written against that same contract: it lists the
+  local agents as a panel, asks for a name and then for the instructions through prompts, asks the host to start the harness and read
+  what it offers, and asks the host to make the agent. The `/agents` overlay and its bespoke state are gone from the core — the
+  feature is a plugin.
 - A **typed SDK for TypeScript** (`sdk/typescript/buzzr.ts`): one dependency-free file that turns the protocol into a single
   `definePlugin({ name, permissions, tickMs, ready, onTick, onCommand, … })` call, with `status`, `pane`, `panel`, `flash`, `draft`,
   `send` and `log` on the handle it gives back. `examples/plugins/clock` is written with it.
@@ -30,22 +69,47 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
 - **A draft belongs to the place it was typed**: switching channel, or going into or out of a thread, empties the box instead of
   carrying a half-written message along, and the text is back when you return to that channel or thread. Sending clears that
   place's draft. They are kept in `drafts.json` next to the read positions, so they survive a restart.
+- **Agents.** `/agents` lists the agents this copy made; `/agents create` — or the “new agent…” row in that list — turns the composer into a
+  flow that asks for a name, then for what the agent should do, then starts the harness and reads what it offers over ACP (its models, and a
+  model's thinking levels) so a model and a level can be picked, and makes it an agent: a fresh key of its own, a folder of its own to work in,
+  and a record in `agents.json` (mode 600, next to the read positions, since it holds the agent's key). It is published to the relay, the way
+  the Buzz app does it: the agent's own kind-0 profile, signed with its own key and carrying this identity's NIP-OA attestation of it, and this
+  identity's `kind:30177` listing of it, so the owner's other Buzz clients show it. The harness is asked what it offers, and the relay asked to
+  take the agent, before anything is written down: a harness that will not start or will not answer, or an agent the relay refuses, stops the
+  flow and makes nothing — no key, no folder, no record — and the flow says why. The harness it is made for is a local Claude Code driven over
+  ACP (`claude-agent-acp`); a second one (codex, say) is a new entry in the harness table (`src/harness/mod.rs`) and nothing else. Read-only
+  mode refuses to make one.
+- **A local agent now answers the mentions that name it.** An agent was an identity and a folder with nothing running it; a **runner**
+  (`src/runner.rs`, started with the app) gives every agent in `agents.json` a watch of its own and answers its mentions: each message that
+  carries the agent in a `p` tag is one turn of its harness, started in the agent's own folder, with what the harness streams back published to
+  the channel the mention came from — as the agent's own message, signed with the agent's own key and carrying its owner's attestation, the way
+  its profile is. One session is kept between mentions, so the agent stays in the conversation it is in, and the status line says that it
+  replied, or why it could not (a harness that is not installed, a relay that refuses the answer, a turn that streams back nothing). A mention
+  names an agent **in a channel**, so the agent has to be in that channel to be mentioned at all — `/invite <npub>`, the npub `/agents` shows,
+  puts it there — and only mentions that arrive while the runner is watching are answered: an older backlog is not. A harness starting a turn
+  is buzzr's job, never a plugin's, and a run that may not send (`--read-only`, `BUZZR_SAFE_MODE=1`) starts no runner.
+- **A name is looked up in the relay's directory when no loaded channel has shown it.** `/invite`, `/dm` and `/whois` still take a
+  name they have already met, and an npub, but a name the local table does not hold is no longer answered with “nobody here is
+  called …”: it is asked of the relay (a NIP-50 `search` over `kind:0` profiles) and the command goes on with the one person that
+  fits. When several profiles fit, they are listed by name and short key instead of one being guessed. The matches are checked here
+  as well as asked for at the relay, so a directory that ignores `search` and answers everyone cannot make the command act on the
+  wrong key. The name that answers is remembered, so the next command resolves it without a round-trip; a directory that cannot be
+  reached, or that knows nobody by that name, still says so.
 
 ### Changed
 
+- **Commands moved to a `Ctrl+K` command palette.** `Ctrl+K` opens a modal palette with a query of its own: type to narrow the
+  commands to the ones whose name starts with what you typed, the arrows move the highlight, and Enter runs the one on the cursor. A
+  command that takes an argument asks for it in a step of its own (Esc backs out of the argument step, a second Esc closes the
+  palette). The palette never touches the composer or its draft, and a `/` typed into the message box is now ordinary text — the
+  `/command` form is gone, for the commands plugins add too.
 - `←` / `→` walk a thread from the message list: with a message row selected, `→` opens its thread (a message with no replies has
-  nothing under it, so there the key does nothing) and `←` goes up to that thread's root and, from the root, out of the thread. Esc
-  still backs out the same way, wherever the cursor is.
-- The thread pane reads as a thread: its root sits at the top as one header line — the message number, the time, the author and
-  the first line of what was said, cut with `…` when there is more — and every reply is indented two columns under it. The root
-  keeps message number 1, so the numbers `/r N` and `/t N` take are the ones on screen, and links in an indented reply are still
-  where they look.
-
-### Fixed
-
-- Esc while the slash-command palette was up moved the keyboard out of the composer and left the `/command` behind in the input.
-  It now closes just the palette and keeps the keyboard — and the half-written command — where they are, so typing can go on; the
-  list comes back with the next edit.
+  nothing under it, so there the key does nothing) and `←` leaves a thread for the timeline it came from, putting the cursor back on
+  the message the thread hangs off. Esc still backs out the same way, wherever the cursor is.
+- The thread pane reads as a thread: its root is pinned to the top as one header line — the message number, the time, the author
+  and the first line of what was said, cut with `…` when there is more — and it stays on screen while the replies, indented two
+  columns, scroll under it. The root keeps message number 1, so the numbers `r N` and `t N` take are the ones on screen, and
+  links in an indented reply are still where they look.
 
 ## [0.2.0-rc.2] - 2026-11-11
 
@@ -160,7 +224,8 @@ First public version.
 - A notice in the UI when a newer version is published, with the upgrade command.
 - Release builds for Linux (musl, x86_64 and aarch64) and macOS (Apple silicon and Intel), published with `SHA256SUMS`.
 
-[Unreleased]: https://github.com/buzzzr/buzzr/compare/v0.2.0-rc.2...HEAD
+[Unreleased]: https://github.com/buzzzr/buzzr/compare/v0.2.0-rc.3...HEAD
+[0.2.0-rc.3]: https://github.com/buzzzr/buzzr/compare/v0.2.0-rc.2...v0.2.0-rc.3
 [0.2.0-rc.2]: https://github.com/buzzzr/buzzr/compare/v0.2.0-rc.1...v0.2.0-rc.2
 [0.2.0-rc.1]: https://github.com/buzzzr/buzzr/compare/v0.2.0-rc.0...v0.2.0-rc.1
 [0.2.0-rc.0]: https://github.com/buzzzr/buzzr/compare/v0.1.1...v0.2.0-rc.0

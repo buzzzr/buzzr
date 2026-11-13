@@ -26,9 +26,10 @@ pub const DEBOUNCE: Duration = Duration::from_millis(300);
 /// How often the runtime looks at which plugins are due a heartbeat. A plugin's `tickMs` is honoured to this
 /// granularity, so it is the same number as `discover::MIN_TICK_MS`.
 pub const TICK_CHECK: Duration = Duration::from_millis(discover::MIN_TICK_MS);
-/// A plugin may post this often, no more. The user always sees it happen.
-const SEND_INTERVAL: Duration = Duration::from_secs(1);
-const SENDS_PER_MINUTE: usize = 20;
+/// A plugin may post this often, no more. The user always sees it happen. A compiled-in plugin is held to the very
+/// same numbers (see `plugin`), so the transport never changes how fast a plugin may talk.
+const SEND_INTERVAL: Duration = crate::plugin::SEND_INTERVAL;
+const SENDS_PER_MINUTE: usize = crate::plugin::SENDS_PER_MINUTE;
 const MAX_LOG: u64 = 1024 * 1024;
 
 enum Msg {
@@ -326,7 +327,8 @@ impl Runtime {
             cmd.env("BUZZR_CONFIG_DIR", dir);
         }
         cmd.env("TMPDIR", std::env::temp_dir());
-        let mut child = cmd.spawn().map_err(|e| format!("could not start {}: {e}", entry.display()))?;
+        // Through `spawn::`: a reload writes the new entry just before this starts it (see `crate::spawn`).
+        let mut child = crate::spawn::start(|| cmd.spawn()).map_err(|e| format!("could not start {}: {e}", entry.display()))?;
         let stdout = child.stdout.take().ok_or("no stdout")?;
         let stdin = child.stdin.take().ok_or("no stdin")?;
         let (line_tx, line_rx) = mpsc::unbounded_channel::<String>();
@@ -407,7 +409,7 @@ impl Runtime {
                     info.state = PluginState::Running;
                     info.detail.clear();
                     info.commands = contributions.commands.len();
-                    // What the plugin declared about itself in its own code, kept for `/plugins` and the permission checks.
+                    // What the plugin declared about itself in its own code, kept for the `plugins` command and the permission checks.
                     info.name = name.clone();
                     info.permissions = declaration.permissions.clone();
                     info.tick_ms = declaration.tick_ms;
@@ -435,6 +437,17 @@ impl Runtime {
                     FromPlugin::Flash { text } => self.emit(PluginEvent::Flash { text }),
                     FromPlugin::Draft { text } => self.emit(PluginEvent::Draft { plugin: plugin.to_owned(), text }),
                     FromPlugin::Send { channel, text } => self.forward_send(plugin, channel, text),
+                    FromPlugin::Prompt { id, title, hint, multiline } => {
+                        self.emit(PluginEvent::Prompt { plugin: plugin.to_owned(), id, title, hint, multiline })
+                    }
+                    FromPlugin::ListAgents { id } => self.emit(PluginEvent::ListAgents { plugin: plugin.to_owned(), id }),
+                    FromPlugin::ProbeHarness { id, harness, model } => {
+                        self.emit(PluginEvent::ProbeHarness { plugin: plugin.to_owned(), id, harness, model })
+                    }
+                    FromPlugin::CreateAgent { id, name, instructions, harness, model, effort } => {
+                        self.emit(PluginEvent::CreateAgent { plugin: plugin.to_owned(), id, name, instructions, harness, model, effort })
+                    }
+                    FromPlugin::DeleteAgent { id, pubkey } => self.emit(PluginEvent::DeleteAgent { plugin: plugin.to_owned(), id, pubkey }),
                     FromPlugin::Log { level, text } => {
                         self.log(plugin, &format!("{level}: {text}"));
                         if level == "error" {
@@ -567,6 +580,43 @@ impl Runtime {
             PluginCmd::PanelAction { plugin, id, row, value } => {
                 if let Some(proc) = self.running.get(&plugin) {
                     let _ = proc.stdin.send(ToPlugin::PanelAction { id: &id, row, value: value.as_deref() }.line());
+                }
+            }
+            PluginCmd::PromptAnswer { plugin, id, text } => {
+                if let Some(proc) = self.running.get(&plugin) {
+                    let _ = proc.stdin.send(ToPlugin::PromptAnswer { id: &id, text: text.as_deref() }.line());
+                }
+            }
+            PluginCmd::Agents { plugin, id, agents } => {
+                if let Some(proc) = self.running.get(&plugin) {
+                    let _ = proc.stdin.send(ToPlugin::Agents { id: &id, agents: &agents }.line());
+                }
+            }
+            PluginCmd::Created { plugin, id, result } => {
+                if let Some(proc) = self.running.get(&plugin) {
+                    let (agent, error) = match &result {
+                        Ok(a) => (Some(a), None),
+                        Err(e) => (None, Some(e.as_str())),
+                    };
+                    let _ = proc.stdin.send(ToPlugin::Created { id: &id, agent, error }.line());
+                }
+            }
+            PluginCmd::Deleted { plugin, id, result } => {
+                if let Some(proc) = self.running.get(&plugin) {
+                    let (name, error) = match &result {
+                        Ok(n) => (Some(n.as_str()), None),
+                        Err(e) => (None, Some(e.as_str())),
+                    };
+                    let _ = proc.stdin.send(ToPlugin::Deleted { id: &id, name, error }.line());
+                }
+            }
+            PluginCmd::HarnessOffer { plugin, id, result } => {
+                if let Some(proc) = self.running.get(&plugin) {
+                    let (offer, error) = match &result {
+                        Ok(o) => (Some(o), None),
+                        Err(e) => (None, Some(e.as_str())),
+                    };
+                    let _ = proc.stdin.send(ToPlugin::HarnessOffer { id: &id, offer, error }.line());
                 }
             }
         }

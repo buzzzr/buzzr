@@ -34,11 +34,11 @@
 ## Features
 
 - **Channels and DMs** with unread counts, in sections: Solo chats, Channels (private and open) and DMs. DMs are labelled with the other
-  person; start one with `/dm name`, or from search. An open channel is marked `#` and a private one `*`.
+  person; start one with the `dm` command, or from search. An open channel is marked `#` and a private one `*`.
 - **Archive a channel.** `x` takes the channel off the list without leaving it (leaving changes your membership on the relay);
   Ctrl+F finds it again and Enter brings it back. Its unread is kept, but it no longer counts in the status line.
 - **Unread that survives a restart.** The last-read position is saved per channel and per thread, so the badges are right again
-  next time and a `new messages` line shows where you left off. `u` marks a message unread until you `/read` the channel.
+  next time and a `new messages` line shows where you left off. `u` marks a message unread until you run the `read` command.
 - **Threads.** A channel shows top-level messages only, as the Buzz app does, each with its reply count and the time of the last reply;
   a thread with replies since you last opened it shows `● 2 new`. Enter opens a thread (and reads it), Esc returns to the same place.
   The channel list keeps the two kinds of unread apart as well: unseen messages count as `(2)`, unseen replies inside a thread show as
@@ -48,18 +48,37 @@
 - **Reads like a chat.** Markdown (bold, italic, lists, code, quotes, headings), clickable links, reactions, and edited messages say so.
 - **Keeps your place.** New messages never move the view unless you were at the bottom, and older history loads above without a jump.
 - **Write, edit, delete.** A multi-line input with bracketed paste and `@name` mentions. Edit or delete your own messages with `e` and `d`.
+- **Commands from the keyboard.** Ctrl+K opens a command palette over everything: type to narrow the commands to the ones whose
+  name starts with what you typed, and Enter runs the one on the cursor. A command that takes an argument asks for it in a step of
+  its own — or type the whole line at once (`dm @Alice`) and it runs as it stands. `/` is an ordinary character in the message box.
 - **Search everything.** Ctrl+F searches channel names, people and every message you can read, with full text from the relay. Enter on a
   person opens the DM you already have with them, or starts a new one.
-- **Create channels** from the input with `/new`.
+- **Create channels** with the `new` command.
 - **Join and leave channels.** A channel you are not in opens read-only: its composer is a `[ Join ]` button, and Enter on it joins the
-  channel. `/join NAME` does the same by name, and `/leave` takes you out of the open channel after asking. Ctrl+F shows what a
+  channel. The `join` command does the same by name, and `leave` takes you out of the open channel after asking. Ctrl+F shows what a
   channel is for, how many people are in it and whether you are one of them.
-- **People and profiles.** `/whois name` shows a short card (name, npub, what they wrote about themselves); `/dm name` opens your DM with
-  someone or starts a new one. Both take a name from a channel or an npub.
-- **Invite people into a channel.** `/invite name` adds someone to the channel on screen (or the group DM you are in). A message
+- **People and profiles.** The `whois` command shows a short card (name, npub, what they wrote about themselves); `dm` opens your DM with
+  someone or starts a new one. Both take a name the relay's directory knows, or an npub.
+- **Invite people into a channel.** The `invite` command adds someone — a display name, or an npub — to the channel on screen (or the group
+  DM you are in). A message
   that `@mentions` someone who is not in the channel asks first: `y` invites them and sends, `n` sends without inviting, Esc
   keeps the message in the input.
-- **Plugins.** Add your own `/commands`, status items, badges, a pane under the channel list and panels from any language. See [PLUGIN.md](PLUGIN.md).
+- **Agents.** `agents` lists the agents this copy made; `agents create` (or the “new agent…” row in that list) asks for a name, then for what
+  the agent should do, then asks the harness what it offers — its models, and a model's thinking levels — so you can pick one of each, and makes
+  it — a key of its own, a folder of its own, and a record in `agents.json` (mode 600, beside the read positions) — and publishes it to the
+  relay: the agent's own profile, signed with its own key and carrying your attestation of it, and your listing of it, so other Buzz clients
+  show it as yours. The harness it is made for is a local Claude Code driven over ACP (`claude-agent-acp`, as the Buzz app does). The harness is
+  asked what it offers, and the relay asked to take the agent, before anything is written: a harness that will not answer, like an agent the
+  relay will not take, stops the flow and makes nothing, and says why. The agent then **answers for itself**: buzzr runs its harness — a local
+  Claude Code, driven over ACP, as the agent, with the agent's own key — for every message that names it, and posts what the harness answered
+  back into the channel it was mentioned in. A mention in a thread is answered with the thread in hand: the turn's prompt carries the
+  thread's earlier messages — the root and the replies before it, oldest first, the newest twelve — the same window the Buzz app gives
+  its agents, so the agent reads the conversation it is joining rather than one message out of it. A mention names an agent *in a
+  channel*, so add the agent to the channel first (`invite <npub>`,
+  the npub the `agents` list shows) — then anything that mentions it, from any Buzz client, gets an answer. The list also offers to delete an
+  agent: it takes the agent off the relay — its own profile and your listing of it — and then deletes its key and record, leaving the folder it
+  worked in alone. The relay is asked first, so a relay that refuses it deletes nothing.
+- **Plugins.** Add your own commands, status items, badges, a pane under the channel list and panels — from any language, as a runtime-loaded plugin, or as a compiled-in Rust plugin in buzzr's own tree. See [PLUGIN.md](PLUGIN.md).
 - **Themes.** The default `buzz-dark` uses the dark palette of the Buzz desktop app. `BUZZR_THEME=dark` keeps your terminal's own background, `BUZZR_THEME=buzz-light` is the desktop app's light palette, and `BUZZR_THEME=light` is for a light terminal. `BUZZR_THEME=high-contrast` is black-on-white at WCAG AAA (7:1), and `NO_COLOR` or `TERM=dumb` turns colour off entirely.
 - **Read-only mode** (`--read-only`) for identities you should not speak for.
 
@@ -113,7 +132,7 @@ buzzr
 ```
 
 The first time, buzzr asks for your relay address and private key, and how to keep the key. After that it opens straight into your channels.
-Press **F1** for the keys and **F2** for the commands. Press **Tab** to move between the channel list, the messages and the input; the arrow keys get between the messages and the input too — `Up` from an empty input lands on the newest message, `Down` on the newest message goes back to the input.
+Press **F1** for the keys and **F2** for the commands, and **Ctrl+K** to run a command by name. Press **Tab** to move between the channel list, the messages and the input; the arrow keys get between the messages and the input too — `Up` from an empty input lands on the newest message, `Down` on the newest message goes back to the input.
 
 The default colour scheme is `buzz-dark`; set `BUZZR_THEME=buzz-light` for the light one:
 
@@ -150,32 +169,34 @@ The full behaviour, for when the feature list above is not enough.
   the left, like the selected message; the bar is the accent colour while the list has focus and grey when it does not, so the accent
   marks where the focus is. The bar sits on the channel on screen; while the list has focus it follows the cursor, and leaving the
   list without opening a channel puts it back. The keyboard starts on the channel list, so Up/Down and Enter work as soon as buzzr opens.
-  `/dm name` opens the DM you already have with someone, or starts a new one; a name from a channel or an npub both work.
+  The `dm` command opens the DM you already have with someone, or starts a new one; a name from the relay's directory or an npub both work.
 - **Unread that survives a restart:** the last-read position per channel and per thread lives in
   `~/.config/buzzr/read-state.json`, so it is there again next time (each channel's count is asked of the relay on startup)
-  and a `new messages` line marks where the unseen ones begin. Opening a channel marks it read; `/read` does it again and
-  `/read all` clears every channel and its threads. `u` on a message goes the other way: it forces *that* message unread on
+  and a `new messages` line marks where the unseen ones begin. Opening a channel marks it read; `read` does it again and
+  `read all` clears every channel and its threads. `u` on a message goes the other way: it forces *that* message unread on
   this device, so the badge and the `new messages` line come back above it. Unlike the position, a mark is not moved on by
-  reading: it works on a message of your own too, and only `/read` clears it. The channel list tells the two kinds of unread
+  reading: it works on a message of your own too, and only `read` clears it. The channel list tells the two kinds of unread
   apart: `(2)` is unseen top-level messages, `●` is unseen replies inside a thread, and `(2) ●` is both. The `●` needs the
   channel's messages loaded, because the news it stands for is inside a thread — the count a relay answers on startup is about
   the timeline only.
 - **Archive a channel:** `x` on the list keeps a channel out of it, without leaving it — leaving changes your membership on the
   relay and loses your place. An archived channel is still loaded and still counts unread, but it is left out of the status line's
-  unread total, so no badge points at a row you cannot see. Ctrl+F (or `/search`) still matches it; its row says `archived`, and
+  unread total, so no badge points at a row you cannot see. Ctrl+F (or the `search` command) still matches it; its row says `archived`, and
   Enter brings it back and opens it. The set lives in `~/.config/buzzr/archived.json` and survives a restart.
 - **A channel shows only its top-level messages**, as the Buzz app does, each with `💬 3 replies · last Thu 13:33` when it has a
   thread. The relay supplies the counts and says whether older messages exist.
-- **Threads:** Enter or a click opens one, Esc returns to the same place. The thread's root sits at the top as one header line —
-  its number, time and author, then the first line of what it says, cut with `…` when there is more — and the replies are indented
-  two columns under it, so the pane reads as a thread rather than a flat list. Opening a thread reads its replies, so a thread with
-  replies since you last looked at it shows `● 2 new` after its reply count. `r` replies in the thread of the selected message.
+- **Threads:** Enter or a click opens one, Esc returns to the same place. The thread's root is pinned to the top of the pane
+  as one header line — its number, time and author, then the first line of what it says, cut with `…` when there is more — so it
+  stays on screen while the replies scroll under it, indented two columns, and the pane reads as a thread rather than a flat
+  list. Opening a thread reads its replies, so a thread with replies since you last looked at it shows `● 2 new` after its reply
+  count. `r` replies in the thread of the selected message; `←` leaves the thread for the timeline it came from, putting the
+  cursor back on the message the thread hangs off.
 - **Live:** new messages, edits, deletions, reactions, reply counts and typing indicators arrive over a WebSocket as they happen
   (`Bob is typing…`), and the header shows the connection state. If the connection drops it reconnects and reloads.
 - **Reads like a chat:** Markdown (bold, italic, lists, code, quotes, headings), bare URLs become links, reactions are shown,
   edited messages say so. A blank line separates messages and the selected one has a grey tint and a bar on the left.
 - **Keeps your place:** new messages never move the view unless you were at the bottom; older messages load above without a jump
-  (Up at the top, Ctrl+O or `/more`). A `↓ more below` marker sits in the bottom corner of the message pane while the newest
+  (Up at the top, Ctrl+O or the `more` command). A `↓ more below` marker sits in the bottom corner of the message pane while the newest
   message is below the view, so it is clear the list goes on; it goes away as soon as the newest message is on screen.
 - **Links:** a click on a link copies its URL to your clipboard (terminal clipboard sequence, see below). `c` copies the selected
   message.
@@ -186,48 +207,50 @@ The full behaviour, for when the feature list above is not enough.
   text is kept for that channel or thread and is there again when you return to it. Sending clears it. Drafts live in
   `~/.config/buzzr/drafts.json`, so they survive a restart.
 - **Edit and delete your own messages:** select one and press `e` (it loads into the input; Enter saves, Esc cancels) or `d` (asks
-  `y` to confirm). Others see edits and deletions live. `/edit N` and `/delete N` do the same by number.
+  `y` to confirm). Others see edits and deletions live. `edit N` and `delete N` do the same by number.
 - **React to a message:** select one and press `a` — a picker opens over the message: choose an emoji from the list, or type a name
   to search it (or an emoji the list does not have). Enter sends it as a NIP-25 `kind:7` and Esc closes. The picker opens on the
   reaction you already have there, and its first row takes it back; everyone sees the reaction, and its removal, live.
-- **Search everything:** Ctrl+F (or `/search words`) searches channel names (instantly), people you have seen (from their profiles) and
+- **Search everything:** Ctrl+F (or the `search` command) searches channel names (instantly), people you have seen (from their profiles) and
   every message you can read (full text, from the relay); Enter opens the result — a message or channel in its channel or thread, a
   person in the DM with them (starting one if there is none).
-- **New channels:** `/new [private] name [description]` creates one and opens it.
+- **New channels:** `new [private] name [description]` creates one and opens it.
 - **Join and leave channels:** Ctrl+F finds a channel by name, and its row says what it is for, how many people are in it and whether
   you are one of them (the count and the membership come from NIP-29 `kind:39002`). Enter opens it; a channel you are not in opens
   read-only, with a `[ Join ]` button in place of the composer — Enter on the button asks the relay to join you (`kind:9021`), and its
   answer turns the button back into the composer. A private channel is not offered — a self-join needs an open channel, so it is
-  refused ("needs an invitation"). `/join NAME` (a name, `#name` or a channel id) joins or opens one directly; `/leave` asks first
+  refused ("needs an invitation"). `join NAME` (a name, `#name` or a channel id) joins or opens one directly; `leave` asks first
   (`y` confirms) and sends `kind:9022`, then drops the channel from the list. The list and the membership are read again after a join
   or a leave, so they follow what the relay accepted.
-- **People:** `/whois name` shows a short card for someone — their name, npub and about line, filled in as the relay answers. `/dm name`
-  and `/whois name` take a display name from a channel, or a key (`npub1…`, `nostr:` URI or hex); an ambiguous or unknown name is
-  reported rather than guessed.
-- **Invite people:** `/invite name` adds someone — a display name from a channel, or an npub — to the channel on screen, or to
-  the group DM you are in; they join as a plain member (no role is asked for). A message you send that `@mentions` someone who
-  is not in the channel asks before it goes out: `y` invites them and sends, `n` sends it without inviting, Esc puts the message
-  back in the input. A name that is already a member is treated as that member, so a plain mention never asks; a DM is a
-  conversation rather than a room to join, so it never asks either; and nothing is offered before the channel's member list has
-  loaded. Only names the profiles have given us can be recognised this way.
-- **Your typing shows:** others see `<your name> is typing…` while you write (once every three seconds; not for `/commands` or
+- **People:** `whois name` shows a short card for someone — their name, npub and about line, filled in as the relay answers. `dm name`
+  and `whois name` take a name or a key (`npub1…`, `nostr:` URI or hex). A name the channels we have loaded have never shown is looked
+  up in the relay's directory (`kind:0` matched by NIP-50 `search`), so somebody elsewhere in the community can be reached by the name
+  they go by; a name that fits more than one person, or nobody at all, is reported rather than guessed.
+- **Invite people:** `invite name` adds someone — a name (looked up in the directory when no channel has shown it, the same way), or
+  an npub — to the channel on screen, or to the group DM you are in; they join as a plain member (no role is asked for). A message
+  you send that `@mentions` someone who is not in the channel asks before it goes out: `y` invites them and sends, `n` sends it
+  without inviting, Esc puts the message back in the input. A name that is already a member is treated as that member, so a plain
+  mention never asks; a DM is a conversation rather than a room to join, so it never asks either; and nothing is offered before the
+  channel's member list has loaded. Only names the profiles have given us are recognised this way: a name nobody we have met goes
+  through `invite`, which looks it up in the relay's directory.
+- **Your typing shows:** others see `<your name> is typing…` while you write (once every three seconds; not for commands or
   edits). `--no-typing` turns it off.
-- **Help on screen:** F1 lists the keys, F2 the commands. Esc closes the command palette first, then a panel, then cancels a reply,
+- **Help on screen:** F1 lists the keys, F2 the commands, and Ctrl+K opens the command palette. Esc closes the command palette first, then a panel, then cancels a reply,
   then leaves a thread; after that it steps back a pane at a time — from the input to the message list, and from the message list
   to the channel list.
-- **Plugins:** a plugin is a separate process (in any language) that adds `/commands`, a status item, header badges, per-channel and
+- **Plugins:** a plugin is a separate process (in any language) that adds commands, a status item, header badges, per-channel and
   per-message marks, a pane under the channel list, and panels; buzzr hot-reloads it when its files change. A plugin is one folder
   with an executable entry file and **no manifest**: the folder name is its id, and it declares its own name, permissions and
   heartbeat in its code, when it is ready. A heartbeat (`tickMs`) refreshes something time-based — that is how the clock example
-  keeps the time. Put the folder in `~/.config/buzzr/plugins` (or point `--plugins-dir`/`BUZZR_PLUGINS_DIR` elsewhere). `/plugins`
-  lists what loaded, and `buzzr plugins list|enable|disable` works from the shell. `--no-plugins` (or `BUZZR_SAFE_MODE=1`) turns the
+  keeps the time. Put the folder in `~/.config/buzzr/plugins` (or point `--plugins-dir`/`BUZZR_PLUGINS_DIR` elsewhere). The `plugins`
+  command lists what loaded, and `buzzr plugins list|enable|disable` works from the shell. `--no-plugins` (or `BUZZR_SAFE_MODE=1`) turns the
   whole system off. See [PLUGIN.md](PLUGIN.md); tiny examples are in `examples/plugins/hello` (the raw protocol, in shell) and
   `examples/plugins/clock` (TypeScript, built on the SDK in `sdk/typescript/`).
-- **Upgrading:** `/update` in the input says how to upgrade this copy, worked out from where the binary lives — `brew update &&
+- **Upgrading:** the `update` command says how to upgrade this copy, worked out from where the binary lives — `brew update &&
   brew upgrade buzzr` for a Homebrew install, `cargo install --force --git https://github.com/buzzzr/buzzr` for a
   `cargo install`, or the release page otherwise.
   Nothing is downloaded or changed. Once a day buzzr also asks GitHub's release feed whether a newer release exists; when there is
-  one the status line says so (`buzzr 0.2.0 available · /update`) and the same upgrade line is printed after you quit.
+  one the status line says so (`0.2.0 available · Ctrl+K → update`) and the same upgrade line is printed after you quit.
   `BUZZR_NO_UPDATE_CHECK=1` turns the check off.
 
 ### Keys
@@ -238,20 +261,21 @@ The full behaviour, for when the feature list above is not enough.
 | Up / Down | select a channel or message (Up at the top of a channel loads older messages) |
 | Up / Down, at the edges | nothing typed in the input, Up goes to the messages on the newest one; on the newest message, Down goes back to the input |
 | Enter | open the channel / open the thread (which reads it) / send |
-| ← / → | walk a thread: → opens the thread of the selected message, ← goes to the thread's root and then out of it (→ on a message with no replies does nothing) |
+| ← / → | walk a thread: → opens the thread of the selected message, ← leaves a thread for the timeline, on the message it hangs off (→ on a message with no replies does nothing) |
 | y, n, Esc (invite prompt) | invite the mentioned person and send, send without inviting them, keep the message in the input |
-| x | archive the channel under the bar (it leaves the list; Ctrl+F or `/search` finds it again) |
+| x | archive the channel under the bar (it leaves the list; Ctrl+F or the `search` command finds it again) |
 | Enter, in a channel you are not in | join it (the composer is a `[ Join ]` button) |
 | r, c, u, e, d | reply in the thread, copy, mark unread, edit, delete the selected message (e and d: yours only) |
 | a | react to the selected message: pick an emoji, or type to search one (Enter sends, Esc closes) |
-| / | start a `/command`: a palette lists the commands above the input and narrows as you type (Enter runs the one on the cursor, Tab completes it, Esc closes the list and keeps what was typed) |
+| Enter, on the “new agent…” row of the `agents` list | make a new agent: a name, what it should do, and its model and thinking level (Esc cancels, Enter makes it) |
+| Ctrl+K | open the command palette: type to narrow the commands to the ones whose name starts with what you typed, Enter runs the one on the cursor (a command that takes an argument asks for it in a step of its own, Esc goes back out), or type the whole line at once (`dm @Alice`) and Enter runs it as it stands, Esc closes |
 | Ctrl+F | search channels, people and messages |
 | Esc | close the palette or a panel, cancel a reply, leave a thread, then step back to the channel list |
 | F1, F2 | keys, help |
 | Ctrl+R, Ctrl+O | reload, load older |
 | Ctrl+Q, Ctrl+C | quit |
 
-Commands in the input (N is the number shown as `#N`): `/r N text`, `/t N`, `/c`, `/copy N`, `/edit N`, `/delete N`, `/search text`, `/whois NAME`, `/dm NAME`, `/invite NAME`, `/new [private] name [about]`, `/join NAME`, `/leave`, `/plugins`, `/update`, `/read [all]`, `/archive`, `/more`, `/refresh`, `/help`, `/q`. Typing `/` lists them above the input and narrows the list as you type: Enter runs the command on the cursor line, Tab fills its name in for one that takes an argument. Plugin commands appear in the list too.
+Commands run from the Ctrl+K command palette (N is the number shown as `#N`): `agents [create]`, `archive`, `c`, `copy N`, `delete N`, `dm NAME`, `edit N`, `help`, `invite NAME`, `join NAME`, `leave`, `more`, `new [private] name [about]`, `plugins`, `q`, `r N text`, `read [all]`, `refresh`, `search text`, `t N`, `update`, `whois NAME`. Type to narrow the list to the commands whose name starts with what you typed, the arrows move the cursor, and Enter runs the one on the cursor line; a command that takes an argument asks for it first (Enter with nothing typed runs the ones whose argument is optional). The whole line can be typed at once instead — `dm @Alice` runs in a single step, and a leading `@` on a name is not part of it. Plugin commands appear in the list too.
 
 ## Clipboard
 

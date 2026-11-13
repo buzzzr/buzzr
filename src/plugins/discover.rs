@@ -3,7 +3,7 @@
 //! There is no manifest. The folder name is the plugin's id, the entry file's shebang picks the interpreter, and
 //! everything else the plugin declares — its display name, what it is allowed to do, and whether it wants a heartbeat —
 //! is declared in its own code and sent over the protocol when the process says it is `ready`. A folder whose entry is
-//! missing or not executable is reported by `/plugins` and by `buzzr plugins list` instead of being loaded.
+//! missing or not executable is reported by the `plugins` command and by `buzzr plugins list` instead of being loaded.
 
 use crate::contrib::valid_id;
 use std::collections::BTreeMap;
@@ -17,7 +17,7 @@ pub const API_VERSION: u32 = 2;
 pub const DISABLED: &str = "DISABLED";
 /// What this build can actually enforce. An unknown permission is dropped and reported: claiming a permission buzzr does
 /// not implement would only mislead the person installing the plugin.
-pub const KNOWN_PERMISSIONS: &[&str] = &["read:visible", "messages:write"];
+pub const KNOWN_PERMISSIONS: &[&str] = &["read:visible", "messages:write", "agents:read", "agents:write"];
 /// The heartbeat a plugin asks for with `tickMs` is clamped to this range: below it a plugin would only be asking for a
 /// busy loop, above it for nothing a person would notice.
 pub const MIN_TICK_MS: u64 = 250;

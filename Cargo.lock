@@ -379,7 +379,7 @@ dependencies = [
 
 [[package]]
 name = "buzzr"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -394,6 +394,7 @@ dependencies = [
  "futures-util",
  "hex",
  "iana-time-zone",
+ "inventory",
  "nix 0.31.3",
  "nostr",
  "pulldown-cmark",
@@ -404,7 +405,8 @@ dependencies = [
  "scrypt 0.12.0",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.1",
+ "thiserror 2.0.21",
  "tokio",
  "tokio-tungstenite 0.30.0",
  "unicode-width",
@@ -1467,6 +1469,15 @@ dependencies = [
  "js-sys",
  "wasm-bindgen",
  "web-sys",
+]
+
+[[package]]
+name = "inventory"
+version = "0.3.25"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6928282826c822ad91bf1c9a1cb90a30ba1c26770749929b4656cd6be829cd7c"
+dependencies = [
+ "rustversion",
 ]
 
 [[package]]

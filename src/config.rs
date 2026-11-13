@@ -5,6 +5,7 @@
 //! - `read-state.json`: the last-read positions per channel and per thread, plus the local unread marks (see `load_read_state`)
 //! - `archived.json`: the channel ids the user archived, kept out of the channel list (see `load_archived`)
 //! - `drafts.json`: the messages typed but not sent, per channel and per thread (see `load_drafts`)
+//! - `agents.json` and `agents/`: the local agents buzzr created, and the folder each one works in (see `agents.rs`)
 //! - `key.enc`: the private key sealed with a password (see `keyfile.rs`)
 //! - `key`: the private key in plain text, for people who chose that (mode 600)
 
@@ -73,6 +74,11 @@ impl Paths {
     /// The messages typed but not sent, per channel and thread (`drafts.json`).
     pub fn drafts(&self) -> PathBuf {
         self.dir.join("drafts.json")
+    }
+    /// The local agents buzzr created: name, identity, harness and folder, one record each (`agents.json`, see
+    /// `agents.rs`). The agent folders live in the `agents/` directory beside it.
+    pub fn agents(&self) -> PathBuf {
+        self.dir.join("agents.json")
     }
 }
 
