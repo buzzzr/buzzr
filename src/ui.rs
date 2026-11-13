@@ -407,9 +407,11 @@ fn spans_of(text: String, tone: crate::contrib::Tone, width: usize) -> Vec<Span<
     spans(&[crate::contrib::Segment { text, tone }], width)
 }
 
-/// The `Ctrl+K` command palette: a modal with a query of its own and the commands whose name starts with it. Enter runs the
-/// command on the cursor row; a command that takes an argument gets an argument step, where the list gives way to its usage
-/// and the query is the argument. `app.command_rows()` and `app.palette` decide what is shown; here we only draw it.
+/// The `Ctrl+K` command palette: a modal with a query of its own and the commands whose name starts with it (or, once the
+/// query holds a whole line, with the command at the head of that line). Enter runs the command on the cursor row; a command
+/// that takes an argument gets an argument step, where the list gives way to its usage and the query is the argument — or
+/// the whole line can be typed at once and runs in one step. `app.command_rows()` and `app.palette` decide what is shown;
+/// here we only draw it.
 fn draw_command_palette(f: &mut Frame, app: &App, area: Rect) {
     let rows = app.command_rows();
     let w = 72.min(area.width.saturating_sub(2)).max(20);
@@ -738,12 +740,13 @@ pub const HELP: &[&str] = &[
     "and `leave` takes you out of the open channel (it asks first; `y` confirms).",
     "Ctrl+K opens the command palette: type to narrow the commands to the ones whose name starts with what you typed, the",
     "arrows move the highlight, and Enter runs the one on the cursor. A command that takes an argument asks for it first —",
-    "type it and press Enter (or Enter again, for the ones where the argument is optional). The list holds the commands",
+    "type it and press Enter (or Enter again, for the ones where the argument is optional). A whole line can be typed at once",
+    "instead — `dm @Alice` runs in one step, no argument step. The list holds the commands",
     "plugins added too, and Esc goes back out of the argument step and then closes the palette.",
     "Unread survives a restart: it comes from the last-read position per channel and per thread in",
     "~/.config/buzzr/read-state.json, and a \"new messages\" line marks where new messages start.",
     "A person is found by the name in their profile — looked up in the relay's directory when these channels have never shown it —",
-    "or by their npub (hex or npub1…): the `dm` and `whois` commands take either.",
+    "or by their npub (hex or npub1…): the `dm` and `whois` commands take either, with or without a leading `@`.",
     "Mentioning `@name` someone who is not in the channel asks first: y invites them and sends, n sends without inviting,",
     "Esc keeps the message in the input. The `invite` command does the same without a message.",
     "Others see \"typing…\" while you write (start with --no-typing to turn that off).",

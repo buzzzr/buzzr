@@ -14,6 +14,10 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
 - A local agent mentioned in a **thread** is answered with the thread in hand: the turn's prompt carries the thread's earlier messages — the
   root and the replies that came before the mention, oldest first, the newest twelve, each cut to 4000 characters — so the agent reads the
   conversation it is joining instead of one message out of it, the same window the Buzz app gives its agents.
+- The **command palette** takes a whole line, not just a command name: type `dm @Alice` and Enter runs `dm` with `@Alice` in one step,
+  with no separate argument prompt. The list still narrows to the command at the head of the line, a bare name is still a pick that
+  asks for its argument, and a leading `@` on a name is how somebody is addressed rather than part of the name (`join`, `new` and the
+  other non-person arguments are unchanged).
 
 ## [0.2.0-rc.3] - 2026-11-12
 

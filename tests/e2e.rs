@@ -990,6 +990,25 @@ fn ctrl_k_opens_the_command_palette_and_enter_runs_the_command() {
     s.expect("the command to run with its argument", "Search · Enter opens");
 }
 
+/// The palette takes a whole command line, not just a command name: `whois @dave` and Enter run the command in one step,
+/// with no separate argument step. The `@` is how a person is addressed in the message list and is not part of the name,
+/// so the relay's directory is asked for `dave` — a person only the directory has (see the case above).
+#[test]
+fn a_whole_command_line_typed_into_the_palette_runs_in_one_step() {
+    let Some(relay) = relay_or_skip("a_whole_command_line_typed_into_the_palette_runs_in_one_step") else { return };
+    let s = session(&relay);
+    s.press_all(&["tab", "tab"]); // channels -> messages -> input
+    s.expect("the input box to take focus", "Send");
+    s.press("ctrl+k");
+    s.expect("the command palette", "Commands · Enter runs · Esc closes");
+    s.type_text("whois @dave");
+    s.expect("the list narrowed to the command at the head of the line", "somebody's profile");
+    s.expect_gone("the other commands dropped out", "load older messages");
+    s.press("enter"); // one Enter: the whole line runs as it stands
+    s.expect("the command to run with the name the line carried", "dave · Esc closes");
+    s.expect("the directory to have been asked for the bare name", "I write things down");
+}
+
 /// The palette has a query of its own, so it never touches the composer: a leading slash is ordinary text, and a draft
 /// left in the box is exactly as it was when the palette closes.
 #[test]

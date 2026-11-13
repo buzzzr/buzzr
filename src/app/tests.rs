@@ -1531,6 +1531,20 @@ fn dm_opens_an_existing_conversation_and_starts_a_new_one() {
 }
 
 #[test]
+fn a_leading_at_is_not_part_of_a_name() {
+    const ALICE: &str = "alice";
+    let mut app = app_with(1);
+    app.handle(AppEvent::Names(Ok([(ALICE.to_string(), "Alice".to_string())].into())));
+    app.focus = Focus::Input;
+    // `dm @Alice`, the way a person is addressed in the message list, names the same person as `dm Alice`.
+    let cmds = run_command(&mut app, "dm @Alice");
+    assert!(matches!(cmds.as_slice(), [Cmd::OpenDm { peer }] if peer == ALICE), "the @ is dropped and Alice is looked up: {cmds:?}");
+    // A name nobody has is looked up without the `@` too, so the directory is asked for the name, not the punctuation.
+    let cmds = run_command(&mut app, "whois @nobody");
+    assert!(matches!(cmds.as_slice(), [Cmd::FindPeople { query }] if query == "nobody"), "the directory is asked for the bare name: {cmds:?}");
+}
+
+#[test]
 fn whois_shows_a_card_that_fills_in_when_the_profile_arrives() {
     let alice = "aa".repeat(32);
     let mut app = app_with(1);
@@ -2423,6 +2437,47 @@ fn an_argument_command_asks_for_the_argument_before_it_runs() {
     assert!(matches!(cmds.as_slice(), [Cmd::FindPeople { query }] if query == "nobody"), "the command runs with the argument: {cmds:?}");
     assert_eq!(app.overlay, Overlay::None, "the palette is gone once the command runs");
     assert!(app.flash_text().unwrap().contains("looking for nobody"));
+}
+
+#[test]
+fn a_whole_command_line_typed_at_once_runs_without_an_argument_step() {
+    let mut app = at_input(3);
+    open_palette(&mut app);
+    type_text(&mut app, "search sailing");
+    // The list still says what is going to run: it filters on the command at the head of the line, not on the whole line.
+    assert_eq!(
+        app.command_rows().iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
+        vec!["search"],
+        "the query's command word is what the list filters on"
+    );
+    let cmds = press(&mut app, KeyCode::Enter);
+    assert!(app.palette.arg.is_none(), "the whole line runs as it stands, with no argument step");
+    assert_eq!(app.overlay, Overlay::Search, "search opened on the argument the line carried");
+    assert_eq!(app.search.query.text(), "sailing");
+    assert!(cmds.iter().any(|c| matches!(c, Cmd::Search { query, .. } if query == "sailing")), "the argument rides along: {cmds:?}");
+}
+
+#[test]
+fn a_bare_word_is_still_a_filter_that_picks_a_row() {
+    let mut app = at_input(3);
+    open_palette(&mut app);
+    type_text(&mut app, "search");
+    assert!(app.command_rows().iter().any(|r| r.name == "search"), "a bare word still lists the command");
+    let cmds = press(&mut app, KeyCode::Enter);
+    assert!(cmds.is_empty(), "nothing runs yet: {cmds:?}");
+    assert_eq!(app.palette.arg.as_ref().map(|a| a.command.as_str()), Some("search"), "without a space it is a pick, and the argument is asked for");
+    assert_eq!(app.overlay, Overlay::Palette, "the palette stays up for the argument");
+}
+
+#[test]
+fn a_line_that_names_no_command_does_nothing() {
+    let mut app = at_input(3);
+    open_palette(&mut app);
+    type_text(&mut app, "nope x");
+    let cmds = press(&mut app, KeyCode::Enter);
+    assert!(cmds.is_empty(), "no command runs: {cmds:?}");
+    assert_eq!(app.overlay, Overlay::Palette, "the palette stays up for a corrected line");
+    assert!(app.palette.arg.is_none(), "and it did not fall into an argument step");
 }
 
 #[test]
