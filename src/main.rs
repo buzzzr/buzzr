@@ -104,12 +104,17 @@ async fn main() -> Result<()> {
     let log_n = config::env("SCRYPT_LOG_N").and_then(|v| v.parse().ok()).unwrap_or(keyfile::DEFAULT_LOG_N);
     let given_relay = args.relay.or_else(|| std::env::var("BUZZ_RELAY_URL").ok().filter(|v| !v.trim().is_empty()));
     let given_key = std::env::var("BUZZ_PRIVATE_KEY").ok();
+    // The key is in memory now: take it out of buzzr's environment, so no program it starts later can inherit it.
+    // A plugin child already gets a clean environment (`plugins::host`) and a harness gets one too (`harness::acp`),
+    // but this closes the general case rather than relying on each start to remember.
+    std::env::remove_var("BUZZ_PRIVATE_KEY");
     let setup::Resolved { relay: url, key } =
         setup::resolve(&mut setup::Terminal, &paths, given_relay, given_key, args.setup, log_n).map_err(|e| anyhow!("{e}"))?;
     let keys = Keys::parse(&key).context("that is not a valid hex or nsec private key (run `buzzr --setup` to enter it again)")?;
     drop(key);
     // BUZZ_AUTH_TAG is only for agents (NIP-OA)
     let auth_tag = std::env::var("BUZZ_AUTH_TAG").ok();
+    std::env::remove_var("BUZZ_AUTH_TAG");
     let relay = Arc::new(Relay::new(&url, keys, auth_tag)?);
     if args.selftest {
         selftest::run(relay.clone(), args.listen, args.probe_typing, args.probe_search).await?;
