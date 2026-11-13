@@ -115,7 +115,7 @@ impl Agents {
         match args.trim() {
             "" => vec![PluginOutput::ListAgents { id: "list".into() }],
             "create" | "new" => self.start(),
-            _ => vec![PluginOutput::Flash("usage: agents (list them) or agents create (make one)".into())],
+            _ => vec![PluginOutput::Flash("usage: agents (list, edit, delete, create) or agents create (make one)".into())],
         }
     }
 
@@ -445,7 +445,7 @@ impl Plugin for Agents {
             permissions: vec![AGENTS_READ.into(), AGENTS_WRITE.into()],
             tick_ms: 0,
             contributions: Contributions {
-                commands: vec![command(ID, "your local agents: list, edit, delete, create", "[create]")],
+                commands: vec![command(ID, "your local agents: list, edit, delete, create", "")],
                 ..Contributions::default()
             },
         }

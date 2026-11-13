@@ -55,7 +55,8 @@ fn open_palette(app: &mut App) {
 fn run_command(app: &mut App, line: &str) -> Vec<Cmd> {
     let (name, arg) = line.split_once(char::is_whitespace).map(|(n, a)| (n, a.trim())).unwrap_or((line, ""));
     open_palette(app);
-    type_text(app, name);
+    // A command that declares no argument runs on Enter, so its argument can only be typed on the same line.
+    type_text(app, if arg.is_empty() { name } else { line });
     let cmds = press(app, KeyCode::Enter);
     if app.palette.arg.is_some() {
         type_text(app, arg);
