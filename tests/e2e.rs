@@ -184,6 +184,37 @@ impl Session {
     }
 
     fn start_full(relay: &Relay, config: PathBuf, keyboard_enhanced: bool, rows: u16, plugins: Option<PathBuf>) -> Session {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_buzzr"));
+        match &plugins {
+            Some(dir) => cmd.env("BUZZR_PLUGINS_DIR", dir),
+            None => cmd.arg("--no-plugins"),
+        };
+        cmd.env("BUZZR_CONFIG_DIR", &config)
+            .env("BUZZ_RELAY_URL", &relay.url)
+            .env("BUZZ_PRIVATE_KEY", KEY)
+            .env("BUZZR_NO_UPDATE_CHECK", "1")
+            .env("TERM", "xterm-256color")
+            .env("TZ", "UTC");
+        Session::spawn(cmd, config, keyboard_enhanced, rows)
+    }
+
+    /// A `--demo` run: a world built into the binary, which asks for no relay and no key, so this is the one session
+    /// the suite starts without `BUZZ_FAKE_RELAY_BIN`. It also writes nothing to `config`, which is what lets a demo
+    /// run anywhere (see the module in `src/demo.rs`).
+    fn start_demo() -> Session {
+        let config = fresh_config_dir();
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_buzzr"));
+        cmd.arg("--demo")
+            .env("BUZZR_CONFIG_DIR", &config)
+            .env("BUZZR_NO_UPDATE_CHECK", "1")
+            .env("TERM", "xterm-256color")
+            .env("TZ", "UTC");
+        Session::spawn(cmd, config, false, ROWS)
+    }
+
+    /// Start `cmd` on a pty of `rows` by `COLS`, with the screen parsed as the app draws it. The reader answers the
+    /// probes the app sends (cursor position, and the keyboard-enhancement flags where the terminal is said to report them).
+    fn spawn(mut cmd: Command, config: PathBuf, keyboard_enhanced: bool, rows: u16) -> Session {
         let pty = nix::pty::openpty(
             Some(&nix::pty::Winsize { ws_row: rows, ws_col: COLS, ws_xpixel: 0, ws_ypixel: 0 }),
             None,
@@ -198,25 +229,14 @@ impl Session {
 
         let out = std::fs::File::from(pty.master);
         let inp = std::fs::File::from(pty.slave);
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_buzzr"));
-        match &plugins {
-            Some(dir) => cmd.env("BUZZR_PLUGINS_DIR", dir),
-            None => cmd.arg("--no-plugins"),
-        };
-        cmd.env("BUZZR_CONFIG_DIR", &config)
-            .env("BUZZ_RELAY_URL", &relay.url)
-            .env("BUZZ_PRIVATE_KEY", KEY)
-            .env("BUZZR_NO_UPDATE_CHECK", "1")
-            .env("TERM", "xterm-256color")
-            .env("TZ", "UTC")
-            .stdin(Stdio::from(inp.try_clone().unwrap()))
-            .stdout(Stdio::from(inp.try_clone().unwrap()))
-            .stderr(Stdio::from(inp));
         // The harness the agents flow starts is not installed in a test environment: put the fake first on `PATH`.
         let mut harness_path = fake_acp_dir().as_os_str().to_owned();
         harness_path.push(":");
         harness_path.push(std::env::var_os("PATH").unwrap_or_default());
-        cmd.env("PATH", harness_path);
+        cmd.env("PATH", harness_path)
+            .stdin(Stdio::from(inp.try_clone().unwrap()))
+            .stdout(Stdio::from(inp.try_clone().unwrap()))
+            .stderr(Stdio::from(inp));
         if keyboard_enhanced {
             // Make the pty the child's controlling terminal, the way a terminal emulator does: the app asks for the
             // keyboard protocol on /dev/tty, and a test runner started from a terminal has a /dev/tty of its own.
@@ -1640,4 +1660,56 @@ fn a_plugin_pane_is_drawn_under_the_channel_list_and_a_heartbeat_refreshes_it() 
     let screen = s.until("the heartbeat to refresh the pane", |sc| sc.contains("pane two"));
     assert!(!screen.contains("pane one"), "the pane is replaced, not stacked:\n{screen}");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Demo: `--demo` runs a community built into the binary, with no relay and no key. This is the one session the
+// suite can start without `BUZZ_FAKE_RELAY_BIN`, so its case runs wherever the suite does.
+
+/// The demo session a moment after it starts: the greeting is still on the status line and the header says `demo`.
+fn demo_session() -> Session {
+    let s = Session::start_demo();
+    // The greeting is a flash, on screen only for the first few seconds: take the first screen that carries it.
+    s.expect("the demo greeting", "nothing is sent, nothing is saved");
+    s.expect("the header to say this is a demo", "◆ demo");
+    s
+}
+
+#[test]
+fn demo_shows_a_community_built_into_the_binary_with_no_relay() {
+    let s = demo_session();
+    // The header carries the demo marker, in place of the `● live` a relay session shows.
+    assert!(header(&s.screen()).contains("◆ demo"), "the header marks the demo:\n{}", header(&s.screen()));
+    // The DM row names the other person, once the demo's roster and names have come back — the same round trip a
+    // relay's `kind:39002` and profiles make.
+    let screen = s.until("the DM row to name the other person", |sc| sidebar(sc).iter().any(|r| r == "@Ada Lin"));
+    let rows = sidebar(&screen);
+    // The seed channels are all in the sidebar: three open, one private, and the DM.
+    for want in ["#buzzr", "#design", "#random", "*release", "@Ada Lin"] {
+        assert!(rows.iter().any(|r| r.starts_with(want)), "the demo lists {want}:\n{rows:?}");
+    }
+    // A channel left part-read before the demo starts carries a badge, the way a real session opens.
+    assert!(rows.iter().any(|r| r == "#design (1)"), "an unread badge from the demo's read position:\n{rows:?}");
+    // The open channel's messages are on screen, attributed to a name the demo's cast carries.
+    let pane = messages_pane(&screen).join("\n");
+    assert!(pane.contains("the footer clips from the right"), "a seeded message is on screen:\n{pane}");
+    assert!(pane.contains("Ada Lin"), "the message is attributed to a name the demo knows:\n{pane}");
+}
+
+#[test]
+fn demo_echoes_what_you_write_and_writes_nothing_to_disk() {
+    let s = demo_session();
+    // A message sent in a demo comes back as if a relay had echoed it, so the composer empties and the pane shows it...
+    s.press_all(&["tab", "tab"]); // channels -> messages -> input
+    s.expect("the input box to take focus", "Send");
+    s.type_text("hello from the demo");
+    s.press("enter");
+    s.until("the demo's echo in the message pane", |sc| {
+        sc.contains("Type a message") && messages_pane(sc).join("\n").contains("hello from the demo")
+    });
+    // ...but nothing was written to the config directory: a demo leaves the machine as it found it.
+    let written: Vec<String> = std::fs::read_dir(&s.config)
+        .map(|d| d.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect())
+        .unwrap_or_default();
+    assert!(written.is_empty(), "a demo writes nothing to its config directory, found {written:?}");
 }

@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Context, Result};
-use buzzr::{agents, clock, config, harness, keyfile, live, plugin, plugins, relay, release, runner, selftest, setup, ui, update};
-use buzzr::app::{App, AppEvent, Cmd};
+use buzzr::{agents, clock, config, demo, harness, keyfile, live, plugin, plugins, relay, release, runner, selftest, setup, ui, update};
+use buzzr::app::{App, AppEvent, Cmd, Conn};
 use buzzr::relay::Relay;
 use clap::Parser;
 use futures_util::StreamExt;
@@ -16,7 +16,9 @@ use std::io::{stdout, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::mpsc;
 use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::watch;
 
 #[derive(Parser)]
 #[command(version, about = "A terminal client for Buzz that talks to the relay directly")]
@@ -41,6 +43,9 @@ struct Args {
     /// Do not capture the mouse (then the terminal can select text by itself).
     #[arg(long)]
     no_mouse: bool,
+    /// Explore buzzr with a built-in world instead of a relay: nothing is sent anywhere and nothing is written to disk.
+    #[arg(long)]
+    demo: bool,
     /// Check the connection and exit; sends nothing. Uses the same relay and key as the app (set BUZZ_PRIVATE_KEY to avoid prompts).
     #[arg(long)]
     selftest: bool,
@@ -101,36 +106,74 @@ async fn main() -> Result<()> {
         }
         return Ok(());
     }
-    let log_n = config::env("SCRYPT_LOG_N").and_then(|v| v.parse().ok()).unwrap_or(keyfile::DEFAULT_LOG_N);
-    let given_relay = args.relay.or_else(|| std::env::var("BUZZ_RELAY_URL").ok().filter(|v| !v.trim().is_empty()));
-    let given_key = std::env::var("BUZZ_PRIVATE_KEY").ok();
-    // The key is in memory now: take it out of buzzr's environment, so no program it starts later can inherit it.
-    // A plugin child already gets a clean environment (`plugins::host`) and a harness gets one too (`harness::acp`),
-    // but this closes the general case rather than relying on each start to remember.
-    std::env::remove_var("BUZZ_PRIVATE_KEY");
-    let setup::Resolved { relay: url, key } =
-        setup::resolve(&mut setup::Terminal, &paths, given_relay, given_key, args.setup, log_n).map_err(|e| anyhow!("{e}"))?;
-    let keys = Keys::parse(&key).context("that is not a valid hex or nsec private key (run `buzzr --setup` to enter it again)")?;
-    drop(key);
-    // BUZZ_AUTH_TAG is only for agents (NIP-OA)
-    let auth_tag = std::env::var("BUZZ_AUTH_TAG").ok();
-    std::env::remove_var("BUZZ_AUTH_TAG");
-    let relay = Arc::new(Relay::new(&url, keys, auth_tag)?);
-    if args.selftest {
-        selftest::run(relay.clone(), args.listen, args.probe_typing, args.probe_search).await?;
-        if args.probe_write {
-            selftest::write_probe(relay).await?;
-        }
-        return Ok(());
-    }
     let tz = config::env("TZ").and_then(|t| t.parse().ok()).unwrap_or_else(local_timezone);
-    let plugins_on = !args.no_plugins && config::env("SAFE_MODE").as_deref() != Some("1");
-    let dirs = plugins_on.then(|| (plugins_dir, paths.plugin_logs()));
-    let notice = run_tui(relay, args.read_only, !args.no_typing, !args.no_mouse, tz, dirs, &paths).await?;
+    let notice = if args.demo {
+        // A demo asks for no key and reaches no relay: it runs off a world built into the binary (see `demo`).
+        let session = Session::Demo { world: demo::Demo::new(), read_only: args.read_only };
+        run_tui(session, None, !args.no_mouse, tz, &paths).await?
+    } else {
+        let log_n = config::env("SCRYPT_LOG_N").and_then(|v| v.parse().ok()).unwrap_or(keyfile::DEFAULT_LOG_N);
+        let given_relay = args.relay.or_else(|| std::env::var("BUZZ_RELAY_URL").ok().filter(|v| !v.trim().is_empty()));
+        let given_key = std::env::var("BUZZ_PRIVATE_KEY").ok();
+        // The key is in memory now: take it out of buzzr's environment, so no program it starts later can inherit it.
+        // A plugin child already gets a clean environment (`plugins::host`) and a harness gets one too (`harness::acp`),
+        // but this closes the general case rather than relying on each start to remember.
+        std::env::remove_var("BUZZ_PRIVATE_KEY");
+        let setup::Resolved { relay: url, key } =
+            setup::resolve(&mut setup::Terminal, &paths, given_relay, given_key, args.setup, log_n).map_err(|e| anyhow!("{e}"))?;
+        let keys = Keys::parse(&key).context("that is not a valid hex or nsec private key (run `buzzr --setup` to enter it again)")?;
+        drop(key);
+        // BUZZ_AUTH_TAG is only for agents (NIP-OA)
+        let auth_tag = std::env::var("BUZZ_AUTH_TAG").ok();
+        std::env::remove_var("BUZZ_AUTH_TAG");
+        let relay = Arc::new(Relay::new(&url, keys, auth_tag)?);
+        if args.selftest {
+            selftest::run(relay.clone(), args.listen, args.probe_typing, args.probe_search).await?;
+            if args.probe_write {
+                selftest::write_probe(relay).await?;
+            }
+            return Ok(());
+        }
+        // The live subscription and its handle are made here so the session owns the way `Cmd::Subscribe` reaches it,
+        // while the loop keeps the receiver.
+        let plugins_on = !args.no_plugins && config::env("SAFE_MODE").as_deref() != Some("1");
+        let dirs = plugins_on.then(|| (plugins_dir, paths.plugin_logs()));
+        let live = live::spawn(relay.clone(), Vec::new());
+        let session = Session::Live(LiveSession {
+            relay,
+            subscription: live.channels,
+            read_only: args.read_only,
+            send_typing: !args.no_typing,
+            plugin_dirs: dirs,
+        });
+        run_tui(session, Some(live.rx), !args.no_mouse, tz, &paths).await?
+    };
     if let Some(notice) = notice {
         eprintln!("{notice}"); // after the alternate screen is gone, so it does not fight the UI
     }
     Ok(())
+}
+
+/// What a run is talking to.
+enum Session {
+    /// The relay, over the network.
+    Live(LiveSession),
+    /// The demo: a world built into the binary, which answers every request itself (see `demo`).
+    Demo {
+        world: demo::Demo,
+        read_only: bool,
+    },
+}
+
+/// Everything a live run talks to, gathered so the loop can hand a command to `run` without six arguments.
+struct LiveSession {
+    relay: Arc<Relay>,
+    /// Send the ids of the channels to follow; the live subscription replaces its subscription when they change.
+    subscription: watch::Sender<Vec<String>>,
+    read_only: bool,
+    send_typing: bool,
+    /// Where plugins live and where they log, or `None` when they are off (`--no-plugins`, `BUZZR_SAFE_MODE=1`).
+    plugin_dirs: Option<(PathBuf, PathBuf)>,
 }
 
 /// `buzzr plugins list | enable <id> | disable <id>`: the same folders the TUI reads, without starting a terminal or a key.
@@ -216,7 +259,7 @@ impl Drop for TerminalGuard {
     }
 }
 
-async fn run_tui(relay: Arc<Relay>, read_only: bool, send_typing: bool, mouse: bool, tz: chrono_tz::Tz, plugin_dirs: Option<(PathBuf, PathBuf)>, paths: &config::Paths) -> Result<Option<String>> {
+async fn run_tui(mut session: Session, mut live_rx: Option<mpsc::UnboundedReceiver<live::Live>>, mouse: bool, tz: chrono_tz::Tz, paths: &config::Paths) -> Result<Option<String>> {
     // restore the terminal before a panic message is printed, or it would be unreadable
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -227,61 +270,89 @@ async fn run_tui(relay: Arc<Relay>, read_only: bool, send_typing: bool, mouse: b
 
     let guard = TerminalGuard::enter(mouse)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
-    let mut app = App::new(relay.me(), read_only, tz);
-    app.send_typing = send_typing;
+    let (me, read_only) = match &session {
+        Session::Live(s) => (s.relay.me(), s.read_only),
+        Session::Demo { world, read_only } => (world.me().to_owned(), *read_only),
+    };
+    let mut app = App::new(me, read_only, tz);
     // Shift+Enter only reaches us where the terminal speaks the kitty keyboard protocol; the footer names the key that works here.
     app.keyboard_enhanced = guard.enhanced;
     app.update_source = update::InstallSource::detect();
-    // Where each channel was left last time; the badge counts come back over the relay (see `Cmd::LoadUnread`).
-    app.seed_read(config::load_read_state(&paths.read_state()));
-    // The channels archived on this device: they have no row in the channel list until a search brings one back.
-    app.seed_archived(config::load_archived(&paths.archived()));
-    // What was typed but not sent, per channel and thread: it comes back into the box where it was written.
-    app.seed_drafts(config::load_drafts(&paths.drafts()));
-    // The local agents buzzr made: the identity and the folder each one works in, from `agents.json` (see `agents.rs`).
-    app.seed_agents(agents::load(&paths.agents()));
-    // The compiled-in plugins this build registered (see `plugin`): their commands, contributions and permissions, kept
-    // beside the external ones the `plugins::Host` supervises. Both are driven through the same contract, and both kinds
-    // are off together — `plugin_dirs` is `None` under `--no-plugins` and `BUZZR_SAFE_MODE=1`, so this seeds nothing then.
-    if plugin_dirs.is_some() {
-        app.seed_plugins(plugin::PluginRuntime::new());
+    match &session {
+        Session::Live(s) => {
+            app.send_typing = s.send_typing;
+            // Where each channel was left last time; the badge counts come back over the relay (see `Cmd::LoadUnread`).
+            app.seed_read(config::load_read_state(&paths.read_state()));
+            // The channels archived on this device: they have no row in the channel list until a search brings one back.
+            app.seed_archived(config::load_archived(&paths.archived()));
+            // What was typed but not sent, per channel and thread: it comes back into the box where it was written.
+            app.seed_drafts(config::load_drafts(&paths.drafts()));
+            // The local agents buzzr made: the identity and the folder each one works in, from `agents.json` (see `agents.rs`).
+            app.seed_agents(agents::load(&paths.agents()));
+            // The compiled-in plugins this build registered (see `plugin`): their commands, contributions and permissions, kept
+            // beside the external ones the `plugins::Host` supervises. Both are driven through the same contract, and both
+            // kinds are off together — `plugin_dirs` is `None` under `--no-plugins` and `BUZZR_SAFE_MODE=1`.
+            if s.plugin_dirs.is_some() {
+                app.seed_plugins(plugin::PluginRuntime::new());
+            }
+        }
+        Session::Demo { world, .. } => {
+            // The demo's own world stands in for everything those files hold, and a demo writes none of them: it starts
+            // the same way every time and leaves the machine as it found it.
+            app.seed_read(world.read_state());
+            // The header has to say what this is: there is no relay to connect to, so it never becomes "live".
+            app.conn = Conn::Demo;
+            app.notice(demo::HINT);
+        }
     }
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
-    // The release feed: seed the notice from what the last check learned, and ask GitHub again only when that is stale. A failure
-    // (offline, no release yet) is silent — see `release.rs`.
-    if release::enabled() {
-        let state = release::State::load(&paths.release_state());
-        if let Some(v) = state.newer_than(release::CURRENT) {
-            app.latest = Some(v.to_owned());
-        }
-        if state.is_due(clock::now_secs()) {
-            let (tx, path) = (tx.clone(), paths.release_state());
-            tokio::spawn(async move {
-                if let Some(v) = release::check_and_store(&path).await {
-                    let _ = tx.send(AppEvent::Update(v));
-                }
-            });
+    // The release feed: seed the notice from what the last check learned, and ask GitHub again only when that is stale. A
+    // failure (offline, no release yet) is silent — see `release.rs`. A demo asks nobody anything, so it skips this.
+    if let Session::Live(_) = &session {
+        if release::enabled() {
+            let state = release::State::load(&paths.release_state());
+            if let Some(v) = state.newer_than(release::CURRENT) {
+                app.latest = Some(v.to_owned());
+            }
+            if state.is_due(clock::now_secs()) {
+                let (tx, path) = (tx.clone(), paths.release_state());
+                tokio::spawn(async move {
+                    if let Some(v) = release::check_and_store(&path).await {
+                        let _ = tx.send(AppEvent::Update(v));
+                    }
+                });
+            }
         }
     }
-    let host = match &plugin_dirs {
-        Some((dir, logs)) => plugins::Host::start(dir.clone(), logs.clone(), tx.clone(), read_only),
-        None => plugins::Host::none(),
+    let host = match &session {
+        Session::Live(s) => match &s.plugin_dirs {
+            Some((dir, logs)) => plugins::Host::start(dir.clone(), logs.clone(), tx.clone(), s.read_only),
+            None => plugins::Host::none(),
+        },
+        // A demo loads no plugins: they are written for a session with a relay behind it.
+        Session::Demo { .. } => plugins::Host::none(),
     };
-    let mut live = live::spawn(relay.clone(), Vec::new());
     let disk = Disk::start();
-    // What a command needs, made where it is used (it borrows the live handle's sender while the loop also reads its receiver).
-    macro_rules! ctx {
-        () => {
-            Ctx { relay: &relay, tx: &tx, subscription: &live.channels, host: &host, paths, disk: &disk }
-        };
-    }
     // The local agents: a mention of one is answered by its harness (see `runner.rs`). An answer is a message, so a
     // read-only run, and safe mode, start no watcher at all — an agent that could not send would only report failures.
-    if !read_only && config::env("SAFE_MODE").as_deref() != Some("1") {
-        runner::spawn(relay.clone(), paths.clone(), tx.clone());
+    // A demo runs none either: it has no relay for an answer to arrive on.
+    if let Session::Live(s) = &session {
+        if !s.read_only && config::env("SAFE_MODE").as_deref() != Some("1") {
+            runner::spawn(s.relay.clone(), paths.clone(), tx.clone());
+        }
+    }
+    // Hand a command to whoever answers this run's requests: the relay, or the demo world. One macro keeps the loop body
+    // the same either way, and every arm of `run` stays exactly what a live run does.
+    macro_rules! dispatch {
+        ($cmd:expr) => {
+            match &mut session {
+                Session::Live(s) => run($cmd, &Ctx { relay: &s.relay, tx: &tx, subscription: &s.subscription, host: &host, paths, disk: &disk }),
+                Session::Demo { world, .. } => world.answer($cmd, &tx),
+            }
+        };
     }
     for cmd in app.start() {
-        run(cmd, &ctx!());
+        dispatch!(cmd);
     }
     let mut input = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(250));
@@ -295,7 +366,7 @@ async fn run_tui(relay: Arc<Relay>, read_only: bool, send_typing: bool, mouse: b
         if app.quit {
             // What is still in the box goes to disk before we go: quitting is not a reason to lose a half-written message.
             for cmd in app.stash_draft() {
-                run(cmd, &ctx!());
+                dispatch!(cmd);
             }
             host.shutdown();
             disk.flush().await;
@@ -313,7 +384,7 @@ async fn run_tui(relay: Arc<Relay>, read_only: bool, send_typing: bool, mouse: b
                 }
                 None => {
                     for cmd in app.stash_draft() {
-                        run(cmd, &ctx!());
+                        dispatch!(cmd);
                     }
                     host.shutdown();
                     disk.flush().await;
@@ -321,27 +392,36 @@ async fn run_tui(relay: Arc<Relay>, read_only: bool, send_typing: bool, mouse: b
                 }
             },
             e = rx.recv() => e,
-            l = live.rx.recv() => l.map(AppEvent::Live),
+            l = recv_live(&mut live_rx) => l.map(AppEvent::Live),
             _ = tick.tick() => Some(AppEvent::Tick),
         };
         if let Some(ev) = event {
             let ticked = matches!(ev, AppEvent::Tick);
             for cmd in app.handle(ev) {
-                run(cmd, &ctx!());
+                dispatch!(cmd);
             }
             // A compiled-in plugin's heartbeat, on the same tick the host drives an external one's.
             if ticked {
                 for cmd in app.plugin_tick() {
-                    run(cmd, &ctx!());
+                    dispatch!(cmd);
                 }
             }
         }
         // Only what changed is sent, and only to plugins that are ready; a stalled plugin never slows the loop. The
         // compiled-in plugins are shown the same projection, on the same "only what changed" rule.
         for cmd in app.plugin_snapshot(app.projection()) {
-            run(cmd, &ctx!());
+            dispatch!(cmd);
         }
         host.snapshot(app.projection());
+    }
+}
+
+/// The next live event, for a run that has a relay to hear it from. A demo passes `None`: it has nothing to wait on, so
+/// this never resolves and the loop's live arm never fires.
+async fn recv_live(rx: &mut Option<mpsc::UnboundedReceiver<live::Live>>) -> Option<live::Live> {
+    match rx {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
     }
 }
 
