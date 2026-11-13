@@ -367,6 +367,23 @@ async fn publish_agent(relay: &Relay, pending: &agents::Pending) -> Result<(), S
     Ok(())
 }
 
+/// Delete a local agent and take it off the relay: the agent's own kind-0 profile — signed by its own key, and sent as
+/// the agent, carrying the owner's attestation, exactly as its profile and its answers are — and then this identity's
+/// kind-30177 listing of it. Only once the relay has taken both is the record (with the only copy of its key) deleted
+/// from `agents.json`, so a relay that refuses it leaves the agent in place, listed and running. The folder the agent
+/// worked in is left alone, as deleting an agent in Buzz leaves its working directory.
+async fn delete_and_unpublish(relay: &Relay, paths: &config::Paths, pubkey: &str) -> Result<agents::Agent, String> {
+    let Some((agent, keys)) = agents::load_with_keys(&paths.agents()).into_iter().find(|(a, _)| a.pubkey == pubkey) else {
+        return Err(format!("{pubkey} is not an agent on this device"));
+    };
+    let owner = relay.keys().public_key().to_hex();
+    let attestation = agents::attestation(relay.keys(), &agent.pubkey)?;
+    let own = Relay::new(relay.base_url(), keys, Some(attestation)).map_err(|e| format!("{e:#}"))?;
+    own.delete_coordinate(&format!("0:{}:", agent.pubkey)).await.map_err(|e| format!("{e:#}"))?;
+    relay.delete_coordinate(&format!("30177:{owner}:{}", agent.pubkey)).await.map_err(|e| format!("{e:#}"))?;
+    agents::remove(paths, &agent.pubkey)
+}
+
 /// Start the work a command asks for; the result comes back as an `AppEvent`.
 fn run(cmd: Cmd, relay: &Arc<Relay>, tx: &UnboundedSender<AppEvent>, subscription: &tokio::sync::watch::Sender<Vec<String>>, host: &plugins::Host, paths: &config::Paths) {
     let (relay, tx) = (relay.clone(), tx.clone());
@@ -409,6 +426,15 @@ fn run(cmd: Cmd, relay: &Arc<Relay>, tx: &UnboundedSender<AppEvent>, subscriptio
             let paths = paths.clone();
             tokio::spawn(async move {
                 let _ = tx.send(AppEvent::AgentCreated(create_and_publish(&relay, &paths, name, instructions, harness, model, effort).await));
+            });
+        }
+        Cmd::DeleteAgent { pubkey } => {
+            // The relay first, the disk second, as creation does: the agent is taken off the relay (its own profile,
+            // signed by its key, and this identity's listing of it) and only then deleted here. A relay that refuses
+            // it means no deletion, so the agent stays listed and running.
+            let paths = paths.clone();
+            tokio::spawn(async move {
+                let _ = tx.send(AppEvent::AgentDeleted(delete_and_unpublish(&relay, &paths, &pubkey).await));
             });
         }
         Cmd::ProbeHarness { harness: id, model } => {

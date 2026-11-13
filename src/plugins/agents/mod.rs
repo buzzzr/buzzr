@@ -81,6 +81,7 @@ impl Agents {
         for a in &self.agents {
             rows.push(PanelRow { text: format!("{}  ·  {}", a.name, short(&a.npub)), tone: Tone::Accent, action: None });
             rows.push(PanelRow { text: detail(a), tone: Tone::Dim, action: None });
+            rows.push(PanelRow { text: format!("   delete {}…", a.name), tone: Tone::Dim, action: Some(format!("delete:{}", a.pubkey)) });
         }
         rows.push(PanelRow { text: "new agent…".into(), tone: Tone::Ok, action: Some("new".into()) });
         // The title is just the name: the panel draws its own "Up/Down · Enter runs · Esc closes" after it, so anything
@@ -191,10 +192,23 @@ impl Agents {
         vec![self.effort_panel()]
     }
 
-    /// A panel row the user pressed Enter on: a model, a level, or the "new agent…" row (which starts the flow).
+    /// A panel row the user pressed Enter on: a model, a level, the "new agent…" row (which starts the flow), or a
+    /// "delete <name>…" row (which asks to confirm the deletion first).
     fn on_panel(&mut self, value: &str) -> Vec<PluginOutput> {
         if value == "new" {
             return self.start();
+        }
+        // Backing out of a deletion is a plain refresh, so the list reflects whatever is really there.
+        if value == "keep" {
+            return vec![PluginOutput::ListAgents { id: "refresh".into() }];
+        }
+        if let Some(pubkey) = value.strip_prefix("delete:") {
+            return vec![self.delete_panel(pubkey)];
+        }
+        if let Some(pubkey) = value.strip_prefix("confirm:") {
+            // The host owns the relay and the record file, so the plugin only asks; the answer comes back as
+            // `PluginInput::Deleted`.
+            return vec![PluginOutput::DeleteAgent { id: "delete".into(), pubkey: pubkey.to_owned() }];
         }
         if let Some(picked) = value.strip_prefix("model:") {
             if self.step != Some(Step::Model) {
@@ -256,6 +270,23 @@ impl Agents {
         PluginOutput::Panel(Panel { id: ID.into(), title: "new agent · level".into(), rows })
     }
 
+    /// The confirmation a "delete <name>…" row opens: deleting an agent is not undone here, so it takes a second,
+    /// deliberate Enter. Esc closes the panel without deleting anything.
+    fn delete_panel(&self, pubkey: &str) -> PluginOutput {
+        let name = self.name_of(pubkey);
+        let rows = vec![
+            PanelRow { text: format!("Delete {name}: take it off the relay and delete its key here"), tone: Tone::Error, action: Some(format!("confirm:{pubkey}")) },
+            PanelRow { text: "keep it".into(), tone: Tone::Dim, action: Some("keep".into()) },
+        ];
+        PluginOutput::Panel(Panel { id: ID.into(), title: format!("delete {name}"), rows })
+    }
+
+    /// The name of an agent in the list in hand, for the words on a confirmation and on a result. A pubkey the list no
+    /// longer holds is named by its own short form, so a late answer still reads.
+    fn name_of(&self, pubkey: &str) -> String {
+        self.agents.iter().find(|a| a.pubkey == pubkey).map(|a| a.name.clone()).unwrap_or_else(|| short(pubkey))
+    }
+
     /// The answer to `CreateAgent`: say plainly that it was made and published, and re-open the list on it. A relay
     /// that refused it (or any other failure) made no agent at all, so the error is all there is to say.
     fn on_created(&mut self, result: Result<crate::plugin::CreatedAgent, String>) -> Vec<PluginOutput> {
@@ -270,6 +301,21 @@ impl Agents {
             }
             // Nothing was made: no key, no folder, no record. Say why and leave the list as it was.
             Err(e) => vec![PluginOutput::Flash(format!("could not create the agent: {e}"))],
+        }
+    }
+
+    /// The answer to `DeleteAgent`: say plainly that it is gone, and re-open the list without it. A relay that refused
+    /// to take it off (or any other failure) left it in place, so the error is all there is to say.
+    fn on_deleted(&mut self, result: Result<String, String>) -> Vec<PluginOutput> {
+        match result {
+            Ok(name) => vec![
+                // The list first, the flash last: a panel opening sets its own hint, so saying what happened has to be
+                // the final word or the "deleted" message is lost behind it.
+                PluginOutput::ListAgents { id: "refresh".into() },
+                PluginOutput::Flash(format!("{name} deleted · taken off the relay and its key removed")),
+            ],
+            // It is still there — listed and running — so the list is left as it was.
+            Err(e) => vec![PluginOutput::Flash(format!("could not delete the agent: {e}"))],
         }
     }
 }
@@ -317,6 +363,7 @@ impl Plugin for Agents {
                 vec![self.panel()]
             }
             PluginInput::Created { result, .. } => self.on_created(result),
+            PluginInput::Deleted { result, .. } => self.on_deleted(result),
             PluginInput::HarnessOffer { id, result } => self.on_offer(&id, result),
             PluginInput::PanelAction { value: Some(v), .. } => self.on_panel(&v),
             _ => Vec::new(),
@@ -532,6 +579,38 @@ mod tests {
         let outs = p.on(PluginInput::Created { id: "create".into(), result: Err("the relay returned 500".into()) });
         assert_eq!(outs.len(), 1, "nothing was made, so there is no list to refresh");
         assert!(matches!(outs[0], PluginOutput::Flash(ref t) if t.contains("could not create") && t.contains("relay returned 500")));
+    }
+
+    #[test]
+    fn an_agent_can_be_deleted_from_the_panel_after_a_confirmation() {
+        let mut p = Agents::default();
+        let a = view("Scout");
+        let _ = p.on(PluginInput::Agents { id: "list".into(), agents: vec![a.clone()] });
+        // each agent has a row that offers to delete it
+        let delete = format!("delete:{}", a.pubkey);
+        let outs = p.on(PluginInput::PanelAction { id: ID.into(), row: 2, value: Some(delete.clone()) });
+        let PluginOutput::Panel(panel) = &outs[0] else { panic!("not a panel") };
+        assert_eq!(panel.title, "delete Scout");
+        assert!(panel.rows[0].text.contains("Delete Scout"), "{:?}", panel.rows);
+        assert_eq!(panel.rows[0].action.as_deref(), Some(format!("confirm:{}", a.pubkey).as_str()));
+        // backing out refreshes the list and deletes nothing
+        assert_eq!(
+            p.on(PluginInput::PanelAction { id: ID.into(), row: 1, value: Some("keep".into()) }),
+            vec![PluginOutput::ListAgents { id: "refresh".into() }]
+        );
+        // the confirmation is what asks the host to delete it
+        assert_eq!(
+            p.on(PluginInput::PanelAction { id: ID.into(), row: 0, value: Some(format!("confirm:{}", a.pubkey)) }),
+            vec![PluginOutput::DeleteAgent { id: "delete".into(), pubkey: a.pubkey.clone() }]
+        );
+        // the answer says it is gone, and the list is refreshed first so the flash is the last word
+        let outs = p.on(PluginInput::Deleted { id: "delete".into(), result: Ok("Scout".into()) });
+        assert!(matches!(&outs[0], PluginOutput::ListAgents { id } if id == "refresh"));
+        assert!(matches!(outs[1], PluginOutput::Flash(ref t) if t.contains("Scout deleted")));
+        // a relay that refused to take it off left it in place: only the reason is said
+        let outs = p.on(PluginInput::Deleted { id: "delete".into(), result: Err("the relay returned 500".into()) });
+        assert_eq!(outs.len(), 1, "nothing was deleted, so there is no list to refresh");
+        assert!(matches!(outs[0], PluginOutput::Flash(ref t) if t.contains("could not delete") && t.contains("relay returned 500")));
     }
 
     #[test]

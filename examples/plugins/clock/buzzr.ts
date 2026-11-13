@@ -151,6 +151,8 @@ export interface Buzzr {
   probeHarness(id: string, harness: string, model?: string): void;
   /** Ask buzzr to make and publish an agent; needs the `agents:write` permission. The answer comes back to `onCreated`. */
   createAgent(id: string, name: string, instructions: string, harness: string, model?: string, effort?: string): void;
+  /** Ask buzzr to delete a local agent and take it off the relay; needs the `agents:write` permission. The answer comes back to `onDeleted`. */
+  deleteAgent(id: string, pubkey: string): void;
   /** Write a line to the plugin's log; `error` also flashes. */
   log(text: string, level?: "info" | "error"): void;
 }
@@ -181,6 +183,8 @@ export interface PluginSpec {
   onHarnessOffer?(buzzr: Buzzr, id: string, offer: HarnessOffer | undefined, error: string | undefined): void;
   /** The answer to a `createAgent`: the agent it made, or `error` when it could not be made. */
   onCreated?(buzzr: Buzzr, id: string, agent: CreatedAgent | undefined, error: string | undefined): void;
+  /** The answer to a `deleteAgent`: the name of the agent that was deleted, or `error` when it was not. */
+  onDeleted?(buzzr: Buzzr, id: string, name: string | undefined, error: string | undefined): void;
 }
 
 // `process` is the one host object every runtime a plugin can be written for provides (Node, Bun, and Deno's Node
@@ -213,6 +217,7 @@ const buzzr: Buzzr = {
   listAgents: (id) => send({ type: "list_agents", id }),
   probeHarness: (id, harness, model) => send({ type: "probe_harness", id, harness, ...(model === undefined ? {} : { model }) }),
   createAgent: (id, name, instructions, harness, model = "", effort = "") => send({ type: "create_agent", id, name, instructions, harness, model, effort }),
+  deleteAgent: (id, pubkey) => send({ type: "delete_agent", id, pubkey }),
   log: (text, level = "info") => send({ type: "log", level, text }),
 };
 
@@ -231,7 +236,7 @@ const buzzr: Buzzr = {
 export function definePlugin(spec: PluginSpec): Buzzr {
   let buffer = "";
   const handle = (line: string): void => {
-    let message: { type?: string; apiVersion?: number; projection?: View; command?: string; args?: string; id?: string; row?: number; value?: string; text?: string; agents?: AgentView[]; offer?: HarnessOffer; agent?: CreatedAgent; error?: string };
+    let message: { type?: string; apiVersion?: number; projection?: View; command?: string; args?: string; id?: string; row?: number; value?: string; text?: string; agents?: AgentView[]; offer?: HarnessOffer; agent?: CreatedAgent; name?: string; error?: string };
     try {
       message = JSON.parse(line);
     } catch {
@@ -277,6 +282,9 @@ export function definePlugin(spec: PluginSpec): Buzzr {
         break;
       case "created":
         spec.onCreated?.(buzzr, message.id ?? "", message.agent, message.error);
+        break;
+      case "deleted":
+        spec.onDeleted?.(buzzr, message.id ?? "", message.name, message.error);
         break;
       case "bye":
         io.exit(0);

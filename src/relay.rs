@@ -233,6 +233,21 @@ impl Relay {
         accepted(&text, &event.id.to_hex())
     }
 
+    /// NIP-09 delete one addressable event's whole coordinate, signed by this relay's identity. Deleting an agent uses
+    /// it twice: as the agent, for its own kind-0 profile, and as the owner, for the kind-30177 listing of it. An agent
+    /// deletes as its owner's agent, so the event carries the same auth tag (and `x-auth-tag` request header) its other
+    /// events do.
+    pub async fn delete_coordinate(&self, coordinate: &str) -> Result<String> {
+        let tag = Tag::parse(["a", coordinate]).map_err(|e| anyhow!("{e}"))?;
+        let mut builder = EventBuilder::new(Kind::Custom(5), "").tags([tag]);
+        if let Some(auth) = &self.auth_tag {
+            builder = builder.tags([auth.clone()]);
+        }
+        let event = builder.sign_with_keys(&self.keys).map_err(|e| anyhow!("signing the deletion failed: {e}"))?;
+        let text = self.post("/events", serde_json::to_vec(&event)?).await?;
+        accepted(&text, &event.id.to_hex())
+    }
+
     /// NIP-11 information document (name, software, version), without authentication.
     pub async fn info(&self) -> Result<Value> {
         let resp = self.http.get(&self.base).header("Accept", "application/nostr+json").send().await?;

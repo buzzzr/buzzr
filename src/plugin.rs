@@ -122,6 +122,8 @@ pub enum PluginInput {
     Agents { id: String, agents: Vec<AgentView> },
     /// The answer to [`PluginOutput::CreateAgent`]: the agent that was made, or why it was not.
     Created { id: String, result: Result<CreatedAgent, String> },
+    /// The answer to [`PluginOutput::DeleteAgent`]: the name of the agent that was deleted, or why it was not.
+    Deleted { id: String, result: Result<String, String> },
     /// The answer to [`PluginOutput::ProbeHarness`]: what the harness offers for a new agent, or why it could not be
     /// asked (it is not installed, or it did not answer).
     HarnessOffer { id: String, result: Result<HarnessOffer, String> },
@@ -159,6 +161,10 @@ pub enum PluginOutput {
     /// the harness's own choice). The host owns the key, the folder and the relay, so the plugin asks; the answer comes
     /// back as [`PluginInput::Created`] with this `id`.
     CreateAgent { id: String, name: String, instructions: String, harness: String, model: String, effort: String },
+    /// Delete the local agent `pubkey`, after the plugin's own confirmation. The host owns the relay and the record
+    /// file, so the plugin asks: it takes the agent off the relay (its profile and the owner's listing of it) and
+    /// deletes its key and record here. The answer comes back as [`PluginInput::Deleted`] with this `id`.
+    DeleteAgent { id: String, pubkey: String },
 }
 
 impl PluginOutput {
@@ -203,6 +209,11 @@ impl PluginOutput {
                 harness: clean_line(&harness),
                 model: clean_line(&model),
                 effort: clean_line(&effort),
+            },
+            PluginOutput::DeleteAgent { id: prompt, pubkey } => PluginEvent::DeleteAgent {
+                plugin: id.to_owned(),
+                id: clean_line(&prompt),
+                pubkey: clean_line(&pubkey),
             },
         }
     }
