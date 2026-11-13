@@ -11,7 +11,7 @@ use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::Aes256Gcm;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
-use rand::RngCore;
+use rand::TryRng;
 use serde_json::{json, Value};
 use std::fmt;
 use zeroize::Zeroizing;
@@ -54,6 +54,13 @@ fn derive(password: &[u8], salt: &[u8], log_n: u8) -> Result<Zeroizing<[u8; 32]>
     Ok(key)
 }
 
+/// Fill `buf` from the operating system's random source.
+fn fill_random(buf: &mut [u8]) -> Result<(), KeyFileError> {
+    rand::rngs::SysRng
+        .try_fill_bytes(buf)
+        .map_err(|e| KeyFileError::Unusable(format!("no system randomness: {e}")))
+}
+
 /// Seal `key` under `password`; returns the JSON document to store.
 pub fn encrypt(key: &[u8], password: &[u8], log_n: u8) -> Result<String, KeyFileError> {
     if !(MIN_LOG_N..=MAX_LOG_N).contains(&log_n) {
@@ -64,8 +71,8 @@ pub fn encrypt(key: &[u8], password: &[u8], log_n: u8) -> Result<String, KeyFile
     }
     let mut salt = [0u8; 16];
     let mut nonce = [0u8; 12];
-    rand::rngs::OsRng.fill_bytes(&mut salt);
-    rand::rngs::OsRng.fill_bytes(&mut nonce);
+    fill_random(&mut salt)?;
+    fill_random(&mut nonce)?;
     let salt_b64 = B64.encode(salt);
     let aad = header_aad(log_n as u64, &salt_b64);
     let derived = derive(password, &salt, log_n)?;
