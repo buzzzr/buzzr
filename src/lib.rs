@@ -26,6 +26,7 @@ pub mod release;
 pub mod runner;
 pub mod selftest;
 pub mod setup;
+pub mod spawn;
 pub mod theme;
 pub mod ui;
 pub mod update;
