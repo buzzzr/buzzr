@@ -57,6 +57,14 @@ pub enum ToPlugin<'a> {
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<&'a str>,
     },
+    /// The answer to the plugin's `update_agent`: the name the agent has now (`name`), or why not (`error`).
+    Updated {
+        id: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        name: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<&'a str>,
+    },
     Bye,
 }
 
@@ -103,6 +111,8 @@ pub enum FromPlugin {
     CreateAgent { id: String, name: String, instructions: String, harness: String, model: String, effort: String },
     /// Ask buzzr to delete the local agent `pubkey`; the answer comes back as `deleted` with this `id`.
     DeleteAgent { id: String, pubkey: String },
+    /// Ask buzzr to change the name and instructions of the local agent `pubkey`; the answer comes back as `updated`.
+    UpdateAgent { id: String, pubkey: String, name: String, instructions: String },
     Log { level: String, text: String },
 }
 
@@ -215,6 +225,18 @@ pub fn parse(line: &str) -> Result<Option<FromPlugin>, String> {
             FromPlugin::DeleteAgent {
                 id,
                 pubkey: clean_line(field("pubkey").and_then(Value::as_str).unwrap_or_default()),
+            }
+        }
+        "update_agent" => {
+            let id = clean_line(field("id").and_then(Value::as_str).unwrap_or_default());
+            if id.is_empty() {
+                return Err("an update_agent needs an id".into());
+            }
+            FromPlugin::UpdateAgent {
+                id,
+                pubkey: clean_line(field("pubkey").and_then(Value::as_str).unwrap_or_default()),
+                name: clean_line(field("name").and_then(Value::as_str).unwrap_or_default()),
+                instructions: clean_block(field("instructions").and_then(Value::as_str).unwrap_or_default()),
             }
         }
         _ => return Ok(None),
@@ -414,6 +436,19 @@ mod tests {
         assert!(line.contains(r#""type":"harness_offer""#) && line.contains(r#""offer":{"models""#), "{line}");
         let line = ToPlugin::HarnessOffer { id: "offer", offer: None, error: Some("claude-agent-acp is not installed") }.line();
         assert!(line.contains(r#""error":"claude-agent-acp is not installed""#) && !line.contains(r#""offer":"#), "{line}");
+    }
+
+    #[test]
+    fn an_update_agent_carries_the_new_name_and_instructions_and_its_answer_the_name() {
+        let Some(FromPlugin::UpdateAgent { id, pubkey, name, instructions }) =
+            parse(r#"{"type":"update_agent","id":"edit","pubkey":"ab","name":"Scout","instructions":"watch"}"#).unwrap()
+        else {
+            panic!("not an update")
+        };
+        assert_eq!((id.as_str(), pubkey.as_str(), name.as_str(), instructions.as_str()), ("edit", "ab", "Scout", "watch"));
+        assert!(parse(r#"{"type":"update_agent","pubkey":"ab"}"#).is_err(), "an update needs an id");
+        let line = ToPlugin::Updated { id: "edit", name: Some("Scout"), error: None }.line();
+        assert!(line.contains(r#""type":"updated""#) && line.contains(r#""name":"Scout""#), "{line}");
     }
 
     #[test]

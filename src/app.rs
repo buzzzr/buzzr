@@ -322,6 +322,9 @@ pub enum Cmd {
     /// and then delete its key and record from `agents.json` (the loop owns the file). The relay comes first, so a
     /// relay that refuses it leaves the agent in place, listed and running.
     DeleteAgent { pubkey: String },
+    /// Change an agent's name and instructions: a new name is published again (its profile and this identity's
+    /// listing) and then the record in `agents.json` is changed. The relay comes first, as for a creation.
+    UpdateAgent { pubkey: String, name: String, instructions: String },
     /// Ask a harness what it offers for a new agent — its models, and a model's thinking levels. The answer comes back
     /// as `AppEvent::HarnessOffer`; the plugin that asked is answered with it. Runs off the loop: a harness that will
     /// not answer is waited on, never the event loop.
@@ -366,6 +369,8 @@ pub enum AppEvent {
     /// The answer to `Cmd::DeleteAgent`: the agent that was deleted, or why it was not (including a relay that refused
     /// to take it off, which leaves it in place).
     AgentDeleted(Result<crate::agents::Agent, String>),
+    /// The answer to `Cmd::UpdateAgent`: the agent as it is now, or why it was not changed.
+    AgentUpdated(Result<crate::agents::Agent, String>),
     /// The answer to `Cmd::ProbeHarness`: what the harness offers for a new agent, or why it could not be asked (it is
     /// not installed, or it did not answer).
     HarnessOffer(Result<crate::plugin::HarnessOffer, String>),
@@ -502,6 +507,8 @@ pub struct App {
     pending_create: Option<(String, String)>,
     /// The plugin waiting on a `Cmd::DeleteAgent` result, and the id it will be answered with.
     pending_delete: Option<(String, String)>,
+    /// The plugin waiting on a `Cmd::UpdateAgent` result, and the id it will be answered with.
+    pending_update: Option<(String, String)>,
     /// The plugin waiting on a `Cmd::ProbeHarness` result, and the id it will be answered with.
     pending_probe: Option<(String, String)>,
     /// When each compiled-in plugin last got a heartbeat, and when each last sent (the same limits the host applies to
@@ -609,6 +616,7 @@ impl App {
             prompt: None,
             pending_create: None,
             pending_delete: None,
+            pending_update: None,
             pending_probe: None,
             plugin_ticks: HashMap::new(),
             plugin_sends: HashMap::new(),
@@ -1720,6 +1728,27 @@ impl App {
                     },
                 }
             }
+            AppEvent::AgentUpdated(result) => {
+                // The host republished the agent and changed its record (or could not, and nothing changed). The plugin
+                // that asked owns the words; the list kept here follows the record.
+                let pending = self.pending_update.take();
+                match (result, pending) {
+                    (Ok(agent), pending) => {
+                        if let Some(slot) = self.agents.iter_mut().find(|a| a.pubkey == agent.pubkey) {
+                            *slot = agent.clone();
+                        }
+                        match pending {
+                            Some((plugin, id)) => self.plugin_input(&plugin, PluginInput::Updated { id, result: Ok(agent.name) }),
+                            None => Vec::new(),
+                        }
+                    }
+                    (Err(e), Some((plugin, id))) => self.plugin_input(&plugin, PluginInput::Updated { id, result: Err(e) }),
+                    (Err(e), None) => {
+                        self.flash(format!("could not change the agent: {e}"));
+                        Vec::new()
+                    }
+                }
+            }
             AppEvent::HarnessOffer(result) => {
                 // The host asked a harness what it offers (or could not — it is not installed, or it did not answer).
                 // The plugin that asked owns the words, so the result goes back to it as `PluginInput::HarnessOffer`.
@@ -2617,6 +2646,7 @@ fn plugin_cmd(plugin: &str, input: PluginInput) -> Option<PluginCmd> {
         PluginInput::Agents { id, agents } => PluginCmd::Agents { plugin, id, agents },
         PluginInput::Created { id, result } => PluginCmd::Created { plugin, id, result },
         PluginInput::Deleted { id, result } => PluginCmd::Deleted { plugin, id, result },
+        PluginInput::Updated { id, result } => PluginCmd::Updated { plugin, id, result },
         PluginInput::HarnessOffer { id, result } => PluginCmd::HarnessOffer { plugin, id, result },
         PluginInput::Snapshot(_) | PluginInput::Tick => return None,
     })

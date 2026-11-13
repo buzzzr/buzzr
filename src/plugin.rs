@@ -64,6 +64,9 @@ pub struct AgentView {
     pub effort: Option<String>,
     /// The folder the harness works in.
     pub workspace: String,
+    /// What the agent was told to do (may be empty). Shown when editing it.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub instructions: String,
     pub created_at: u64,
 }
 
@@ -124,6 +127,8 @@ pub enum PluginInput {
     Created { id: String, result: Result<CreatedAgent, String> },
     /// The answer to [`PluginOutput::DeleteAgent`]: the name of the agent that was deleted, or why it was not.
     Deleted { id: String, result: Result<String, String> },
+    /// The answer to [`PluginOutput::UpdateAgent`]: the name the agent has now, or why it was not changed.
+    Updated { id: String, result: Result<String, String> },
     /// The answer to [`PluginOutput::ProbeHarness`]: what the harness offers for a new agent, or why it could not be
     /// asked (it is not installed, or it did not answer).
     HarnessOffer { id: String, result: Result<HarnessOffer, String> },
@@ -165,6 +170,10 @@ pub enum PluginOutput {
     /// file, so the plugin asks: it takes the agent off the relay (its profile and the owner's listing of it) and
     /// deletes its key and record here. The answer comes back as [`PluginInput::Deleted`] with this `id`.
     DeleteAgent { id: String, pubkey: String },
+    /// Change the name and instructions of the local agent `pubkey`. The host owns the relay and the record file: a new
+    /// name is published again (the agent's profile and the owner's listing of it) before the record is changed. The
+    /// answer comes back as [`PluginInput::Updated`] with this `id`.
+    UpdateAgent { id: String, pubkey: String, name: String, instructions: String },
 }
 
 impl PluginOutput {
@@ -214,6 +223,13 @@ impl PluginOutput {
                 plugin: id.to_owned(),
                 id: clean_line(&prompt),
                 pubkey: clean_line(&pubkey),
+            },
+            PluginOutput::UpdateAgent { id: prompt, pubkey, name, instructions } => PluginEvent::UpdateAgent {
+                plugin: id.to_owned(),
+                id: clean_line(&prompt),
+                pubkey: clean_line(&pubkey),
+                name: clean_line(&name),
+                instructions: clean_block(&instructions),
             },
         }
     }

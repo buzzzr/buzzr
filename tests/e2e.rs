@@ -1130,8 +1130,9 @@ fn an_agent_is_deleted_from_the_panel_after_a_confirmation() {
     s.press("enter"); // take the level in force, which makes it
     s.expect("the confirmation", "Scout created");
     s.expect("the list to come back", "new agent…");
-    // the list offers to delete it; Enter on that row asks to confirm first, and only a second Enter deletes
-    s.press_all(&["down", "down"]);
+    // the agent's menu offers to delete it; Enter on that asks to confirm first, and only a second Enter deletes
+    s.press("enter"); // the agent's menu
+    s.press("down"); // to "delete…"
     s.press("enter");
     s.expect("the confirmation panel", "delete Scout");
     s.expect("what the confirmation does", "take it off the relay and delete its key here");
@@ -1150,6 +1151,43 @@ fn an_agent_is_deleted_from_the_panel_after_a_confirmation() {
     assert!(deletions.contains("\"kind\":5"), "a deletion reached the relay: {deletions}");
     assert!(deletions.contains("30177:"), "the owner's listing was deleted by coordinate: {deletions}");
     assert!(deletions.contains("0:"), "and so was the agent's own profile: {deletions}");
+}
+
+/// An agent is renamed from the panel: the new name is republished (the agent's own profile and the owner's listing)
+/// before the local record changes.
+#[test]
+fn an_agent_is_renamed_from_the_panel() {
+    let Some(relay) = relay_or_skip("an_agent_is_renamed_from_the_panel") else { return };
+    let mut s = session_with_plugins(&relay);
+    let config = s.config.clone();
+    s.press_all(&["tab", "tab"]);
+    run_in_palette(&s, "agents", "");
+    s.expect("the empty list", "No agents yet.");
+    s.press("end");
+    s.press("enter");
+    s.type_text("Scout");
+    s.press("enter");
+    s.type_text("watch the repo");
+    s.press("enter");
+    s.expect("the models panel", "new agent · model");
+    s.press("enter");
+    s.press("enter");
+    s.expect("the confirmation", "Scout created");
+    s.expect("the list to come back", "new agent…");
+    s.press("enter"); // the agent's menu, on "edit"
+    s.press("enter");
+    s.expect("the name question", "Name is Scout");
+    s.type_text("Ranger");
+    s.press("enter");
+    s.press("enter"); // keep the instructions
+    s.expect("the rename reported", "Ranger");
+    s.press("esc");
+    s.press("ctrl+q");
+    s.wait_exit(Duration::from_secs(10)).expect("buzzr should exit on Ctrl+Q");
+    let written = std::fs::read_to_string(config.join("agents.json")).unwrap_or_default();
+    assert!(written.contains("Ranger") && !written.contains("Scout"), "the record carries the new name: {written}");
+    let profiles = relay_query(&relay, r#"[{"kinds":[0]}]"#);
+    assert!(profiles.contains("Ranger"), "the agent's profile was republished: {profiles}");
 }
 
 /// A message that names a local agent is answered by it. The agent an `agents create` makes is only an identity and a

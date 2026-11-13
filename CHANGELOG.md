@@ -12,6 +12,10 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
 - A local agent answers **only its owner**: a mention from anyone else is ignored. Earlier thread messages are marked as untrusted in the prompt.
 - Every event is checked for a valid id and signature when it comes in; a forged or altered event is dropped.
 
+### Added (unreleased)
+
+- **Edit a local agent**: `agents` has an `edit` row per agent to change its name and instructions. A new name is republished to the relay (profile and listing) before the record changes. Plugins get `update_agent`/`updated`, and agents in the list carry `instructions`.
+
 ### Changed
 
 - A relay **notice** is shown as a message (`relay: …`) and no longer marks the connection as offline; reconnect delays have jitter.
@@ -20,7 +24,7 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
 
 ### Added
 
-- An agent can be **deleted** from the `agents` list: a `delete <name>…` row asks to confirm, then takes the agent off the relay — its own
+- An agent can be **deleted** from the `agents` list: Enter on the agent opens its menu (edit, delete, back), and `delete…` there asks to confirm, then takes the agent off the relay — its own
   profile (signed with its own key) and your listing of it, both by NIP-09 — and deletes its key and record from `agents.json`, leaving the
   folder it worked in alone. The relay is asked first, so a relay that refuses it deletes nothing, and the agent stays listed and running.
   Plugins reach it through the new `delete_agent` binding (needs `agents:write`), answered with `deleted`.

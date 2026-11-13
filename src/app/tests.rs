@@ -55,7 +55,8 @@ fn open_palette(app: &mut App) {
 fn run_command(app: &mut App, line: &str) -> Vec<Cmd> {
     let (name, arg) = line.split_once(char::is_whitespace).map(|(n, a)| (n, a.trim())).unwrap_or((line, ""));
     open_palette(app);
-    type_text(app, name);
+    // A command that declares no argument runs on Enter, so its argument can only be typed on the same line.
+    type_text(app, if arg.is_empty() { name } else { line });
     let cmds = press(app, KeyCode::Enter);
     if app.palette.arg.is_some() {
         type_text(app, arg);
@@ -2814,7 +2815,10 @@ fn an_agent_is_deleted_from_the_panel_after_a_confirmation() {
     let scout = agent("Scout");
     app.seed_agents(vec![scout.clone()]);
     app.command("agents", "");
-    // each agent has a row that offers to delete it; walking to it and pressing Enter asks for a confirmation first
+    // Enter on the agent opens its menu; walking to "delete…" there and pressing Enter asks for a confirmation first
+    let cmds = press(&mut app, KeyCode::Enter);
+    assert!(cmds.is_empty(), "opening the menu sends nothing: {cmds:?}");
+    assert_eq!(app.panel.as_ref().unwrap().title, "Scout");
     let action = format!("delete:{}", scout.pubkey);
     let at = app.panel.as_ref().unwrap().rows.iter().position(|r| r.action.as_deref() == Some(action.as_str())).expect("a delete row");
     for _ in 0..at {

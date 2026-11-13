@@ -275,7 +275,7 @@ The full behaviour, for when the feature list above is not enough.
 | Ctrl+R, Ctrl+O | reload, load older |
 | Ctrl+Q, Ctrl+C | quit |
 
-Commands run from the Ctrl+K command palette (N is the number shown as `#N`): `agents [create]`, `archive`, `c`, `copy N`, `delete N`, `dm NAME`, `edit N`, `invite NAME`, `join NAME`, `leave`, `more`, `new [private] name [about]`, `plugins`, `q`, `r N text`, `read [all]`, `refresh`, `search text`, `t N`, `update`, `whois NAME`. Type to narrow the list to the commands whose name starts with what you typed, the arrows move the cursor, and Enter runs the one on the cursor line; a command that takes an argument asks for it first (Enter with nothing typed runs the ones whose argument is optional). The whole line can be typed at once instead — `dm @Alice` runs in a single step, and a leading `@` on a name is not part of it. Plugin commands appear in the list too.
+Commands run from the Ctrl+K command palette (N is the number shown as `#N`): `agents`, `archive`, `c`, `copy N`, `delete N`, `dm NAME`, `edit N`, `invite NAME`, `join NAME`, `leave`, `more`, `new [private] name [about]`, `plugins`, `q`, `r N text`, `read [all]`, `refresh`, `search text`, `t N`, `update`, `whois NAME`. Type to narrow the list to the commands whose name starts with what you typed, the arrows move the cursor, and Enter runs the one on the cursor line; a command that takes an argument asks for it first (Enter with nothing typed runs the ones whose argument is optional). The whole line can be typed at once instead — `dm @Alice` runs in a single step, and a leading `@` on a name is not part of it. Plugin commands appear in the list too.
 
 ## Clipboard
 
