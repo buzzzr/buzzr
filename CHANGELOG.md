@@ -5,6 +5,11 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
 
 ## [Unreleased]
 
+### Security
+
+- A local agent answers **only its owner**: a mention from anyone else is ignored. Earlier thread messages are marked as untrusted in the prompt.
+- Every event is checked for a valid id and signature when it comes in; a forged or altered event is dropped.
+
 ### Changed
 
 - A relay **notice** is shown as a message (`relay: …`) and no longer marks the connection as offline; reconnect delays have jitter.
@@ -96,6 +101,11 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
   wrong key. The name that answers is remembered, so the next command resolves it without a round-trip; a directory that cannot be
   reached, or that knows nobody by that name, still says so.
 
+### Security
+
+- A local agent answers **only its owner**: a mention from anyone else is ignored. Earlier thread messages are marked as untrusted in the prompt.
+- Every event is checked for a valid id and signature when it comes in; a forged or altered event is dropped.
+
 ### Changed
 
 - **Commands moved to a `Ctrl+K` command palette.** `Ctrl+K` opens a modal palette with a query of its own: type to narrow the
@@ -135,6 +145,11 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
   a DM never asks; nothing is offered before the channel's member list has loaded, and only names the profiles have given us are
   recognised this way.
 
+### Security
+
+- A local agent answers **only its owner**: a mention from anyone else is ignored. Earlier thread messages are marked as untrusted in the prompt.
+- Every event is checked for a valid id and signature when it comes in; a forged or altered event is dropped.
+
 ### Changed
 
 - The arrow keys move between the messages and the input: `Up` in an empty composer leaves it for the message list and lands on
@@ -155,6 +170,11 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
 
 - A `↓ more below` marker sits in the bottom corner of the message pane while the newest message is below the view, and goes
   away as soon as the newest message is on screen.
+
+### Security
+
+- A local agent answers **only its owner**: a mention from anyone else is ignored. Earlier thread messages are marked as untrusted in the prompt.
+- Every event is checked for a valid id and signature when it comes in; a forged or altered event is dropped.
 
 ### Changed
 
@@ -181,6 +201,11 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
 - `u` marks the selected message unread: the channel's badge, the header count and the `new messages` divider come back, and
   the position survives a restart.
 - A thread whose replies are newer than your last visit is marked unread on its message, and opening it clears the mark.
+
+### Security
+
+- A local agent answers **only its owner**: a mention from anyone else is ignored. Earlier thread messages are marked as untrusted in the prompt.
+- Every event is checked for a valid id and signature when it comes in; a forged or altered event is dropped.
 
 ### Changed
 

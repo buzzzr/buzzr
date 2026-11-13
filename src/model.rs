@@ -19,8 +19,8 @@ pub const KIND_WINDOW_BOUNDS: u64 = 39006;
 pub const KIND_EDIT: u64 = 40003;
 pub const KIND_DELETE_MESSAGE: u64 = 9005;
 
-/// A Nostr event, reduced to what the client reads. Signatures are not checked here: the transport is authenticated (HTTPS with
-/// NIP-98 or a NIP-42 WebSocket) and the relay is trusted for what it serves.
+/// A Nostr event, reduced to what the client reads. `from_value` is the one door events come in by and it checks the id and
+/// the signature there, so an event that is not what its author signed never becomes an `Ev`.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct Ev {
     pub id: String,
@@ -34,7 +34,9 @@ pub struct Ev {
 }
 
 impl Ev {
+    /// The event in `v`, or `None` when it is malformed or its id or signature does not verify.
     pub fn from_value(v: &Value) -> Option<Ev> {
+        <nostr::Event as nostr::JsonUtil>::from_json(v.to_string()).ok()?.verify().ok()?;
         serde_json::from_value(v.clone()).ok()
     }
 
@@ -360,6 +362,22 @@ impl Store {
 #[cfg(test)]
 pub mod tests {
     use super::*;
+
+    #[test]
+    fn an_event_comes_in_only_when_its_id_and_signature_verify() {
+        let keys = nostr::Keys::generate();
+        let signed = nostr::EventBuilder::text_note("hello").sign_with_keys(&keys).unwrap();
+        let mut v = serde_json::to_value(&signed).unwrap();
+        assert_eq!(Ev::from_value(&v).map(|e| e.content), Some("hello".to_owned()));
+        v["content"] = "tampered".into();
+        assert!(Ev::from_value(&v).is_none(), "content changed after signing: the id no longer matches");
+        let mut forged = serde_json::to_value(&signed).unwrap();
+        forged["pubkey"] = nostr::Keys::generate().public_key().to_hex().into();
+        assert!(Ev::from_value(&forged).is_none(), "claimed to be someone else: the signature does not verify");
+        let mut unsigned = serde_json::to_value(&signed).unwrap();
+        unsigned.as_object_mut().unwrap().remove("sig");
+        assert!(Ev::from_value(&unsigned).is_none(), "no signature, no event");
+    }
 
     pub fn ev(id: &str, at: u64, content: &str, tags: &[&[&str]]) -> Ev {
         Ev {
