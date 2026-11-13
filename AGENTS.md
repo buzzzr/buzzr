@@ -1,7 +1,7 @@
 # AGENTS.md: working on buzzr
 
-buzzr is a terminal client for Buzz (a Nostr-based chat for people and agents) that speaks to the relay directly. Read this file and
-`ARCHITECTURE.md` before changing code.
+buzzr is a terminal client for Buzz (a Nostr-based chat for people and agents) that speaks to the relay directly. Read this file,
+`ARCHITECTURE.md` and `docs/DESIGN_RULES.md` (the antipatterns to avoid) before changing code.
 
 ## Layout
 
