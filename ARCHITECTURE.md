@@ -25,7 +25,7 @@ into `AppEvent`s. Because `App` never touches the network or the terminal, its b
 | `clock.rs` | `now_secs()`, the one place the wall clock is read as Unix seconds. |
 | `lib.rs` | The library: the modules below, exposed so a **compiled-in** plugin can live in a crate of its own and register through `register_plugin!`. `main.rs` is a thin shell over it. |
 | `app.rs` | State and behaviour: channels, stores, view (channel or thread), focus, overlays, selection and scroll, input, commands, mentions, unread, typing, clipboard requests. The behaviour is split by feature into further `impl App` blocks: `app/palette.rs` (the command line and palette), `app/people.rs` (membership, DMs, invitations, directory), `app/plugins.rs` (plugin events, prompts, panels, the projection), `app/reactions.rs` (react, edit, delete) and `app/search.rs`. `app/tests.rs` has the tests. |
-| `ui.rs` | Drawing: header, channel list, plugin panes, message list, typing line, status line, input box, footer, key panel, help. |
+| `ui.rs` | Drawing: header, channel list, plugin panes, message list, typing line, status line, input box, footer, key panel. |
 | `list.rs` | Geometry of the message list: offsets, hit-testing, anchors that keep the reader's place, selection scrolling. Pure. |
 | `markdown.rs` | Message text -> wrapped styled lines + link positions. Strips control characters first. |
 | `model.rs` | `Ev` (an event), `Channel`, `Summary`, and `Store`: everything loaded for one channel (messages, edits, deletions, reactions, thread summaries) and the views over it (timeline, thread). |
