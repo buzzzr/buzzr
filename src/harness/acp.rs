@@ -36,11 +36,19 @@ const PROTOCOL_VERSION: u32 = 1;
 const MODEL_IDS: &[&str] = &["model"];
 /// The thinking-level config, likewise (`thought_level` is the category; harnesses spell the id differently).
 const EFFORT_IDS: &[&str] = &["thought_level", "thinking_effort"];
+/// The environment a harness is started with, and all of it: what a program needs to run, plus the variables the
+/// harness itself declares (see `Harness::env`). Everything else in buzzr's own environment is dropped first, so the
+/// owner's private key — `BUZZ_PRIVATE_KEY`, and the `BUZZ_AUTH_TAG` that goes with it — can never reach the harness.
+/// That matters here more than for a plugin: a harness runs the agent's tool calls, unattended, and [`Session::prompt`]
+/// approves every one of them. This is the same set a plugin child gets (see `plugins::host`).
+const BASE_ENV: &[&str] = &["PATH", "HOME", "LANG", "LC_ALL", "TZ", "TMPDIR"];
 
 /// Start `program`, ask it to open a session in `cwd`, and read what it offers. `missing` is the message when the
-/// program cannot be started at all — it is not installed. Blocking; the process is killed before this returns.
-pub fn probe(program: &str, cwd: &Path, model: Option<&str>, missing: &str) -> Result<HarnessOffer, String> {
-    let mut wire = Wire::spawn(program, cwd, missing)?;
+/// program cannot be started at all — it is not installed; `env` names the variables from buzzr's own environment the
+/// harness needs (its own credentials), the rest of it is dropped (see `BASE_ENV`). Blocking; the process is killed
+/// before this returns.
+pub fn probe(program: &str, cwd: &Path, env: &[&str], model: Option<&str>, missing: &str) -> Result<HarnessOffer, String> {
+    let mut wire = Wire::spawn(program, cwd, env, missing)?;
     converse(&mut wire, cwd, model) // dropping the wire kills the harness
 }
 
@@ -76,10 +84,20 @@ struct Wire {
 }
 
 impl Wire {
-    /// Start `program` in `cwd`. `missing` is the message when it cannot be started at all.
-    fn spawn(program: &str, cwd: &Path, missing: &str) -> Result<Wire, String> {
+    /// Start `program` in `cwd`. `missing` is the message when it cannot be started at all. The child's environment
+    /// is a clean one: `BASE_ENV` plus `env`, nothing of buzzr's own.
+    fn spawn(program: &str, cwd: &Path, env: &[&str], missing: &str) -> Result<Wire, String> {
         let mut cmd = Command::new(program);
         cmd.current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+        // A clean environment, the way a plugin child gets one (see `plugins::host`): only what a program needs to
+        // run, plus what the harness declares for itself. The owner's key lives in buzzr's environment and must not
+        // follow the harness into the agent's tool calls.
+        cmd.env_clear();
+        for key in BASE_ENV.iter().chain(env) {
+            if let Ok(value) = std::env::var(key) {
+                cmd.env(key, value);
+            }
+        }
         // Through `spawn::`: the harness may be a program that was written to disk as we start it (see `crate::spawn`).
         let mut child = crate::spawn::start(|| cmd.spawn()).map_err(|e| match e.kind() {
             std::io::ErrorKind::NotFound => missing.to_owned(),
@@ -168,9 +186,10 @@ pub struct Session {
 impl Session {
     /// Start `program` in `cwd` and open a session in it, on `model` and at thinking level `effort` when given (an
     /// empty one is the harness's own choice), with `instructions` as what the agent was told to do. `missing` is the
-    /// message when the program cannot be started at all.
-    pub fn open(program: &str, cwd: &Path, model: Option<&str>, effort: Option<&str>, instructions: &str, missing: &str) -> Result<Session, String> {
-        let mut wire = Wire::spawn(program, cwd, missing)?;
+    /// message when the program cannot be started at all; `env` names the variables from buzzr's own environment the
+    /// harness needs (its own credentials), the rest of it is dropped (see `BASE_ENV`).
+    pub fn open(program: &str, cwd: &Path, env: &[&str], model: Option<&str>, effort: Option<&str>, instructions: &str, missing: &str) -> Result<Session, String> {
+        let mut wire = Wire::spawn(program, cwd, env, missing)?;
         let client = json!({ "name": "buzzr", "version": env!("CARGO_PKG_VERSION") });
         let init = wire.call("initialize", json!({ "protocolVersion": PROTOCOL_VERSION, "clientCapabilities": {}, "clientInfo": client }), OPEN_TIMEOUT)?;
         // ACP's `systemPrompt` is only sent when the harness says it takes one; otherwise the instructions lead the
@@ -384,7 +403,7 @@ mod tests {
     fn a_probe_reads_the_models_and_levels_a_harness_offers() {
         let dir = tempdir();
         let program = fake_acp(&dir);
-        let offer = probe(program.to_str().unwrap(), &dir, None, "missing").unwrap();
+        let offer = probe(program.to_str().unwrap(), &dir, &[], None, "missing").unwrap();
         assert_eq!(values(&offer.models), vec!["sonnet", "opus"]);
         assert_eq!(offer.models[0].label, "Sonnet", "a choice's name is its label");
         assert_eq!(offer.model, "sonnet", "the model it starts on");
@@ -397,7 +416,7 @@ mod tests {
     fn putting_the_session_on_a_model_reads_that_model_s_levels() {
         let dir = tempdir();
         let program = fake_acp(&dir);
-        let offer = probe(program.to_str().unwrap(), &dir, Some("opus"), "missing").unwrap();
+        let offer = probe(program.to_str().unwrap(), &dir, &[], Some("opus"), "missing").unwrap();
         assert_eq!(offer.model, "opus", "the chosen model comes back as the current one");
         assert_eq!(values(&offer.efforts), vec!["low", "high"], "and its levels are the ones offered");
         std::fs::remove_dir_all(dir).unwrap();
@@ -406,7 +425,7 @@ mod tests {
     #[test]
     fn a_program_that_is_not_installed_is_the_missing_message() {
         let dir = tempdir();
-        let err = probe("definitely-not-a-real-program-xyz", &dir, None, "claude-agent-acp is not installed").unwrap_err();
+        let err = probe("definitely-not-a-real-program-xyz", &dir, &[], None, "claude-agent-acp is not installed").unwrap_err();
         assert_eq!(err, "claude-agent-acp is not installed");
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -438,7 +457,7 @@ mod tests {
         let dir = tempdir();
         let program = fake_acp(&dir);
         // The fake takes no system prompt, so the instructions lead the first prompt — the reply quotes them back.
-        let mut session = Session::open(program.to_str().unwrap(), &dir, None, None, "Be a helper.", "missing").unwrap();
+        let mut session = Session::open(program.to_str().unwrap(), &dir, &[], None, None, "Be a helper.", "missing").unwrap();
         let reply = session.prompt("hi there").unwrap();
         assert!(reply.contains("heard:"), "the chunks are collected in order: {reply:?}");
         assert!(reply.contains("Be a helper."), "the instructions led the prompt: {reply:?}");
@@ -451,7 +470,7 @@ mod tests {
     fn the_instructions_lead_only_the_first_prompt() {
         let dir = tempdir();
         let program = fake_acp(&dir);
-        let mut session = Session::open(program.to_str().unwrap(), &dir, None, None, "Be a helper.", "missing").unwrap();
+        let mut session = Session::open(program.to_str().unwrap(), &dir, &[], None, None, "Be a helper.", "missing").unwrap();
         assert!(session.prompt("first").unwrap().contains("Be a helper."));
         let second = session.prompt("second").unwrap();
         assert!(second.contains("second"), "{second:?}");
@@ -463,7 +482,7 @@ mod tests {
     fn a_harness_that_takes_a_system_prompt_is_sent_the_instructions_that_way() {
         let dir = tempdir();
         let program = copy_acp(&dir, "claude-agent-acp-sysprompt");
-        let mut session = Session::open(program.to_str().unwrap(), &dir, None, None, "Be a helper.", "missing").unwrap();
+        let mut session = Session::open(program.to_str().unwrap(), &dir, &[], None, None, "Be a helper.", "missing").unwrap();
         let reply = session.prompt("hi").unwrap();
         assert!(reply.contains("[system: Be a helper.]"), "the instructions went in `session/new`: {reply:?}");
         assert!(!reply.contains("Be a helper.\n\n"), "and did not lead the prompt as well: {reply:?}");
@@ -474,7 +493,7 @@ mod tests {
     fn a_session_on_a_model_and_level_the_agent_was_made_with_still_runs() {
         let dir = tempdir();
         let program = fake_acp(&dir);
-        let mut session = Session::open(program.to_str().unwrap(), &dir, Some("opus"), Some("high"), "", "missing").unwrap();
+        let mut session = Session::open(program.to_str().unwrap(), &dir, &[], Some("opus"), Some("high"), "", "missing").unwrap();
         assert!(session.prompt("hi").unwrap().contains("hi"), "a session put on a model and level still runs a turn");
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -482,8 +501,46 @@ mod tests {
     #[test]
     fn a_session_for_a_program_that_is_not_installed_is_the_missing_message() {
         let dir = tempdir();
-        let err = Session::open("definitely-not-a-real-program-xyz", &dir, None, None, "", "claude-agent-acp is not installed").unwrap_err();
+        let err = Session::open("definitely-not-a-real-program-xyz", &dir, &[], None, None, "", "claude-agent-acp is not installed").unwrap_err();
         assert_eq!(err, "claude-agent-acp is not installed");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_harness_is_started_with_a_clean_environment_and_never_the_key() {
+        let dir = tempdir();
+        // A program that prints the environment it was started with, then a sentinel line, so the test knows when the
+        // whole of it has been read.
+        let program = dir.join("record-env");
+        std::fs::write(&program, "#!/bin/sh\nenv\necho BUZZR-ENV-END\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // The two variables buzzr reads its identity from, and one a harness declares for itself.
+        let previous: Vec<(&str, Option<std::ffi::OsString>)> =
+            ["BUZZ_PRIVATE_KEY", "BUZZ_AUTH_TAG", "BUZZR_TEST_HARNESS_ENV"].into_iter().map(|k| (k, std::env::var_os(k))).collect();
+        std::env::set_var("BUZZ_PRIVATE_KEY", "1111111111111111111111111111111111111111111111111111111111111111");
+        std::env::set_var("BUZZ_AUTH_TAG", "[\"a\",\"b\",\"c\",\"d\"]");
+        std::env::set_var("BUZZR_TEST_HARNESS_ENV", "kept");
+        let wire = Wire::spawn(program.to_str().unwrap(), &dir, &["BUZZR_TEST_HARNESS_ENV"], "missing").unwrap();
+        let mut seen = String::new();
+        while let Ok(line) = wire.rx.recv_timeout(Duration::from_secs(10)) {
+            if line.trim_end() == "BUZZR-ENV-END" {
+                break;
+            }
+            seen.push_str(&line);
+        }
+        drop(wire);
+        for (key, value) in previous {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+        // Whole lines, and never the environment itself in a message: a failure here must not print the key it is
+        // checking for (`AGENTS.md`, principle 4).
+        assert!(seen.lines().any(|l| l.starts_with("PATH=")), "the harness can still find its own program and its tools");
+        assert!(seen.lines().any(|l| l == "BUZZR_TEST_HARNESS_ENV=kept"), "the variables the harness declares for itself are passed on");
+        assert!(!seen.lines().any(|l| l.starts_with("BUZZ_PRIVATE_KEY=")), "the owner's key is in the harness's environment");
+        assert!(!seen.lines().any(|l| l.starts_with("BUZZ_AUTH_TAG=")), "the owner's attestation is in the harness's environment");
         std::fs::remove_dir_all(dir).unwrap();
     }
 

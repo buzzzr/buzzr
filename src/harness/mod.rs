@@ -25,6 +25,10 @@ pub struct Harness {
     /// The agent type the owner's listing names, `pluginId/typeId` (`buzz.claude-code/claude-code`): a Buzz client
     /// reads a listing's `runtime` tag to resolve the type, and one it cannot resolve does not show the listing.
     pub runtime: &'static str,
+    /// Environment variables from buzzr's own environment that this harness needs to run — its own credentials, or
+    /// the API base it talks to. They are passed on top of the small base set every child gets (see `acp`); nothing
+    /// else of buzzr's environment follows, so the owner's private key can never reach the harness.
+    pub env: &'static [&'static str],
     /// What to say when the program cannot be started at all — it is not installed.
     pub missing: &'static str,
 }
@@ -41,6 +45,9 @@ pub const CLAUDE_CODE: Harness = Harness {
     id: "claude-agent-acp",
     label: "Claude Code",
     runtime: "buzz.claude-code/claude-code",
+    // The adapter takes its own credentials from these, so they pass through; a user who has signed in some other way
+    // simply has none of them set.
+    env: &["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"],
     missing: "claude-agent-acp is not installed, or is not on PATH",
 };
 
@@ -66,7 +73,7 @@ pub fn get(id: &str) -> Option<&'static Harness> {
 pub fn offer(harness: &Harness, model: Option<&str>) -> Result<HarnessOffer, String> {
     let dir = std::env::temp_dir().join(format!("buzzr-harness-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).map_err(|e| format!("could not make a folder to start the harness in: {e}"))?;
-    let result = acp::probe(harness.program(), &dir, model, harness.missing);
+    let result = acp::probe(harness.program(), &dir, harness.env, model, harness.missing);
     let _ = std::fs::remove_dir_all(&dir);
     result
 }
@@ -79,7 +86,7 @@ pub fn offer(harness: &Harness, model: Option<&str>) -> Result<HarnessOffer, Str
 /// This blocks while the harness starts and opens its session, so call it from a task, never from the event loop
 /// (principle 6 in `AGENTS.md`); `runner.rs` is the one caller.
 pub fn session(harness: &Harness, cwd: &Path, model: Option<&str>, effort: Option<&str>, instructions: &str) -> Result<acp::Session, String> {
-    acp::Session::open(harness.program(), cwd, model, effort, instructions, harness.missing)
+    acp::Session::open(harness.program(), cwd, harness.env, model, effort, instructions, harness.missing)
 }
 
 #[cfg(test)]
