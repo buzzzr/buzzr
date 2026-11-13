@@ -2816,7 +2816,10 @@ fn an_agent_is_deleted_from_the_panel_after_a_confirmation() {
     let scout = agent("Scout");
     app.seed_agents(vec![scout.clone()]);
     app.command("agents", "");
-    // each agent has a row that offers to delete it; walking to it and pressing Enter asks for a confirmation first
+    // Enter on the agent opens its menu; walking to "delete…" there and pressing Enter asks for a confirmation first
+    let cmds = press(&mut app, KeyCode::Enter);
+    assert!(cmds.is_empty(), "opening the menu sends nothing: {cmds:?}");
+    assert_eq!(app.panel.as_ref().unwrap().title, "Scout");
     let action = format!("delete:{}", scout.pubkey);
     let at = app.panel.as_ref().unwrap().rows.iter().position(|r| r.action.as_deref() == Some(action.as_str())).expect("a delete row");
     for _ in 0..at {

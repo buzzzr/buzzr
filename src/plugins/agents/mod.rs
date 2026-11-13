@@ -91,10 +91,9 @@ impl Agents {
             });
         }
         for a in &self.agents {
-            rows.push(PanelRow { text: format!("{}  ·  {}", a.name, short(&a.npub)), tone: Tone::Accent, action: None });
+            // Enter on an agent's own row opens its menu (edit, delete), so the verbs are found where the agent is.
+            rows.push(PanelRow { text: format!("{}  ·  {}", a.name, short(&a.npub)), tone: Tone::Accent, action: Some(format!("agent:{}", a.pubkey)) });
             rows.push(PanelRow { text: detail(a), tone: Tone::Dim, action: None });
-            rows.push(PanelRow { text: format!("   edit {}…", a.name), tone: Tone::Dim, action: Some(format!("edit:{}", a.pubkey)) });
-            rows.push(PanelRow { text: format!("   delete {}…", a.name), tone: Tone::Dim, action: Some(format!("delete:{}", a.pubkey)) });
         }
         rows.push(PanelRow { text: "new agent…".into(), tone: Tone::Ok, action: Some("new".into()) });
         // The title is just the name: the panel draws its own "Up/Down · Enter runs · Esc closes" after it, so anything
@@ -273,7 +272,7 @@ impl Agents {
         vec![self.effort_panel()]
     }
 
-    /// A panel row the user pressed Enter on: a model, a level, the "new agent…" row (which starts the flow), or a
+    /// A panel row the user pressed Enter on: a model, a level, the "new agent…" row (which starts the flow), an agent (which opens its menu), or a
     /// "delete <name>…" row (which asks to confirm the deletion first).
     fn on_panel(&mut self, value: &str) -> Vec<PluginOutput> {
         if value == "new" {
@@ -282,6 +281,9 @@ impl Agents {
         // Backing out of a deletion is a plain refresh, so the list reflects whatever is really there.
         if value == "keep" {
             return vec![PluginOutput::ListAgents { id: "refresh".into() }];
+        }
+        if let Some(pubkey) = value.strip_prefix("agent:") {
+            return vec![self.agent_menu(pubkey)];
         }
         if let Some(pubkey) = value.strip_prefix("edit:") {
             return self.start_edit(pubkey);
@@ -352,6 +354,17 @@ impl Agents {
     fn effort_panel(&self) -> PluginOutput {
         let rows = self.offer.efforts.iter().map(|c| choice_row("effort", c, &self.offer.effort)).collect();
         PluginOutput::Panel(Panel { id: ID.into(), title: "new agent · level".into(), rows })
+    }
+
+    /// The menu an agent's row opens: what can be done to it. `back` is the same refresh as backing out of a deletion.
+    fn agent_menu(&self, pubkey: &str) -> PluginOutput {
+        let name = self.name_of(pubkey);
+        let rows = vec![
+            PanelRow { text: "edit name and instructions…".into(), tone: Tone::Accent, action: Some(format!("edit:{pubkey}")) },
+            PanelRow { text: "delete…".into(), tone: Tone::Error, action: Some(format!("delete:{pubkey}")) },
+            PanelRow { text: "back".into(), tone: Tone::Dim, action: Some("keep".into()) },
+        ];
+        PluginOutput::Panel(Panel { id: ID.into(), title: name, rows })
     }
 
     /// The confirmation a "delete <name>…" row opens: deleting an agent is not undone here, so it takes a second,
@@ -432,7 +445,7 @@ impl Plugin for Agents {
             permissions: vec![AGENTS_READ.into(), AGENTS_WRITE.into()],
             tick_ms: 0,
             contributions: Contributions {
-                commands: vec![command(ID, "your local agents; agents create makes one", "[create]")],
+                commands: vec![command(ID, "your local agents: list, edit, delete, create", "[create]")],
                 ..Contributions::default()
             },
         }
@@ -677,12 +690,29 @@ mod tests {
         assert!(matches!(outs[0], PluginOutput::Flash(ref t) if t.contains("could not create") && t.contains("relay returned 500")));
     }
 
+    /// An agent's own row opens a menu with edit, delete and back; the list itself carries no verbs.
+    #[test]
+    fn an_agents_row_opens_a_menu_of_what_can_be_done_to_it() {
+        let mut p = Agents::default();
+        let a = view("Scout");
+        let outs = p.on(PluginInput::Agents { id: "list".into(), agents: vec![a.clone()] });
+        let PluginOutput::Panel(list) = &outs[0] else { panic!("not a panel") };
+        assert!(list.rows.iter().all(|r| !r.text.contains("edit") && !r.text.contains("delete")), "{:?}", list.rows);
+        let agent = format!("agent:{}", a.pubkey);
+        assert!(list.rows.iter().any(|r| r.action.as_deref() == Some(agent.as_str())), "{:?}", list.rows);
+        let outs = p.on(PluginInput::PanelAction { id: ID.into(), row: 0, value: Some(agent) });
+        let PluginOutput::Panel(menu) = &outs[0] else { panic!("not a panel") };
+        assert_eq!(menu.title, "Scout");
+        let actions: Vec<_> = menu.rows.iter().map(|r| r.action.clone().unwrap_or_default()).collect();
+        assert_eq!(actions, vec![format!("edit:{}", a.pubkey), format!("delete:{}", a.pubkey), "keep".to_owned()]);
+    }
+
     #[test]
     fn an_agent_can_be_deleted_from_the_panel_after_a_confirmation() {
         let mut p = Agents::default();
         let a = view("Scout");
         let _ = p.on(PluginInput::Agents { id: "list".into(), agents: vec![a.clone()] });
-        // each agent has a row that offers to delete it
+        // the agent's menu offers to delete it
         let delete = format!("delete:{}", a.pubkey);
         let outs = p.on(PluginInput::PanelAction { id: ID.into(), row: 2, value: Some(delete.clone()) });
         let PluginOutput::Panel(panel) = &outs[0] else { panic!("not a panel") };
@@ -714,8 +744,7 @@ mod tests {
         let mut p = Agents::default();
         let a = view("Scout");
         let outs = p.on(PluginInput::Agents { id: "list".into(), agents: vec![a.clone()] });
-        let PluginOutput::Panel(panel) = &outs[0] else { panic!("not a panel") };
-        assert!(panel.rows.iter().any(|r| r.action.as_deref() == Some(format!("edit:{}", a.pubkey).as_str())), "{:?}", panel.rows);
+        let PluginOutput::Panel(_) = &outs[0] else { panic!("not a panel") };
         let outs = p.on(PluginInput::PanelAction { id: ID.into(), row: 2, value: Some(format!("edit:{}", a.pubkey)) });
         assert!(matches!(&outs[0], PluginOutput::Prompt { id, hint, .. } if id == "edit-name" && hint.contains("Scout")), "{outs:?}");
         // a bad name is refused and asked again

@@ -1129,8 +1129,9 @@ fn an_agent_is_deleted_from_the_panel_after_a_confirmation() {
     s.press("enter"); // take the level in force, which makes it
     s.expect("the confirmation", "Scout created");
     s.expect("the list to come back", "new agent…");
-    // the list offers to delete it; Enter on that row asks to confirm first, and only a second Enter deletes
-    s.press_all(&["down", "down", "down"]); // past "new agent…" and the "edit Scout" row
+    // the agent's menu offers to delete it; Enter on that asks to confirm first, and only a second Enter deletes
+    s.press("enter"); // the agent's menu
+    s.press("down"); // to "delete…"
     s.press("enter");
     s.expect("the confirmation panel", "delete Scout");
     s.expect("what the confirmation does", "take it off the relay and delete its key here");
@@ -1172,7 +1173,7 @@ fn an_agent_is_renamed_from_the_panel() {
     s.press("enter");
     s.expect("the confirmation", "Scout created");
     s.expect("the list to come back", "new agent…");
-    s.press_all(&["down", "down"]);
+    s.press("enter"); // the agent's menu, on "edit"
     s.press("enter");
     s.expect("the name question", "Name is Scout");
     s.type_text("Ranger");
