@@ -345,8 +345,6 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     }
     let text = if let Some(t) = app.flash_text() {
         t.to_owned()
-    } else if app.reply_target.is_some() {
-        "replying in a thread · Esc cancels".to_owned()
     } else if app.in_thread() {
         "thread · Esc: back to the channel".to_owned()
     } else if let Some(s) = app.store() {
@@ -514,7 +512,7 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect, inner_w: usize) {
         " join this channel ".to_owned()
     } else if app.editing.is_some() {
         " edit message ".to_owned()
-    } else if app.reply_target.is_some() || app.in_thread() {
+    } else if app.in_thread() {
         " reply in thread ".to_owned()
     } else {
         " message ".to_owned()
@@ -597,8 +595,6 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
                 spans.extend(key_hint(if app.keyboard_enhanced { "Shift+⏎" } else { "Alt+⏎" }, "New line"));
                 if app.editing.is_some() {
                     spans.extend(key_hint("esc", "Cancel edit"));
-                } else if app.reply_target.is_some() {
-                    spans.extend(key_hint("esc", "Cancel reply"));
                 }
             }
         }
@@ -613,7 +609,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
 
 pub const KEYS: &[(&str, &str)] = &[
     ("Tab / Shift+Tab", "switch between channels, messages and the input"),
-    ("Esc", "close the command palette or a panel, cancel a reply, leave a thread, then step back to the channels"),
+    ("Esc", "close the command palette or a panel, leave a thread, then step back to the channels"),
     ("F1", "this list of keys"),
     ("Ctrl+K", "the command palette: find a command by name and run it"),
     ("Ctrl+R", "reload the open channel or thread"),
@@ -632,7 +628,7 @@ pub const KEYS: &[(&str, &str)] = &[
     ("Enter", "open the thread and read it (in a thread: reply)"),
     ("Right", "open the thread of the selected message (a message with no replies has none)"),
     ("Left", "in a thread: out to the timeline, on the message the thread hangs off"),
-    ("r", "reply in the thread of the selected message"),
+    ("r", "reply in the thread of the selected message: opens the thread (in one, takes the composer)"),
     ("a", "react to the selected message: pick an emoji, or type to search one (Enter sends, Esc closes)"),
     ("c", "copy the selected message to the clipboard"),
     ("u", "mark the selected message unread (until `read`)"),

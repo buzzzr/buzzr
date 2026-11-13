@@ -30,7 +30,6 @@ impl App {
         self.editor.clear();
         self.editor.insert_str(&text);
         self.editing = Some(m.id.clone());
-        self.reply_target = None;
         self.set_focus(Focus::Input);
         self.flash("editing your message: Enter saves it, Esc cancels");
         cmds

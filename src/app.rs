@@ -407,7 +407,6 @@ pub struct App {
     pub state: ListState,
     saved: HashMap<(String, Option<String>), ListState>,
     pub editor: Editor,
-    pub reply_target: Option<String>,
     pub conn: Conn,
     pub unread: HashMap<String, u32>,
     /// The last-read position per channel: the `created_at` we have read through, loaded from disk at startup.
@@ -564,7 +563,6 @@ impl App {
             state: ListState::default(),
             saved: HashMap::new(),
             editor: Editor::default(),
-            reply_target: None,
             conn: Conn::Connecting,
             unread: HashMap::new(),
             read: HashMap::new(),
@@ -1320,10 +1318,10 @@ impl App {
     /// `None` when no channel is open: there is nowhere to write, so there is nothing to keep.
     fn draft_key(&self) -> Option<(String, Option<String>)> {
         let c = self.channel()?;
-        let root = self.reply_target.clone().or_else(|| match &self.view {
+        let root = match &self.view {
             View::Thread(r) => Some(r.clone()),
             View::Channel => None,
-        });
+        };
         Some((c.id.clone(), root))
     }
 
@@ -1379,7 +1377,6 @@ impl App {
     fn enter_view(&mut self, view: View) -> Vec<Cmd> {
         self.save_position();
         self.view = view;
-        self.reply_target = None;
         self.layout = None;
         self.fresh_view = true;
         self.state = self.view_key().and_then(|k| self.saved.get(&k).cloned()).unwrap_or_default();
@@ -1394,7 +1391,6 @@ impl App {
         self.cur = Some(index);
         self.chan_cursor = index;
         self.view = View::Channel;
-        self.reply_target = None;
         self.layout = None;
         self.fresh_view = true;
         self.state = self.view_key().and_then(|k| self.saved.get(&k).cloned()).unwrap_or_default();
@@ -2302,18 +2298,21 @@ impl App {
         }
     }
 
+    /// Start a reply to the selected message: its thread comes on screen, its first message pinned at the top of the pane,
+    /// and the cursor lands in the composer — which, being in that thread, writes the reply into it. In a thread already
+    /// open there is nothing to open, so the key just takes the composer (the same place Enter reaches there).
     fn start_reply(&mut self) -> Vec<Cmd> {
         let Some(m) = self.selected_msg() else {
             self.flash("select a message first (Up/Down)");
             return Vec::new();
         };
         let root = self.store().map(|s| s.thread_root(&m).to_owned()).unwrap_or(m.id.clone());
-        self.reply_target = Some(root);
+        let mut cmds = if self.in_thread() { Vec::new() } else { self.open_thread(root) };
         self.set_focus(Focus::Input);
-        let n = self.selected_number().unwrap_or(0);
-        self.flash(format!("replying to #{n}: type your reply and press Enter; Esc cancels"));
+        self.flash("replying in this thread: type your reply and press Enter; Esc goes back");
         // A reply is written into the thread it answers, so the box holds that thread's draft while it is aimed there.
-        self.switch_draft()
+        cmds.extend(self.switch_draft());
+        cmds
     }
 
     fn copy_message(&mut self, m: &Ev) {
@@ -2371,10 +2370,6 @@ impl App {
                     self.editor.clear();
                     self.flash("edit cancelled");
                     // the edit is over: the box goes back to the draft of the place we are in
-                    return self.switch_draft();
-                } else if self.reply_target.take().is_some() {
-                    self.flash("reply cancelled");
-                    // the box is no longer aimed at that thread, so its draft goes back to the thread
                     return self.switch_draft();
                 } else {
                     self.set_focus(Focus::Messages);
@@ -2436,12 +2431,12 @@ impl App {
         if text.is_empty() {
             return Vec::new();
         }
-        // Where this text was written, taken before the reply target is dropped: that is part of the place it belongs to.
+        // Where this text was written, taken before the view is left: that is part of the place it belongs to.
         let at = self.draft_key();
-        let root = self.reply_target.take().or_else(|| match &self.view {
+        let root = match &self.view {
             View::Thread(r) => Some(r.clone()),
             View::Channel => None,
-        });
+        };
         self.editor.clear();
         self.typing_sent = None;
         let mut cmds = self.clear_draft(at);
@@ -2605,10 +2600,10 @@ impl App {
         }
         let Some(c) = self.channel() else { return Vec::new() };
         let channel = c.id.clone();
-        let root = self.reply_target.clone().or_else(|| match &self.view {
+        let root = match &self.view {
             View::Thread(r) => Some(r.clone()),
             View::Channel => None,
-        });
+        };
         let key = (channel.clone(), root.clone());
         if let Some((at, k)) = &self.typing_sent {
             if *k == key && at.elapsed() < Duration::from_secs(3) {
