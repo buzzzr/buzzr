@@ -54,6 +54,17 @@ enum Step {
     Levels,
     /// The levels are on a panel, and one is being picked.
     Effort,
+    /// An existing agent's new name is being asked for (empty keeps it).
+    EditName,
+    /// An existing agent's new instructions are being asked for (empty keeps them, `-` clears them).
+    EditInstructions,
+}
+
+/// The agent being edited: who, and the name chosen for it (once asked).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Edit {
+    pubkey: String,
+    name: String,
 }
 
 /// The plugin. It holds the last agent list it was handed, the step of the flow it is on and what that flow has so far.
@@ -62,6 +73,7 @@ pub struct Agents {
     agents: Vec<AgentView>,
     step: Option<Step>,
     draft: Draft,
+    edit: Edit,
     /// The last offer a harness gave: the models, the one it starts on, and that model's levels.
     offer: HarnessOffer,
 }
@@ -79,9 +91,9 @@ impl Agents {
             });
         }
         for a in &self.agents {
-            rows.push(PanelRow { text: format!("{}  ·  {}", a.name, short(&a.npub)), tone: Tone::Accent, action: None });
+            // Enter on an agent's own row opens its menu (edit, delete), so the verbs are found where the agent is.
+            rows.push(PanelRow { text: format!("{}  ·  {}", a.name, short(&a.npub)), tone: Tone::Accent, action: Some(format!("agent:{}", a.pubkey)) });
             rows.push(PanelRow { text: detail(a), tone: Tone::Dim, action: None });
-            rows.push(PanelRow { text: format!("   delete {}…", a.name), tone: Tone::Dim, action: Some(format!("delete:{}", a.pubkey)) });
         }
         rows.push(PanelRow { text: "new agent…".into(), tone: Tone::Ok, action: Some("new".into()) });
         // The title is just the name: the panel draws its own "Up/Down · Enter runs · Esc closes" after it, so anything
@@ -103,12 +115,15 @@ impl Agents {
         match args.trim() {
             "" => vec![PluginOutput::ListAgents { id: "list".into() }],
             "create" | "new" => self.start(),
-            _ => vec![PluginOutput::Flash("usage: agents (list them) or agents create (make one)".into())],
+            _ => vec![PluginOutput::Flash("usage: agents (list, edit, delete, create) or agents create (make one)".into())],
         }
     }
 
     /// The answer to a prompt the plugin asked for. `None` is the user pressing Esc.
     fn on_answer(&mut self, id: &str, text: Option<String>) -> Vec<PluginOutput> {
+        if id.starts_with("edit-") {
+            return self.on_edit_answer(id, text);
+        }
         match (id, text) {
             ("name", None) | ("instructions", None) => {
                 self.reset();
@@ -139,6 +154,71 @@ impl Agents {
                 vec![PluginOutput::ProbeHarness { id: "offer".into(), harness: self.draft.harness.clone(), model: None }]
             }
             _ => Vec::new(),
+        }
+    }
+
+    /// Start editing an agent: ask for its new name first. The hint shows what it is now.
+    fn start_edit(&mut self, pubkey: &str) -> Vec<PluginOutput> {
+        if !self.agents.iter().any(|a| a.pubkey == pubkey) {
+            return vec![PluginOutput::Flash("that agent is not in the list any more".into())];
+        }
+        self.step = Some(Step::EditName);
+        self.edit = Edit { pubkey: pubkey.to_owned(), name: String::new() };
+        let name = self.name_of(pubkey);
+        vec![PluginOutput::Prompt {
+            id: "edit-name".into(),
+            title: format!("edit {name} · name"),
+            hint: format!("Name is {name}. Type a new one, or just Enter to keep it. Esc cancels"),
+            multiline: false,
+        }]
+    }
+
+    /// The answers of the edit flow: a name, then instructions, then the host is asked to change the agent.
+    fn on_edit_answer(&mut self, id: &str, text: Option<String>) -> Vec<PluginOutput> {
+        let Some(agent) = self.agents.iter().find(|a| a.pubkey == self.edit.pubkey).cloned() else {
+            self.step = None;
+            return vec![PluginOutput::Flash("that agent is not in the list any more".into())];
+        };
+        let Some(text) = text else {
+            self.step = None;
+            return vec![PluginOutput::Flash("edit cancelled".into())];
+        };
+        match (id, self.step) {
+            ("edit-name", Some(Step::EditName)) => {
+                let name = if text.trim().is_empty() { agent.name.clone() } else { text };
+                match crate::agents::clean_name(&name) {
+                    Ok(name) => {
+                        self.edit.name = name;
+                        self.step = Some(Step::EditInstructions);
+                        let now = if agent.instructions.is_empty() { "none yet".to_owned() } else { short_text(&agent.instructions) };
+                        vec![PluginOutput::Prompt {
+                            id: "edit-instructions".into(),
+                            title: format!("edit {} · instructions", self.edit.name),
+                            hint: format!("Now: {now}. Enter alone keeps them, - clears them (Alt+Enter for a new line)"),
+                            multiline: true,
+                        }]
+                    }
+                    Err(e) => vec![PluginOutput::Flash(e.to_string()), self.start_edit(&agent.pubkey).remove(0)],
+                }
+            }
+            ("edit-instructions", Some(Step::EditInstructions)) => {
+                self.step = None;
+                let instructions = match text.trim() {
+                    "" => agent.instructions.clone(),
+                    "-" => String::new(),
+                    other => other.to_owned(),
+                };
+                vec![PluginOutput::UpdateAgent { id: "edit".into(), pubkey: agent.pubkey, name: std::mem::take(&mut self.edit.name), instructions }]
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// The answer to `UpdateAgent`: say what it is called now and re-open the list; a failure changed nothing.
+    fn on_updated(&mut self, result: Result<String, String>) -> Vec<PluginOutput> {
+        match result {
+            Ok(name) => vec![PluginOutput::ListAgents { id: "refresh".into() }, PluginOutput::Flash(format!("{name} updated"))],
+            Err(e) => vec![PluginOutput::Flash(format!("could not change the agent: {e}"))],
         }
     }
 
@@ -192,7 +272,7 @@ impl Agents {
         vec![self.effort_panel()]
     }
 
-    /// A panel row the user pressed Enter on: a model, a level, the "new agent…" row (which starts the flow), or a
+    /// A panel row the user pressed Enter on: a model, a level, the "new agent…" row (which starts the flow), an agent (which opens its menu), or a
     /// "delete <name>…" row (which asks to confirm the deletion first).
     fn on_panel(&mut self, value: &str) -> Vec<PluginOutput> {
         if value == "new" {
@@ -201,6 +281,12 @@ impl Agents {
         // Backing out of a deletion is a plain refresh, so the list reflects whatever is really there.
         if value == "keep" {
             return vec![PluginOutput::ListAgents { id: "refresh".into() }];
+        }
+        if let Some(pubkey) = value.strip_prefix("agent:") {
+            return vec![self.agent_menu(pubkey)];
+        }
+        if let Some(pubkey) = value.strip_prefix("edit:") {
+            return self.start_edit(pubkey);
         }
         if let Some(pubkey) = value.strip_prefix("delete:") {
             return vec![self.delete_panel(pubkey)];
@@ -268,6 +354,17 @@ impl Agents {
     fn effort_panel(&self) -> PluginOutput {
         let rows = self.offer.efforts.iter().map(|c| choice_row("effort", c, &self.offer.effort)).collect();
         PluginOutput::Panel(Panel { id: ID.into(), title: "new agent · level".into(), rows })
+    }
+
+    /// The menu an agent's row opens: what can be done to it. `back` is the same refresh as backing out of a deletion.
+    fn agent_menu(&self, pubkey: &str) -> PluginOutput {
+        let name = self.name_of(pubkey);
+        let rows = vec![
+            PanelRow { text: "edit name and instructions…".into(), tone: Tone::Accent, action: Some(format!("edit:{pubkey}")) },
+            PanelRow { text: "delete…".into(), tone: Tone::Error, action: Some(format!("delete:{pubkey}")) },
+            PanelRow { text: "back".into(), tone: Tone::Dim, action: Some("keep".into()) },
+        ];
+        PluginOutput::Panel(Panel { id: ID.into(), title: name, rows })
     }
 
     /// The confirmation a "delete <name>…" row opens: deleting an agent is not undone here, so it takes a second,
@@ -348,7 +445,7 @@ impl Plugin for Agents {
             permissions: vec![AGENTS_READ.into(), AGENTS_WRITE.into()],
             tick_ms: 0,
             contributions: Contributions {
-                commands: vec![command(ID, "your local agents; agents create makes one", "[create]")],
+                commands: vec![command(ID, "your local agents: list, edit, delete, create", "")],
                 ..Contributions::default()
             },
         }
@@ -364,10 +461,21 @@ impl Plugin for Agents {
             }
             PluginInput::Created { result, .. } => self.on_created(result),
             PluginInput::Deleted { result, .. } => self.on_deleted(result),
+            PluginInput::Updated { result, .. } => self.on_updated(result),
             PluginInput::HarnessOffer { id, result } => self.on_offer(&id, result),
             PluginInput::PanelAction { value: Some(v), .. } => self.on_panel(&v),
             _ => Vec::new(),
         }
+    }
+}
+
+/// The first line of some text, cut to fit a hint.
+fn short_text(text: &str) -> String {
+    let line = text.lines().next().unwrap_or_default();
+    if line.chars().count() > 60 || text.lines().count() > 1 {
+        format!("{}…", line.chars().take(60).collect::<String>())
+    } else {
+        line.to_owned()
     }
 }
 
@@ -395,6 +503,7 @@ mod tests {
             model: Some("opus".into()),
             effort: Some("high".into()),
             workspace: "/home/me/.config/buzzr/agents/scout".into(),
+            instructions: "watch the repo".into(),
             created_at: 0,
         }
     }
@@ -581,12 +690,29 @@ mod tests {
         assert!(matches!(outs[0], PluginOutput::Flash(ref t) if t.contains("could not create") && t.contains("relay returned 500")));
     }
 
+    /// An agent's own row opens a menu with edit, delete and back; the list itself carries no verbs.
+    #[test]
+    fn an_agents_row_opens_a_menu_of_what_can_be_done_to_it() {
+        let mut p = Agents::default();
+        let a = view("Scout");
+        let outs = p.on(PluginInput::Agents { id: "list".into(), agents: vec![a.clone()] });
+        let PluginOutput::Panel(list) = &outs[0] else { panic!("not a panel") };
+        assert!(list.rows.iter().all(|r| !r.text.contains("edit") && !r.text.contains("delete")), "{:?}", list.rows);
+        let agent = format!("agent:{}", a.pubkey);
+        assert!(list.rows.iter().any(|r| r.action.as_deref() == Some(agent.as_str())), "{:?}", list.rows);
+        let outs = p.on(PluginInput::PanelAction { id: ID.into(), row: 0, value: Some(agent) });
+        let PluginOutput::Panel(menu) = &outs[0] else { panic!("not a panel") };
+        assert_eq!(menu.title, "Scout");
+        let actions: Vec<_> = menu.rows.iter().map(|r| r.action.clone().unwrap_or_default()).collect();
+        assert_eq!(actions, vec![format!("edit:{}", a.pubkey), format!("delete:{}", a.pubkey), "keep".to_owned()]);
+    }
+
     #[test]
     fn an_agent_can_be_deleted_from_the_panel_after_a_confirmation() {
         let mut p = Agents::default();
         let a = view("Scout");
         let _ = p.on(PluginInput::Agents { id: "list".into(), agents: vec![a.clone()] });
-        // each agent has a row that offers to delete it
+        // the agent's menu offers to delete it
         let delete = format!("delete:{}", a.pubkey);
         let outs = p.on(PluginInput::PanelAction { id: ID.into(), row: 2, value: Some(delete.clone()) });
         let PluginOutput::Panel(panel) = &outs[0] else { panic!("not a panel") };
@@ -611,6 +737,45 @@ mod tests {
         let outs = p.on(PluginInput::Deleted { id: "delete".into(), result: Err("the relay returned 500".into()) });
         assert_eq!(outs.len(), 1, "nothing was deleted, so there is no list to refresh");
         assert!(matches!(outs[0], PluginOutput::Flash(ref t) if t.contains("could not delete") && t.contains("relay returned 500")));
+    }
+
+    #[test]
+    fn an_agent_can_be_edited_from_the_panel() {
+        let mut p = Agents::default();
+        let a = view("Scout");
+        let outs = p.on(PluginInput::Agents { id: "list".into(), agents: vec![a.clone()] });
+        let PluginOutput::Panel(_) = &outs[0] else { panic!("not a panel") };
+        let outs = p.on(PluginInput::PanelAction { id: ID.into(), row: 2, value: Some(format!("edit:{}", a.pubkey)) });
+        assert!(matches!(&outs[0], PluginOutput::Prompt { id, hint, .. } if id == "edit-name" && hint.contains("Scout")), "{outs:?}");
+        // a bad name is refused and asked again
+        let outs = p.on(PluginInput::Prompt { id: "edit-name".into(), text: Some("\u{1b}x".into()) });
+        assert!(matches!(outs[0], PluginOutput::Flash(_)) && matches!(&outs[1], PluginOutput::Prompt { id, .. } if id == "edit-name"), "{outs:?}");
+        let outs = p.on(PluginInput::Prompt { id: "edit-name".into(), text: Some(" Pathfinder ".into()) });
+        assert!(matches!(&outs[0], PluginOutput::Prompt { id, multiline: true, hint, .. } if id == "edit-instructions" && hint.contains("watch the repo")), "{outs:?}");
+        assert_eq!(
+            p.on(PluginInput::Prompt { id: "edit-instructions".into(), text: Some("patrol".into()) }),
+            vec![PluginOutput::UpdateAgent { id: "edit".into(), pubkey: a.pubkey.clone(), name: "Pathfinder".into(), instructions: "patrol".into() }]
+        );
+        // Enter alone keeps both
+        p.on(PluginInput::PanelAction { id: ID.into(), row: 2, value: Some(format!("edit:{}", a.pubkey)) });
+        p.on(PluginInput::Prompt { id: "edit-name".into(), text: Some(String::new()) });
+        assert_eq!(
+            p.on(PluginInput::Prompt { id: "edit-instructions".into(), text: Some(String::new()) }),
+            vec![PluginOutput::UpdateAgent { id: "edit".into(), pubkey: a.pubkey.clone(), name: "Scout".into(), instructions: "watch the repo".into() }]
+        );
+        // `-` clears the instructions; Esc cancels
+        p.on(PluginInput::PanelAction { id: ID.into(), row: 2, value: Some(format!("edit:{}", a.pubkey)) });
+        p.on(PluginInput::Prompt { id: "edit-name".into(), text: Some(String::new()) });
+        let outs = p.on(PluginInput::Prompt { id: "edit-instructions".into(), text: Some("-".into()) });
+        assert!(matches!(&outs[0], PluginOutput::UpdateAgent { instructions, .. } if instructions.is_empty()), "{outs:?}");
+        p.on(PluginInput::PanelAction { id: ID.into(), row: 2, value: Some(format!("edit:{}", a.pubkey)) });
+        let outs = p.on(PluginInput::Prompt { id: "edit-name".into(), text: None });
+        assert!(matches!(outs[0], PluginOutput::Flash(ref t) if t.contains("cancelled")));
+        // the answers
+        let outs = p.on(PluginInput::Updated { id: "edit".into(), result: Ok("Pathfinder".into()) });
+        assert!(matches!(&outs[0], PluginOutput::ListAgents { id } if id == "refresh") && matches!(&outs[1], PluginOutput::Flash(t) if t.contains("Pathfinder updated")));
+        let outs = p.on(PluginInput::Updated { id: "edit".into(), result: Err("the relay returned 500".into()) });
+        assert!(matches!(&outs[..], [PluginOutput::Flash(t)] if t.contains("could not change")));
     }
 
     #[test]

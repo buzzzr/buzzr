@@ -440,6 +440,11 @@ fn run(cmd: Cmd, ctx: &Ctx) {
             async move { agents::create_and_publish(&relay, &paths, &name, &instructions, &harness, &model, &effort).await },
             AppEvent::AgentCreated,
         ),
+        Cmd::UpdateAgent { pubkey, name, instructions } => request(
+            tx,
+            async move { agents::update_and_publish(&relay, &paths, &pubkey, &name, &instructions).await },
+            AppEvent::AgentUpdated,
+        ),
         Cmd::DeleteAgent { pubkey } => request(tx, async move { agents::delete_and_unpublish(&relay, &paths, &pubkey).await }, AppEvent::AgentDeleted),
         Cmd::ProbeHarness { harness: id, model } => {
             // A harness that will not start, or will not answer ACP, is reported rather than hung on: the probe blocks

@@ -84,6 +84,8 @@ that cannot speak it should say why on the log and exit.
 {"type":"created","id":"new","agent":{"name":"Scout","pubkey":"<hex>","npub":"npub1…"}}
 {"type":"deleted","id":"delete","name":"Scout"}
 {"type":"deleted","id":"delete","error":"the relay returned 500"}
+{"type":"updated","id":"edit","name":"Scout"}
+{"type":"updated","id":"edit","error":"an agent called Scout already exists"}
 {"type":"bye"}
 ```
 
@@ -122,6 +124,7 @@ Only the rows on screen are included. The private key, the relay address, filter
 {"type":"probe_harness","id":"levels","harness":"claude-agent-acp","model":"opus"}
 {"type":"create_agent","id":"new","name":"Scout","instructions":"watch the repo","harness":"claude-agent-acp","model":"opus","effort":"high"}
 {"type":"delete_agent","id":"delete","pubkey":"<hex>"}
+{"type":"update_agent","id":"edit","pubkey":"<hex>","name":"Scout","instructions":"watch the repo"}
 {"type":"log","level":"error","text":"something went wrong"}
 ```
 
@@ -232,6 +235,10 @@ keeps that copy byte-for-byte identical to `sdk/typescript/buzzr.ts`.
   and the answer is a `deleted` message with the same `id`: the `name` of the agent that was deleted, or an `error`. The relay is asked
   first, so a relay that refuses it deletes nothing — the agent stays listed and running. One deletion runs at a time, and the folder the
   agent worked in is left alone. buzzr owns the key, the record file and the relay; the plugin never sees them.
+- **`update_agent`** (needs `agents:write`) changes the `name` and `instructions` of the local agent `pubkey`. A new name is published again
+  first (the agent's own profile and this identity's listing of it; both are replaceable) and only then is the record changed, so a relay
+  that refuses it changes nothing. A name another agent has is refused, and so is `--read-only`. The answer is an `updated` message with the
+  same `id`: the agent's `name` now, or an `error`. Key, harness, model and folder stay as they were.
 - The process runs with a **clean environment** (only `PATH`, `HOME`, `LANG`, `LC_ALL`, `TZ`, `TMPDIR` and the `BUZZR_PLUGIN_*`
   variables are passed on), so no key or relay credential in buzzr's environment can leak into a plugin. Its stderr is captured to
   `<config dir>/plugin-logs/<id>.log`; `log` with `level:"error"` also flashes.
