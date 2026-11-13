@@ -133,7 +133,7 @@ buzzr
 ```
 
 The first time, buzzr asks for your relay address and private key, and how to keep the key. After that it opens straight into your channels.
-Press **F1** for the keys and **F2** for the commands, and **Ctrl+K** to run a command by name. Press **Tab** to move between the channel list, the messages and the input; the arrow keys get between the messages and the input too — `Up` from an empty input lands on the newest message, `Down` on the newest message goes back to the input.
+Press **F1** for the keys and **Ctrl+K** to run a command by name. Press **Tab** to move between the channel list, the messages and the input; the arrow keys get between the messages and the input too — `Up` from an empty input lands on the newest message, `Down` on the newest message goes back to the input.
 
 The default colour scheme is `buzz-dark`; set `BUZZR_THEME=buzz-light` for the light one:
 
@@ -237,7 +237,7 @@ The full behaviour, for when the feature list above is not enough.
   through `invite`, which looks it up in the relay's directory.
 - **Your typing shows:** others see `<your name> is typing…` while you write (once every three seconds; not for commands or
   edits). `--no-typing` turns it off.
-- **Help on screen:** F1 lists the keys, F2 the commands, and Ctrl+K opens the command palette. Esc closes the command palette first, then a panel, then cancels a reply,
+- **Help on screen:** F1 lists the keys, and Ctrl+K opens the command palette. Esc closes the command palette first, then a panel, then cancels a reply,
   then leaves a thread; after that it steps back a pane at a time — from the input to the message list, and from the message list
   to the channel list.
 - **Plugins:** a plugin is a separate process (in any language) that adds commands, a status item, header badges, per-channel and
@@ -273,11 +273,11 @@ The full behaviour, for when the feature list above is not enough.
 | Ctrl+K | open the command palette: type to narrow the commands to the ones whose name starts with what you typed, Enter runs the one on the cursor (a command that takes an argument asks for it in a step of its own, Esc goes back out), or type the whole line at once (`dm @Alice`) and Enter runs it as it stands, Esc closes |
 | Ctrl+F | search channels, people and messages |
 | Esc | close the palette or a panel, cancel a reply, leave a thread, then step back to the channel list |
-| F1, F2 | keys, help |
+| F1 | keys |
 | Ctrl+R, Ctrl+O | reload, load older |
 | Ctrl+Q, Ctrl+C | quit |
 
-Commands run from the Ctrl+K command palette (N is the number shown as `#N`): `agents`, `archive`, `c`, `copy N`, `delete N`, `dm NAME`, `edit N`, `help`, `invite NAME`, `join NAME`, `leave`, `more`, `new [private] name [about]`, `plugins`, `q`, `r N text`, `read [all]`, `refresh`, `search text`, `t N`, `update`, `whois NAME`. Type to narrow the list to the commands whose name starts with what you typed, the arrows move the cursor, and Enter runs the one on the cursor line; a command that takes an argument asks for it first (Enter with nothing typed runs the ones whose argument is optional). The whole line can be typed at once instead — `dm @Alice` runs in a single step, and a leading `@` on a name is not part of it. Plugin commands appear in the list too.
+Commands run from the Ctrl+K command palette (N is the number shown as `#N`): `agents`, `archive`, `c`, `copy N`, `delete N`, `dm NAME`, `edit N`, `invite NAME`, `join NAME`, `leave`, `more`, `new [private] name [about]`, `plugins`, `q`, `r N text`, `read [all]`, `refresh`, `search text`, `t N`, `update`, `whois NAME`. Type to narrow the list to the commands whose name starts with what you typed, the arrows move the cursor, and Enter runs the one on the cursor line; a command that takes an argument asks for it first (Enter with nothing typed runs the ones whose argument is optional). The whole line can be typed at once instead — `dm @Alice` runs in a single step, and a leading `@` on a name is not part of it. Plugin commands appear in the list too.
 
 ## Clipboard
 

@@ -66,7 +66,7 @@ Test the first-run questions in a real terminal with an empty `BUZZR_CONFIG_DIR`
 ## Conventions
 
 - Rust 2021, match the surrounding style (long lines, about 140 columns; there is no rustfmt config, so do not run `cargo fmt` over the whole tree), comments say why. No new `unwrap` on data from the network.
-- A new key, command or overlay: update `ui.rs` (`KEYS`, `HELP`, footer), `README.md` and the tests in the same change.
+- A new key, command or overlay: update `ui.rs` (`KEYS`, footer), `README.md` and the tests in the same change.
 - Wide characters: measure with `unicode_width`, never `len()`/`chars().count()` for layout. The test backend shows an emoji as symbol +
   blank cell, so assertions should not depend on the exact gap.
 - Commits: small, imperative subject. Follow `CONTRIBUTING.md`.

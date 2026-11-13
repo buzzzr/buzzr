@@ -866,14 +866,15 @@ fn f1_lists_the_keys_and_esc_closes_them() {
 }
 
 #[test]
-fn f2_shows_the_help_and_esc_closes_it() {
-    let Some(relay) = relay_or_skip("f2_shows_the_help_...") else { return };
+fn f2_opens_nothing() {
+    let Some(relay) = relay_or_skip("f2_opens_nothing") else { return };
     let s = session(&relay);
+    // There is no help screen any more: F2 leaves the screen as it is and the keyboard on the channel list.
+    s.expect("the channel list to have focus", "Open channel");
     s.press("f2");
-    s.expect("the help overlay", "r N text");
-    s.expect("how to search", "search text");
-    s.press("esc");
-    s.expect_gone("the help overlay to close", "r N text");
+    s.expect("the channel list still has the keyboard, F2 opened nothing", "Open channel");
+    s.press("down");
+    s.until("the cursor to move on, so F2 left nothing modal behind", |sc| bar_on(sc).as_deref() == Some("#dev"));
 }
 
 #[test]
@@ -988,17 +989,17 @@ fn ctrl_k_opens_the_command_palette_and_enter_runs_the_command() {
     // Ctrl+K opens the palette with the whole list
     s.press("ctrl+k");
     s.expect("the command palette", "Commands · Enter runs · Esc closes");
-    s.expect("a command with a line saying what it does", "the commands and how things work");
+    s.expect("a command with a line saying what it does", "archive this channel");
     s.expect("the footer to follow the palette", "Run");
     // typing narrows the list to the names that still match
-    s.type_text("help");
-    s.expect("the list narrowed to help", "help");
+    s.type_text("plugins");
+    s.expect("the list narrowed to plugins", "what is loaded, and the commands plugins added");
     s.expect_gone("the other commands dropped out", "load older messages");
-    // Enter runs the command on the cursor line: help opens the help overlay
+    // Enter runs the command on the cursor line: plugins opens its panel
     s.press("enter");
-    s.expect("Enter to run the command", "r N text");
+    s.expect("Enter to run the command", "Plugins · Up/Down · Enter runs · Esc closes");
     s.press("esc");
-    s.expect_gone("the help overlay to close", "r N text");
+    s.expect_gone("the plugin panel to close", "Plugins · Up/Down · Enter runs · Esc closes");
 
     // a command that takes an argument asks for it in a step of its own, then runs with what was typed
     s.press("ctrl+k");
@@ -1040,8 +1041,8 @@ fn the_command_palette_leaves_the_composer_alone() {
     s.press_all(&["tab", "tab"]); // channels -> messages -> input
     s.expect("the input box to take focus", "Send");
     // a slash is plain text now: no palette, just what was typed
-    s.type_text("/help");
-    s.expect("the text in the composer", "/help");
+    s.type_text("/notacommand");
+    s.expect("the text in the composer", "/notacommand");
     s.expect_gone("no palette for a leading slash", "Commands · Enter runs · Esc closes");
     // Ctrl+K opens the palette over the draft, and Esc closes it again without disturbing the draft
     s.press("ctrl+k");
@@ -1050,7 +1051,7 @@ fn the_command_palette_leaves_the_composer_alone() {
     s.press("esc");
     s.expect_gone("the palette to close", "Commands · Enter runs · Esc closes");
     s.expect("the composer to keep the keyboard", "Send");
-    s.expect("the draft untouched", "/help");
+    s.expect("the draft untouched", "/notacommand");
 }
 
 /// `agents` and the "new agent" flow, all through the real UI: the list opens from the composer, Enter on its

@@ -13,10 +13,6 @@ impl App {
                 self.quit = true;
                 Vec::new()
             }
-            "help" => {
-                self.overlay = Overlay::Help;
-                Vec::new()
-            }
             "plugins" => {
                 self.show_plugins();
                 Vec::new()

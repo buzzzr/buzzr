@@ -652,9 +652,7 @@ fn escape_closes_a_panel_before_anything_else() {
     press(&mut app, KeyCode::Esc);
     assert!(!app.in_thread());
     app.handle(key(KeyCode::F(2)));
-    assert_eq!(app.overlay, Overlay::Help);
-    app.handle(key(KeyCode::F(2)));
-    assert_eq!(app.overlay, Overlay::None);
+    assert_eq!(app.overlay, Overlay::None, "F2 opens nothing now: there is no help screen");
 }
 
 #[test]
@@ -2412,13 +2410,13 @@ fn ctrl_k_opens_the_palette_and_lists_every_command() {
 fn typing_narrows_the_palette_to_the_names_that_still_match() {
     let mut app = at_input(3);
     open_palette(&mut app);
-    type_text(&mut app, "he");
+    type_text(&mut app, "ar");
     assert_eq!(
         app.command_rows(),
-        vec![CommandRow { name: "help".into(), usage: String::new(), desc: "the commands and how things work".into() }],
+        vec![CommandRow { name: "archive".into(), usage: String::new(), desc: "archive this channel (search finds it again)".into() }],
         "typing narrows to the names that still match"
     );
-    type_text(&mut app, "lpz");
+    type_text(&mut app, "zz");
     assert!(app.command_rows().is_empty(), "no command starts with what is typed");
 }
 
@@ -2426,11 +2424,11 @@ fn typing_narrows_the_palette_to_the_names_that_still_match() {
 fn enter_runs_a_command_that_takes_no_argument() {
     let mut app = at_input(3);
     open_palette(&mut app);
-    type_text(&mut app, "hel");
-    assert_eq!(app.command_rows().len(), 1, "only \"help\" starts with \"hel\"");
+    type_text(&mut app, "plug");
+    assert_eq!(app.command_rows().len(), 1, "only \"plugins\" starts with \"plug\"");
     let cmds = press(&mut app, KeyCode::Enter);
-    assert!(cmds.is_empty(), "opening help sends nothing: {cmds:?}");
-    assert_eq!(app.overlay, Overlay::Help, "the command ran and the palette is gone");
+    assert!(cmds.is_empty(), "opening the plugin panel sends nothing: {cmds:?}");
+    assert_eq!(app.overlay, Overlay::Panel, "the command ran and the palette is gone");
 }
 
 #[test]
@@ -2589,7 +2587,7 @@ fn a_plugin_command_is_offered_in_the_palette_and_run_from_it() {
 #[test]
 fn the_palette_names_every_command_that_is_handled() {
     // If a command is added to `command` and the palette table is forgotten, its line here fails. Each name runs on its own
-    // app: `q` quits and `help` opens an overlay.
+    // app: `q` quits and `plugins` opens a panel.
     for (name, _, _) in COMMANDS {
         let mut app = at_input(1);
         app.command(name, "");

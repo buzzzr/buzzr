@@ -95,7 +95,6 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
     match app.overlay {
         Overlay::Keys => draw_keys(f, body),
-        Overlay::Help => draw_help(f, area),
         Overlay::Search => draw_search(f, app, area),
         Overlay::Palette => draw_command_palette(f, app, area),
         Overlay::Whois => draw_whois(f, app, area),
@@ -600,10 +599,10 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
             }
         }
     }
+    spans.extend(key_hint("^K", "Commands"));
     spans.extend(key_hint("tab", "Switch pane"));
     spans.extend(key_hint("^F", "Search"));
     spans.extend(key_hint("F1", "Keys"));
-    spans.extend(key_hint("F2", "Help"));
     spans.extend(key_hint("^q", "Quit"));
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
@@ -612,7 +611,6 @@ pub const KEYS: &[(&str, &str)] = &[
     ("Tab / Shift+Tab", "switch between channels, messages and the input"),
     ("Esc", "close the command palette or a panel, leave a thread, then step back to the channels"),
     ("F1", "this list of keys"),
-    ("F2", "help: commands and how things work"),
     ("Ctrl+K", "the command palette: find a command by name and run it"),
     ("Ctrl+R", "reload the open channel or thread"),
     ("Ctrl+O", "load older messages"),
@@ -702,72 +700,6 @@ fn draw_keys(f: &mut Frame, body: Rect) {
     }
     f.render_widget(Paragraph::new(lines).block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(crate::theme::get().accent))), area);
 }
-
-pub const HELP: &[&str] = &[
-    "Channels list the top-level messages only; replies live in their thread (Enter, a click or `r` opens it, and reads it;",
-    "`r` also puts the cursor in its composer, so the reply is written into the thread the message belongs to).",
-    "A message with replies shows how many, when the last one was, and `● N new` for replies since you last opened it.",
-    "Esc returns you to the same place.",
-    "In a thread, its root is a one-line header pinned to the top of the pane (the number, time and author, then the first",
-    "line of what it says, cut with `…` if there is more); it stays on screen while the replies scroll under it, indented two",
-    "columns, so the pane reads as a thread.",
-    "With a message row selected, Right opens its thread (on a message with no replies there is nothing to open) and Left leaves",
-    "the thread for the timeline it came from, landing the cursor on that message; Esc leaves the thread too, back where you were.",
-    "",
-    "Commands run from the Ctrl+K command palette (N is the message number shown as #N):",
-    "  r N text    reply to message N         t N    open the thread of message N",
-    "  c           back to the channel         copy N    copy message N",
-    "  more        load older messages         refresh   reload now",
-    "  help        this screen                 q    quit",
-    "  edit N      edit your message N         delete N   delete your message N (asks first)",
-    "  whois NAME  their profile               dm NAME   start (or open) a DM",
-    "  agents      your local agents           agents create   make a new one",
-    "  invite NAME    add them to this channel (or the group DM you are in)",
-    "  search text    search                   new [private] name [about]   create a channel",
-    "  join NAME   join (or open) a channel    leave   leave this channel (asks first, y confirms)",
-    "  plugins     what is loaded, and the commands plugins added",
-    "  update      how to upgrade this copy (brew, cargo or the release page)",
-    "A newer release shows up in the status line (BUZZR_NO_UPDATE_CHECK=1 turns the once-a-day check off).",
-    "  read        mark this channel read      read all   mark every channel read",
-    "  archive     archive this channel (`x` in the list): it leaves the list, and Ctrl+F finds it again",
-    "An archived channel is still loaded and still counts unread; only the list hides it. Enter on its search result brings it back.",
-    "Search (Ctrl+F) finds channel names, people and every message. A channel row says what it is for, how many people",
-    "are in it and whether you are one of them, and Enter opens it — a channel you are not in opens read-only, with a",
-    "Join button in place of the composer, and Enter there joins it. The `join` command joins (or opens) a channel by name,",
-    "and `leave` takes you out of the open channel (it asks first; `y` confirms).",
-    "Ctrl+K opens the command palette: type to narrow the commands to the ones whose name starts with what you typed, the",
-    "arrows move the highlight, and Enter runs the one on the cursor. A command that takes an argument asks for it first —",
-    "type it and press Enter (or Enter again, for the ones where the argument is optional). A whole line can be typed at once",
-    "instead — `dm @Alice` runs in one step, no argument step. The list holds the commands",
-    "plugins added too, and Esc goes back out of the argument step and then closes the palette.",
-    "Unread survives a restart: it comes from the last-read position per channel and per thread in",
-    "~/.config/buzzr/read-state.json, and a \"new messages\" line marks where new messages start.",
-    "A person is found by the name in their profile — looked up in the relay's directory when these channels have never shown it —",
-    "or by their npub (hex or npub1…): the `dm` and `whois` commands take either, with or without a leading `@`.",
-    "Mentioning `@name` someone who is not in the channel asks first: y invites them and sends, n sends without inviting,",
-    "Esc keeps the message in the input. The `invite` command does the same without a message.",
-    "Others see \"typing…\" while you write (start with --no-typing to turn that off).",
-    "`a` opens the reaction picker on the selected message: pick an emoji from the list, or type a name to search it (or an",
-    "emoji the list does not have). Enter sends the emoji on the cursor line, Esc closes. The picker opens on your own reaction,",
-    "and its first row takes it back — so `a` then Enter changes nothing, and Enter on that row removes yours.",
-    "Enter sends. Alt+Enter and Ctrl+J add a line in any terminal; the footer names the one that works here.",
-    "Shift+Enter adds a line only where the terminal reports it: kitty, foot, WezTerm, Ghostty, iTerm2.",
-    "",
-    "`agents` shows the local agents this copy made, with the identity each one speaks as and the folder it works in.",
-    "`agents create` (or the “new agent…” row in that list) asks for a name and then for what the agent should do, and",
-    "makes it: a key of its own, a folder of its own, and a record in ~/.config/buzzr/agents.json (mode 600 — it holds",
-    "the agent's key, so anyone who can read that file can act as the agent). The harness it is made for is a local Claude",
-    "Code driven over ACP (`claude-agent-acp`). It is published to the relay first — the agent's own profile, signed with the",
-    "agent's key and carrying your attestation, and your listing of it — so other Buzz clients show it as your agent. A relay",
-    "that will not take it means no agent is made at all, and the flow says why.",
-    "",
-    "New messages, edits, deletions, reactions and typing indicators arrive live; there is no polling.",
-    "Links: clicking one copies its URL to your clipboard (your terminal must allow OSC 52; in tmux:",
-    "  set -g set-clipboard on). `c` copies a whole message the same way.",
-    "@name in a message mentions that member of the channel.",
-    "",
-    "Press Esc, Enter or F2 to close.",
-];
 
 /// The reaction picker (`a` on a selected message): a query line, then the emoji whose name matches, with the first row
 /// taking your reaction back. Enter sends the row under the cursor, Esc closes. It is drawn over the message pane, so the
@@ -954,16 +886,6 @@ fn draw_whois(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(lines).block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(crate::theme::get().accent)).title(title)), r);
 }
 
-fn draw_help(f: &mut Frame, area: Rect) {
-    let w = 100.min(area.width.saturating_sub(4));
-    let h = (HELP.len() as u16 + 4).min(area.height);
-    let r = Rect::new(area.x + (area.width - w) / 2, area.y + (area.height - h) / 2, w, h);
-    clear_popup(f, r);
-    let mut lines = vec![Line::from(Span::styled("Help", Style::default().add_modifier(Modifier::BOLD))), Line::default()];
-    lines.extend(HELP.iter().map(|l| Line::raw(*l)));
-    f.render_widget(Paragraph::new(lines).block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(crate::theme::get().accent))), r);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1071,7 +993,7 @@ mod tests {
         assert!(s.contains("1 reply · last"), "reply count\n{s}");
         assert!(!s.contains("a reply") && !s.contains("\nreply"), "the reply itself is not listed\n{s}");
         assert!(s.contains("● live"), "connection state\n{s}");
-        assert!(s.contains("Open thread") && s.contains("Switch pane"), "footer hints\n{s}");
+        assert!(s.contains("Open thread") && s.contains("Commands"), "footer hints\n{s}");
         assert!(s.contains("Mark unread"), "the message pane advertises the unread key\n{s}");
         assert!(!s.contains("**"), "markdown is rendered, not shown");
     }
@@ -1126,7 +1048,7 @@ mod tests {
         term.draw(|f| draw(f, &mut app)).unwrap();
         let s = screen(&term).join("\n");
         assert!(s.contains("React"), "the message pane advertises the reaction key\n{s}");
-        assert!(s.contains("Switch pane") && s.contains("Delete"), "and the key does not push the navigation hints out\n{s}");
+        assert!(s.contains("Commands") && s.contains("Delete"), "and the key does not push the other hints out\n{s}");
 
         app.handle(AppEvent::Key(ratatui::crossterm::event::KeyEvent::new(ratatui::crossterm::event::KeyCode::Char('a'), ratatui::crossterm::event::KeyModifiers::NONE)));
         term.draw(|f| draw(f, &mut app)).unwrap();
@@ -1330,10 +1252,10 @@ mod tests {
         let on_bg = |x: u16, y: u16| (x > 0 && unicode_width::UnicodeWidthStr::width(buf[(x - 1, y)].symbol()) == 2) || buf[(x, y)].bg == bg || buf[(x, y)].bg == th.sel_bg || buf[(x, y)].bg == th.code_bg;
         let bad: Vec<_> = (0..24u16).flat_map(|y| (0..100u16).map(move |x| (x, y))).filter(|&(x, y)| !on_bg(x, y)).map(|(x, y)| (x, y, buf[(x, y)].symbol().to_owned(), buf[(x, y)].bg)).take(8).collect();
         assert!(bad.is_empty(), "cells left to the terminal background: {bad:?}");
-        app.overlay = Overlay::Help;
+        app.overlay = Overlay::Keys;
         term.draw(|f| draw(f, &mut app)).unwrap();
         let buf = term.backend().buffer();
-        assert_eq!(buf[(50, 12)].bg, popup, "the help popup is not transparent");
+        assert_eq!(buf[(50, 12)].bg, popup, "the keys popup is not transparent");
     }
 
     #[test]
@@ -1356,10 +1278,6 @@ mod tests {
         app.overlay = Overlay::Keys;
         term.draw(|f| draw(f, &mut app)).unwrap();
         assert!(screen(&term).join("\n").contains("Keys  (Esc closes)"));
-        app.overlay = Overlay::Help;
-        term.draw(|f| draw(f, &mut app)).unwrap();
-        assert!(screen(&term).join("\n").contains("r N text"), "the help screen lists the commands");
-        assert!(screen(&term).join("\n").contains("update"), "the help screen lists update");
         app.overlay = Overlay::None;
         app.typing.insert(("c1".into(), None, "bob".into()), std::time::Instant::now());
         term.draw(|f| draw(f, &mut app)).unwrap();
@@ -1411,7 +1329,7 @@ mod tests {
         app.handle(AppEvent::Key(ratatui::crossterm::event::KeyEvent::new(ratatui::crossterm::event::KeyCode::End, ratatui::crossterm::event::KeyModifiers::NONE)));
         term.draw(|f| draw(f, &mut app)).unwrap();
         let s = screen(&term).join("\n");
-        assert!(s.contains("Edit") && s.contains("Delete") && s.contains("Search"), "footer offers e and d on your own message\n{s}");
+        assert!(s.contains("Edit") && s.contains("Delete") && s.contains("Commands"), "footer offers e and d on your own message\n{s}");
         app.handle(AppEvent::Key(ratatui::crossterm::event::KeyEvent::new(ratatui::crossterm::event::KeyCode::Char('d'), ratatui::crossterm::event::KeyModifiers::NONE)));
         term.draw(|f| draw(f, &mut app)).unwrap();
         assert!(screen(&term).join("\n").contains("Delete this message? press y"));
@@ -1647,17 +1565,17 @@ mod tests {
         term.draw(|f| draw(f, &mut app)).unwrap();
         let s = screen(&term).join("\n");
         assert!(s.contains("Commands · Enter runs · Esc closes"), "the palette opens with a title that names the keys\n{s}");
-        assert!(s.contains("help") && s.contains("the commands and how things work"), "and lists a command with what it does\n{s}");
+        assert!(!s.contains("the commands and how things work"), "the help screen is gone from the list\n{s}");
         assert!(s.contains("archive") && s.contains("archive this channel"), "the list is scrolled from the first row\n{s}");
         assert!(s.contains("Move") && s.contains("Run") && s.contains("Close"), "the footer follows the palette\n{s}");
 
         // typing narrows the list to the commands that still match
-        app.handle(key('h'));
-        app.handle(key('e'));
+        app.handle(key('a'));
+        app.handle(key('r'));
         term.draw(|f| draw(f, &mut app)).unwrap();
         let s = screen(&term).join("\n");
-        assert!(s.contains("help") && s.contains("the commands and how things work"), "the command that still matches\n{s}");
-        assert!(!s.contains("search") && !s.contains("load older messages"), "the ones that do not drop out\n{s}");
+        assert!(s.contains("archive") && s.contains("archive this channel"), "the command that still matches\n{s}");
+        assert!(!s.contains("load older messages") && !s.contains("quit buzzr"), "the ones that do not drop out\n{s}");
     }
 
     #[test]
