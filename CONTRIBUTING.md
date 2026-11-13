@@ -16,7 +16,7 @@ as much as to coding agents.
   keys or relay addresses, not even in tests (use `chat.example.com` and obviously fake keys).
 - **Message text is hostile:** anything from the network that reaches the screen goes through the Markdown renderer, which strips
   control characters.
-- **Changing a key, command or overlay:** update the on-screen help (`KEYS`, `HELP`, footer in `ui.rs`) and the README in the same change.
+- **Changing a key, command or overlay:** update the on-screen help (`KEYS`, footer in `ui.rs`) and the README in the same change.
 - **Commits and pull requests:** small, imperative subject line; say what changed and why. See "Opening a pull request" below.
 - **Security issues:** please do not open a public issue; see [`SECURITY.md`](SECURITY.md).
 

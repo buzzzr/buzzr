@@ -18,7 +18,7 @@ pub struct Theme {
     pub bg: Option<Color>,
     /// Default text colour. `None` leaves the terminal's own foreground alone.
     pub fg: Option<Color>,
-    /// Background of popups (help, search, panels). Falls back to `bg`.
+    /// Background of popups (search, panels). Falls back to `bg`.
     pub popup_bg: Option<Color>,
     /// Secondary text: message numbers and times, hints, the status line, the footer descriptions.
     pub dim: Color,

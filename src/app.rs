@@ -56,7 +56,6 @@ pub enum View {
 pub enum Overlay {
     None,
     Keys,
-    Help,
     Search,
     /// The `Ctrl+K` command palette (`App::palette`).
     Palette,
@@ -162,7 +161,6 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("delete", "N", "delete your own message N (asks first)"),
     ("dm", "NAME", "open your DM with NAME, or start one"),
     ("edit", "N", "edit your own message N"),
-    ("help", "", "the commands and how things work"),
     ("invite", "NAME", "add someone to this channel"),
     ("join", "NAME", "join (or open) a channel"),
     ("leave", "", "leave this channel (asks first)"),
@@ -2100,10 +2098,6 @@ impl App {
             }
             KeyCode::F(1) => {
                 self.overlay = if self.overlay == Overlay::Keys { Overlay::None } else { Overlay::Keys };
-                return Vec::new();
-            }
-            KeyCode::F(2) => {
-                self.overlay = if self.overlay == Overlay::Help { Overlay::None } else { Overlay::Help };
                 return Vec::new();
             }
             _ => {}
