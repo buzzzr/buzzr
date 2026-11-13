@@ -78,16 +78,13 @@ struct Wire {
 impl Wire {
     /// Start `program` in `cwd`. `missing` is the message when it cannot be started at all.
     fn spawn(program: &str, cwd: &Path, missing: &str) -> Result<Wire, String> {
-        let mut child = Command::new(program)
-            .current_dir(cwd)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|e| match e.kind() {
-                std::io::ErrorKind::NotFound => missing.to_owned(),
-                _ => format!("could not start {program}: {e}"),
-            })?;
+        let mut cmd = Command::new(program);
+        cmd.current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+        // Through `spawn::`: the harness may be a program that was written to disk as we start it (see `crate::spawn`).
+        let mut child = crate::spawn::start(|| cmd.spawn()).map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => missing.to_owned(),
+            _ => format!("could not start {program}: {e}"),
+        })?;
         let stdin = child.stdin.take().expect("stdin was piped");
         let stdout = child.stdout.take().expect("stdout was piped");
         // Read on a thread: a harness that never answers would otherwise block a read forever and the timeout could

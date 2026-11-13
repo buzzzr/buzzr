@@ -327,7 +327,8 @@ impl Runtime {
             cmd.env("BUZZR_CONFIG_DIR", dir);
         }
         cmd.env("TMPDIR", std::env::temp_dir());
-        let mut child = cmd.spawn().map_err(|e| format!("could not start {}: {e}", entry.display()))?;
+        // Through `spawn::`: a reload writes the new entry just before this starts it (see `crate::spawn`).
+        let mut child = crate::spawn::start(|| cmd.spawn()).map_err(|e| format!("could not start {}: {e}", entry.display()))?;
         let stdout = child.stdout.take().ok_or("no stdout")?;
         let stdin = child.stdin.take().ok_or("no stdin")?;
         let (line_tx, line_rx) = mpsc::unbounded_channel::<String>();

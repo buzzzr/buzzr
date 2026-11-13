@@ -97,6 +97,10 @@ Test the first-run questions in a real terminal with an empty `BUZZR_CONFIG_DIR`
 - **Plugin JSON is camelCase** (`apiVersion`, `messageMarks`, `channelMarks`); the Rust structs `Manifest` and `Contributions` carry
   `#[serde(rename_all = "camelCase")]`. A new field without it deserialises to its default and is silently ignored, which looks like
   a plugin that "did nothing".
+- **Starting a program that was just written:** the kernel refuses to `exec` a file that is still open for writing (`ETXTBSY`, "Text
+  file busy"). A plugin reloaded right after an edit hits it, and so does a test that writes a fake program and runs it while another
+  test forks a child — the child inherits the write handle until its own `exec`. Start such a program through `spawn::spawn`
+  (`src/spawn.rs`), which tries again for a few milliseconds; a plain `Command::spawn` flakes instead.
 
 ## Known gaps (good next tasks)
 

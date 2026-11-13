@@ -19,6 +19,12 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
   asks for its argument, and a leading `@` on a name is how somebody is addressed rather than part of the name (`join`, `new` and the
   other non-person arguments are unchanged).
 
+### Fixed
+
+- A program that buzzr starts right after it was written to disk is no longer refused with `Text file busy`: the start is
+  tried again for a moment. This is what a plugin reloaded straight after an edit ran into, and what a harness being
+  updated underneath `agents create` can run into.
+
 ## [0.2.0-rc.3] - 2026-11-12
 
 ### Added
