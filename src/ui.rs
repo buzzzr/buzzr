@@ -603,6 +603,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
             }
         }
     }
+    spans.extend(key_hint("^K", "Commands"));
     spans.extend(key_hint("tab", "Switch pane"));
     spans.extend(key_hint("^F", "Search"));
     spans.extend(key_hint("F1", "Keys"));
@@ -996,7 +997,7 @@ mod tests {
         assert!(s.contains("1 reply · last"), "reply count\n{s}");
         assert!(!s.contains("a reply") && !s.contains("\nreply"), "the reply itself is not listed\n{s}");
         assert!(s.contains("● live"), "connection state\n{s}");
-        assert!(s.contains("Open thread") && s.contains("Switch pane"), "footer hints\n{s}");
+        assert!(s.contains("Open thread") && s.contains("Commands"), "footer hints\n{s}");
         assert!(s.contains("Mark unread"), "the message pane advertises the unread key\n{s}");
         assert!(!s.contains("**"), "markdown is rendered, not shown");
     }
@@ -1051,7 +1052,7 @@ mod tests {
         term.draw(|f| draw(f, &mut app)).unwrap();
         let s = screen(&term).join("\n");
         assert!(s.contains("React"), "the message pane advertises the reaction key\n{s}");
-        assert!(s.contains("Switch pane") && s.contains("Delete"), "and the key does not push the navigation hints out\n{s}");
+        assert!(s.contains("Commands") && s.contains("Delete"), "and the key does not push the other hints out\n{s}");
 
         app.handle(AppEvent::Key(ratatui::crossterm::event::KeyEvent::new(ratatui::crossterm::event::KeyCode::Char('a'), ratatui::crossterm::event::KeyModifiers::NONE)));
         term.draw(|f| draw(f, &mut app)).unwrap();
@@ -1332,7 +1333,7 @@ mod tests {
         app.handle(AppEvent::Key(ratatui::crossterm::event::KeyEvent::new(ratatui::crossterm::event::KeyCode::End, ratatui::crossterm::event::KeyModifiers::NONE)));
         term.draw(|f| draw(f, &mut app)).unwrap();
         let s = screen(&term).join("\n");
-        assert!(s.contains("Edit") && s.contains("Delete") && s.contains("Search"), "footer offers e and d on your own message\n{s}");
+        assert!(s.contains("Edit") && s.contains("Delete") && s.contains("Commands"), "footer offers e and d on your own message\n{s}");
         app.handle(AppEvent::Key(ratatui::crossterm::event::KeyEvent::new(ratatui::crossterm::event::KeyCode::Char('d'), ratatui::crossterm::event::KeyModifiers::NONE)));
         term.draw(|f| draw(f, &mut app)).unwrap();
         assert!(screen(&term).join("\n").contains("Delete this message? press y"));
