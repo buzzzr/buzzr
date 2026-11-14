@@ -5,6 +5,12 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
 
 ## [Unreleased]
 
+### Added
+
+- **`buzzr --demo`**: try the client with a community built into the binary — channels, a DM, threads, reactions, unread
+  badges and search — with no relay, no key and nothing written to disk. The header reads `◆ demo`, the composer echoes
+  what you write the way a relay would, and the one feature that needs a relay (local agents) says a demo has none.
+
 ### Changed
 
 - `r` on a message opens its thread — the first message pinned at the top of the pane — and puts the cursor in the

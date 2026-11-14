@@ -269,6 +269,8 @@ pub enum Conn {
     Connecting,
     Live,
     Down(String),
+    /// A `--demo` run: everything is answered on this machine, and there is no relay to connect to (see `demo`).
+    Demo,
 }
 
 /// Work for the caller to do.
@@ -756,6 +758,12 @@ impl App {
 
     fn flash(&mut self, text: impl Into<String>) {
         self.flash = Some((text.into(), Instant::now()));
+    }
+
+    /// Say something in the status bar for the next few seconds. The loop uses it to greet a run that has something to
+    /// explain up front (see `--demo`); a relay's NOTICE lands here too, by way of a flash.
+    pub fn notice(&mut self, text: impl Into<String>) {
+        self.flash(text);
     }
 
     /// The one line the status bar keeps up while a newer release is known, or nothing. The `update` command then says how to
