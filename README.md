@@ -29,11 +29,11 @@
 - **Built for the terminal.** Everything is a key or a click, it works over SSH and inside tmux, and it starts instantly.
 - **Careful with your key.** The private key is sealed at rest with scrypt and AES-256-GCM by default, never appears on a command
   line, and never reaches the logs or the screen.
-- **Small and boring on purpose.** One crate and one binary, nothing else to install. Extensions run as separate processes, so the core stays small.
+- **Small and boring on purpose.** One crate and one binary, nothing else to install. Extensions run as separate processes by default, so the core stays small.
 
 ## Features
 
-- **Channels and DMs** with unread counts, in sections: Solo chats, Channels (private and open) and DMs. DMs are labelled with the other
+- **Channels and DMs** with unread counts, in sections: Solo, Channels (private and open) and DMs. DMs are labelled with the other
   person; start one with the `dm` command, or from search. An open channel is marked `#` and a private one `*`.
 - **Archive a channel.** `x` takes the channel off the list without leaving it (leaving changes your membership on the relay);
   Ctrl+F finds it again and Enter brings it back. Its unread is kept, but it no longer counts in the status line.
@@ -71,12 +71,14 @@
   show it as yours. The harness it is made for is a local Claude Code driven over ACP (`claude-agent-acp`, as the Buzz app does). The harness is
   asked what it offers, and the relay asked to take the agent, before anything is written: a harness that will not answer, like an agent the
   relay will not take, stops the flow and makes nothing, and says why. The agent then **answers for itself**: buzzr runs its harness — a local
-  Claude Code, driven over ACP, as the agent, with the agent's own key — for every message that names it, and posts what the harness answered
+  Claude Code, driven over ACP, as the agent, with the agent's own key — for every message you send that names it, and posts what the harness answered
   back into the channel it was mentioned in. A mention in a thread is answered with the thread in hand: the turn's prompt carries the
   thread's earlier messages — the root and the replies before it, oldest first, the newest twelve — the same window the Buzz app gives
   its agents, so the agent reads the conversation it is joining rather than one message out of it. A mention names an agent *in a
   channel*, so add the agent to the channel first (`invite <npub>`,
-  the npub the `agents` list shows) — then anything that mentions it, from any Buzz client, gets an answer. The list also offers to delete an
+  the npub the `agents` list shows) — then anything **you** mention it in gets an answer, from any Buzz client, and a mention from anybody else is
+  ignored. The list also offers to **edit** an agent (Enter on it opens a menu, where its name and instructions can be changed — a new name is
+  published to the relay again) and to delete an
   agent: it takes the agent off the relay — its own profile and your listing of it — and then deletes its key and record, leaving the folder it
   worked in alone. The relay is asked first, so a relay that refuses it deletes nothing.
 - **Plugins.** Add your own commands, status items, badges, a pane under the channel list and panels — from any language, as a runtime-loaded plugin, or as a compiled-in Rust plugin in buzzr's own tree. See [PLUGIN.md](PLUGIN.md).
@@ -235,13 +237,14 @@ The full behaviour, for when the feature list above is not enough.
   mention never asks; a DM is a conversation rather than a room to join, so it never asks either; and nothing is offered before the
   channel's member list has loaded. Only names the profiles have given us are recognised this way: a name nobody we have met goes
   through `invite`, which looks it up in the relay's directory.
-- **Your typing shows:** others see `<your name> is typing…` while you write (once every three seconds; not for commands or
-  edits). `--no-typing` turns it off.
+- **Your typing shows:** others see `<your name> is typing…` while you write (once every three seconds, and never for an
+  edit). `--no-typing` turns it off.
 - **Help on screen:** F1 lists the keys, and Ctrl+K opens the command palette. Esc closes the command palette first, then a panel, then cancels a reply,
   then leaves a thread; after that it steps back a pane at a time — from the input to the message list, and from the message list
   to the channel list.
-- **Plugins:** a plugin is a separate process (in any language) that adds commands, a status item, header badges, per-channel and
-  per-message marks, a pane under the channel list, and panels; buzzr hot-reloads it when its files change. A plugin is one folder
+- **Plugins:** a plugin adds commands, a status item, header badges, per-channel and per-message marks, a pane under the channel list, and
+  panels. It is either **runtime-loaded** — a separate process, in any language, which buzzr hot-reloads when its files change — or
+  **compiled-in**: a Rust plugin in buzzr's own tree, driven in-process. A runtime-loaded plugin is one folder
   with an executable entry file and **no manifest**: the folder name is its id, and it declares its own name, permissions and
   heartbeat in its code, when it is ready. A heartbeat (`tickMs`) refreshes something time-based — that is how the clock example
   keeps the time. Put the folder in `~/.config/buzzr/plugins` (or point `--plugins-dir`/`BUZZR_PLUGINS_DIR` elsewhere). The `plugins`
@@ -318,8 +321,8 @@ expects it to come back live.
 
 ## Status and limitations
 
-buzzr is young (0.1) and under active development. It works against real Buzz relays, but expect rough edges. Not done yet:
-adding reactions, attachments and images (shown as links only).
+buzzr is young (0.2) and under active development. It works against real Buzz relays, but expect rough edges. Not done yet:
+attachments and images (shown as links only).
 
 If something is missing that you need, please [open an issue](https://github.com/buzzzr/buzzr/issues).
 
