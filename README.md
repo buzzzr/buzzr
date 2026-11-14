@@ -22,6 +22,11 @@
   <b>Install:</b> <code>curl -fsSL https://raw.githubusercontent.com/buzzzr/buzzr/main/install.sh | sh</code>
 </p>
 
+<p align="center">
+  <b>See it without a server:</b> <code>buzzr --demo</code> runs a whole community built into the binary —
+  channels, a DM, a thread with replies, reactions and unread — with no relay, no key and nothing written to disk.
+</p>
+
 ## Why buzzr
 
 - **It talks to the relay directly.** No bridge, no helper daemon, no polling loop: buzzr opens a WebSocket and the screen updates the
