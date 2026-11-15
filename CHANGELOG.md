@@ -5,11 +5,14 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-15
+
 ### Added
 
 - **`buzzr --demo`**: try the client with a community built into the binary — channels, a DM, threads, reactions, unread
   badges and search — with no relay, no key and nothing written to disk. The header reads `◆ demo`, the composer echoes
   what you write the way a relay would, and the one feature that needs a relay (local agents) says a demo has none.
+- **Edit a local agent**: `agents` has an `edit` row per agent to change its name and instructions. A new name is republished to the relay (profile and listing) before the record changes. Plugins get `update_agent`/`updated`, and agents in the list carry `instructions`.
 
 ### Changed
 
@@ -17,6 +20,7 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
   composer, so the reply is written with the thread on screen; the box already belongs to the thread, so there is no
   separate reply to aim and cancel. Inside a thread `r` just takes the composer. Esc from the composer steps back to the
   thread's rows, and Esc again leaves the thread.
+- The `agents` list opens a menu on Enter: edit the agent, delete it, or go back, and `delete…` there asks to confirm before the agent is taken off the relay.
 
 ## [0.2.0-rc.4] - 2026-11-13
 
@@ -24,10 +28,6 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
 
 - A local agent answers **only its owner**: a mention from anyone else is ignored. Earlier thread messages are marked as untrusted in the prompt.
 - Every event is checked for a valid id and signature when it comes in; a forged or altered event is dropped.
-
-### Added (unreleased)
-
-- **Edit a local agent**: `agents` has an `edit` row per agent to change its name and instructions. A new name is republished to the relay (profile and listing) before the record changes. Plugins get `update_agent`/`updated`, and agents in the list carry `instructions`.
 
 ### Changed
 
@@ -37,7 +37,7 @@ versions follow [Semantic Versioning](https://semver.org/) (before 1.0, a minor 
 
 ### Added
 
-- An agent can be **deleted** from the `agents` list: Enter on the agent opens its menu (edit, delete, back), and `delete…` there asks to confirm, then takes the agent off the relay — its own
+- An agent can be **deleted** from the `agents` list: a `delete <name>…` row asks to confirm, then takes the agent off the relay — its own
   profile (signed with its own key) and your listing of it, both by NIP-09 — and deletes its key and record from `agents.json`, leaving the
   folder it worked in alone. The relay is asked first, so a relay that refuses it deletes nothing, and the agent stays listed and running.
   Plugins reach it through the new `delete_agent` binding (needs `agents:write`), answered with `deleted`.
@@ -248,7 +248,8 @@ First public version.
 - A notice in the UI when a newer version is published, with the upgrade command.
 - Release builds for Linux (musl, x86_64 and aarch64) and macOS (Apple silicon and Intel), published with `SHA256SUMS`.
 
-[Unreleased]: https://github.com/buzzzr/buzzr/compare/v0.2.0-rc.4...HEAD
+[Unreleased]: https://github.com/buzzzr/buzzr/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/buzzzr/buzzr/compare/v0.2.0-rc.4...v0.2.0
 [0.2.0-rc.4]: https://github.com/buzzzr/buzzr/compare/v0.2.0-rc.3...v0.2.0-rc.4
 [0.2.0-rc.3]: https://github.com/buzzzr/buzzr/compare/v0.2.0-rc.2...v0.2.0-rc.3
 [0.2.0-rc.2]: https://github.com/buzzzr/buzzr/compare/v0.2.0-rc.1...v0.2.0-rc.2
