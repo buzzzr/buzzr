@@ -511,6 +511,7 @@ impl App {
             Conn::Live => "live".to_owned(),
             Conn::Connecting => "connecting".to_owned(),
             Conn::Down(why) => format!("offline: {why}"),
+            Conn::Demo => "demo".to_owned(),
         };
         let mut messages: Vec<contrib::MessageView> = Vec::new();
         if let (Some(store), Some((_, layout))) = (self.store(), self.layout.as_ref()) {

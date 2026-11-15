@@ -12,6 +12,7 @@ pub mod clock;
 pub mod app;
 pub mod config;
 pub mod contrib;
+pub mod demo;
 pub mod editor;
 pub mod emoji;
 pub mod harness;

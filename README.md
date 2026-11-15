@@ -22,6 +22,11 @@
   <b>Install:</b> <code>curl -fsSL https://raw.githubusercontent.com/buzzzr/buzzr/main/install.sh | sh</code>
 </p>
 
+<p align="center">
+  <b>See it without a server:</b> <code>buzzr --demo</code> runs a whole community built into the binary —
+  channels, a DM, a thread with replies, reactions and unread — with no relay, no key and nothing written to disk.
+</p>
+
 ## Why buzzr
 
 - **It talks to the relay directly.** No bridge, no helper daemon, no polling loop: buzzr opens a WebSocket and the screen updates the
@@ -82,6 +87,8 @@
 - **Plugins.** Add your own commands, status items, badges, a pane under the channel list and panels — from any language, as a runtime-loaded plugin, or as a compiled-in Rust plugin in buzzr's own tree. See [PLUGIN.md](PLUGIN.md).
 - **Themes.** The default `buzz-dark` uses the dark palette of the Buzz desktop app. `BUZZR_THEME=dark` keeps your terminal's own background, `BUZZR_THEME=buzz-light` is the desktop app's light palette, and `BUZZR_THEME=light` is for a light terminal. `BUZZR_THEME=high-contrast` is black-on-white at WCAG AAA (7:1), and `NO_COLOR` or `TERM=dumb` turns colour off entirely.
 - **Read-only mode** (`--read-only`) for identities you should not speak for.
+- **Try it with no setup.** `buzzr --demo` runs a community built into the binary — channels, a DM, messages, reactions and unread —
+  with no relay, no key and nothing written to disk, so the client can be explored before there is anywhere to point it.
 
 <p align="center">
   <img src="docs/screenshots/thread.png" alt="A thread open next to the channel list, in buzz-dark" width="900">
@@ -288,7 +295,8 @@ browser as well.
 
 ## Options
 
-`--relay URL` (default `$BUZZ_RELAY_URL`, else the saved relay), `--setup`, `--forget-key`, `--read-only` (never send), `--no-typing`
+`--relay URL` (default `$BUZZ_RELAY_URL`, else the saved relay), `--setup`, `--forget-key`, `--read-only` (never send), `--demo`
+(explore a community built into the binary: no relay, no key, nothing written), `--no-typing`
 (do not announce typing), `--no-mouse` (leave the mouse to the terminal), `--no-plugins` (start without plugins), `--plugins-dir DIR`
 (where plugins live), `--selftest` (below). Environment: `BUZZR_TZ` for the display
 time zone (default: the computer's), `BUZZR_THEME` (`buzz-dark`, `buzz-light`, `high-contrast`, `dark`, `light`), `BUZZR_CONFIG_DIR`, `BUZZR_PLUGINS_DIR`,

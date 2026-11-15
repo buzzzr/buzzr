@@ -119,6 +119,7 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         Conn::Live => ("●", "live".to_owned(), crate::theme::get().ok),
         Conn::Connecting => ("◌", "connecting…".to_owned(), crate::theme::get().warn),
         Conn::Down(why) => ("✕", format!("offline, retrying ({})", why.chars().take(40).collect::<String>()), crate::theme::get().err),
+        Conn::Demo => ("◆", "demo".to_owned(), crate::theme::get().accent),
     };
     let mut right = vec![];
     let badges = app.plugins.header();
